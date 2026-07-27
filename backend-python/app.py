@@ -18,6 +18,7 @@ import json
 import time
 import random
 from datetime import datetime, timezone
+from typing import List, Dict, Optional, Any
 from flask import Flask, request, jsonify, make_response, g
 
 logger = logging.getLogger(__name__)
@@ -69,16 +70,274 @@ except Exception as exc:  # pragma: no cover - import safety
         primary = derive_error_hash(error_text, error_detail)
         return [primary] if primary else []
 
-# ── Stack trace parsing ────────────────────────────────────────────────────────
-try:
-    from stacktrace_parser import parse_and_enhance_stacktrace
-    STACKTRACE_PARSER_AVAILABLE = True
-except Exception as exc:
-    print(f"[app] WARNING: stacktrace_parser import failed: {type(exc).__name__}: {exc}")
-    STACKTRACE_PARSER_AVAILABLE = False
-    def parse_and_enhance_stacktrace(error_text, error_detail=None, enhance_with_source=True):
-        """Fallback stub — returns empty parsed structure."""
-        return {"frames": [], "raw_trace": error_detail or error_text or ""}
+# ── Stack trace parsing (embedded below) ──────────────────────────────────────
+# Parser is embedded directly in this file - no separate import needed
+STACKTRACE_PARSER_AVAILABLE = True
+
+# Stack trace parser — extracts file paths, line numbers, and source code context
+class StackFrame:
+    """Represents a single frame in a stack trace with source code context."""
+    
+    def __init__(
+        self,
+        file_path: str,
+        line_number: int,
+        function_name: Optional[str] = None,
+        code_line: Optional[str] = None,
+        column: Optional[int] = None,
+    ):
+        self.file_path = file_path
+        self.line_number = line_number
+        self.function_name = function_name
+        self.code_line = code_line
+        self.column = column
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        return {
+            "file_path": self.file_path,
+            "line_number": self.line_number,
+            "function_name": self.function_name,
+            "code_line": self.code_line,
+            "column": self.column,
+        }
+
+
+class ParsedStackTrace:
+    """Container for parsed stack trace with structured frames."""
+    
+    def __init__(self, frames: List[StackFrame], raw_trace: str):
+        self.frames = frames
+        self.raw_trace = raw_trace
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-serializable dict."""
+        return {
+            "frames": [f.to_dict() for f in self.frames],
+            "raw_trace": self.raw_trace,
+        }
+
+
+def parse_python_traceback(traceback_text: str) -> List[StackFrame]:
+    """Parse Python traceback format."""
+    frames = []
+    file_pattern = re.compile(
+        r'^\s*File\s+"([^"]+)",\s+line\s+(\d+)(?:,\s+in\s+(.+))?$',
+        re.MULTILINE
+    )
+    
+    lines = traceback_text.split('\n')
+    i = 0
+    
+    while i < len(lines):
+        line = lines[i]
+        match = file_pattern.match(line)
+        
+        if match:
+            file_path = match.group(1)
+            line_number = int(match.group(2))
+            function_name = match.group(3) if match.group(3) else None
+            
+            code_line = None
+            if i + 1 < len(lines):
+                next_line = lines[i + 1]
+                stripped = next_line.strip()
+                if stripped and not stripped.startswith('File ') and not re.match(r'^[A-Z]\w+Error:', stripped):
+                    code_line = stripped
+                    
+            column = None
+            if i + 2 < len(lines) and '^' in lines[i + 2]:
+                caret_line = lines[i + 2]
+                column = caret_line.index('^') if '^' in caret_line else None
+            
+            frames.append(StackFrame(
+                file_path=file_path,
+                line_number=line_number,
+                function_name=function_name,
+                code_line=code_line,
+                column=column,
+            ))
+        
+        i += 1
+    
+    return frames
+
+
+def parse_javascript_stacktrace(stacktrace_text: str) -> List[StackFrame]:
+    """Parse JavaScript/Node.js V8 stack trace format."""
+    frames = []
+    
+    patterns = [
+        re.compile(r'^\s*at\s+([^\s(]+)\s+\(([^:]+):(\d+):(\d+)\)'),
+        re.compile(r'^\s*at\s+([^:]+):(\d+):(\d+)'),
+        re.compile(r'^\s*at\s+([^:]+):(\d+)'),
+    ]
+    
+    for line in stacktrace_text.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        
+        match = patterns[0].match(line)
+        if match:
+            function_name = match.group(1)
+            file_path = match.group(2)
+            line_number = int(match.group(3))
+            column = int(match.group(4)) if match.lastindex >= 4 else None
+            
+            frames.append(StackFrame(
+                file_path=file_path,
+                line_number=line_number,
+                function_name=function_name,
+                column=column,
+            ))
+            continue
+        
+        match = patterns[1].match(line)
+        if match:
+            file_path = match.group(1)
+            line_number = int(match.group(2))
+            column = int(match.group(3)) if match.lastindex >= 3 else None
+            
+            frames.append(StackFrame(
+                file_path=file_path,
+                line_number=line_number,
+                column=column,
+            ))
+            continue
+        
+        match = patterns[2].match(line)
+        if match:
+            file_path = match.group(1)
+            line_number = int(match.group(2))
+            
+            frames.append(StackFrame(
+                file_path=file_path,
+                line_number=line_number,
+            ))
+    
+    return frames
+
+
+def parse_generic_error(error_text: str) -> List[StackFrame]:
+    """Parse generic error messages that mention file paths and line numbers."""
+    frames = []
+    lines = error_text.split('\n')
+    
+    patterns = [
+        re.compile(r'\(([^,)]+),\s+line\s+(\d+)\)'),
+        re.compile(r'([a-zA-Z0-9_./\\-]+\.[a-zA-Z]{1,5}):(\d+)(?::(\d+))?'),
+        re.compile(r'(?:at\s+)?line\s+(\d+)', re.IGNORECASE),
+    ]
+    
+    for idx, line in enumerate(lines):
+        for pattern in patterns:
+            match = pattern.search(line)
+            if match:
+                groups = match.groups()
+                
+                if len(groups) >= 2 and groups[0] and groups[1]:
+                    file_path = groups[0]
+                    line_number = int(groups[1])
+                    column = int(groups[2]) if len(groups) > 2 and groups[2] else None
+                    
+                    code_line = None
+                    if idx + 1 < len(lines):
+                        next_line = lines[idx + 1].strip()
+                        if next_line and not re.match(r'^(File|at|Traceback)', next_line):
+                            code_line = next_line
+                    
+                    if idx + 2 < len(lines) and lines[idx + 2].strip().startswith('^'):
+                        if idx + 1 < len(lines):
+                            code_line = lines[idx + 1].strip()
+                    
+                    frames.append(StackFrame(
+                        file_path=file_path,
+                        line_number=line_number,
+                        code_line=code_line,
+                        column=column,
+                    ))
+                    break
+                elif len(groups) == 1 and groups[0]:
+                    line_number = int(groups[0])
+                    code_line = None
+                    if idx + 1 < len(lines):
+                        next_line = lines[idx + 1].strip()
+                        if next_line and not re.match(r'^(File|at|Traceback|Error)', next_line):
+                            code_line = next_line
+                    
+                    frames.append(StackFrame(
+                        file_path="<unknown>",
+                        line_number=line_number,
+                        code_line=code_line,
+                    ))
+                    break
+    
+    return frames
+
+
+def parse_stacktrace(error_text: str, error_detail: Optional[str] = None) -> ParsedStackTrace:
+    """Parse stack trace from error text and detail, extracting structured frame information."""
+    source = (error_detail or error_text or '').strip()
+    
+    if not source:
+        return ParsedStackTrace(frames=[], raw_trace='')
+    
+    frames = []
+    
+    if 'Traceback' in source or 'File "' in source:
+        frames = parse_python_traceback(source)
+    
+    if not frames and (' at ' in source or 'at Object.' in source):
+        frames = parse_javascript_stacktrace(source)
+    
+    if not frames:
+        frames = parse_generic_error(source)
+    
+    return ParsedStackTrace(frames=frames, raw_trace=source)
+
+
+def enhance_frame_with_source(frame: StackFrame, max_context_lines: int = 3) -> StackFrame:
+    """Attempt to read source code from the file system for a given frame."""
+    import os
+    
+    if frame.code_line:
+        return frame
+    
+    try:
+        file_path = frame.file_path
+        
+        if file_path in ('<unknown>', '<string>', '<stdin>'):
+            return frame
+        
+        if not os.path.isfile(file_path):
+            return frame
+        
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+            
+            if 1 <= frame.line_number <= len(lines):
+                code_line = lines[frame.line_number - 1].rstrip()
+                frame.code_line = code_line
+    
+    except Exception as e:
+        print(f"[StackTraceParser] Could not read source for {frame.file_path}:{frame.line_number}: {e}")
+    
+    return frame
+
+
+def parse_and_enhance_stacktrace(
+    error_text: str,
+    error_detail: Optional[str] = None,
+    enhance_with_source: bool = True,
+) -> Dict[str, Any]:
+    """Parse stack trace and optionally enhance with source code context."""
+    parsed = parse_stacktrace(error_text, error_detail)
+    
+    if enhance_with_source:
+        parsed.frames = [enhance_frame_with_source(frame) for frame in parsed.frames]
+    
+    return parsed.to_dict()
 
 # ── Knowledge base functions (DB only, no AI runtime required) ────────────────
 # These are always imported directly — they handle AI runtime failures internally.
