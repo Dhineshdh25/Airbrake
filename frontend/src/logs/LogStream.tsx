@@ -40,14 +40,14 @@ interface ProjectStats {
 const CATEGORIES = ['All', 'Gen AI', 'Computer Vision', 'Traditional Model', 'RAG', 'Analytics'];
 
 const CATEGORY_COLOR: Record<string, string> = {
-  'Gen AI':            '#6366f1',
-  'Computer Vision':   '#10b981',
+  'Gen AI': '#6366f1',
+  'Computer Vision': '#10b981',
   'Traditional Model': '#f59e0b',
-  'RAG':               '#8b5cf6',
-  'Analytics':         '#3b82f6',
+  'RAG': '#8b5cf6',
+  'Analytics': '#3b82f6',
 };
 
-const TILE_PALETTE = ['#6366f1','#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6'];
+const TILE_PALETTE = ['#6366f1', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6'];
 function tileColor(i: number) { return TILE_PALETTE[i % TILE_PALETTE.length]; }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -254,8 +254,12 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
       .catch(() => setLoading(false));
   }, [project.name]);
 
-  const failedLogs = stats?.logs?.filter((r) => !!r.error) ?? [];
-  const successLogs = stats?.logs?.filter((r) => !r.error) ?? [];
+  const failedLogs = (stats?.logs?.filter((r) => !!r.error) ?? []).slice(0, 50);
+  const successLogs = (stats?.logs?.filter((r) => !r.error) ?? []).slice(0, 50);
+
+  // Count totals before slicing
+  const totalFailedLogs = stats?.logs?.filter((r) => !!r.error).length ?? 0;
+  const totalSuccessLogs = stats?.logs?.filter((r) => !r.error).length ?? 0;
 
   // Aggregate token/cost totals if available
   const totalInputTokens = stats?.logs?.reduce((s, r) => s + (r.input_tokens ?? 0), 0) ?? 0;
@@ -351,11 +355,11 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
               <SuccessBar success={stats.success} total={stats.filesProcessed} />
 
               {/* ── Failed files ── */}
-              {failedLogs.length > 0 && (
+              {totalFailedLogs > 0 && (
                 <div style={{ marginBottom: 16 }}>
                   <SectionHeader
-                    title="Failed Files"
-                    count={failedLogs.length}
+                    title={totalFailedLogs > 50 ? `Failed Files (showing 50 of ${totalFailedLogs})` : "Failed Files"}
+                    count={totalFailedLogs}
                     color="#f87171"
                     collapsed={failedCollapsed}
                     onToggle={() => setFailedCollapsed((v) => !v)}
@@ -369,11 +373,11 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
               )}
 
               {/* ── Successful files ── */}
-              {successLogs.length > 0 && (
+              {totalSuccessLogs > 0 && (
                 <div style={{ marginBottom: 8 }}>
                   <SectionHeader
-                    title="Successful Files"
-                    count={successLogs.length}
+                    title={totalSuccessLogs > 50 ? `Successful Files (showing 50 of ${totalSuccessLogs})` : "Successful Files"}
+                    count={totalSuccessLogs}
                     color="#34d399"
                     collapsed={successCollapsed}
                     onToggle={() => setSuccessCollapsed((v) => !v)}
@@ -455,9 +459,9 @@ export function LogStream() {
     const params = activeCategory !== 'All' ? `?category=${encodeURIComponent(activeCategory)}` : '';
     apiFetch(`/api/projects${params}`)
       .then((r) => r.json())
-      .then((data) => { 
-        setProjects(data as Project[]); 
-        setLoading(false); 
+      .then((data) => {
+        setProjects(data as Project[]);
+        setLoading(false);
       })
       .catch(() => setLoading(false));
   }, [activeCategory]);
