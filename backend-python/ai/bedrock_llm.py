@@ -112,7 +112,7 @@ def generate_error_description(
         A 40-80 word description explaining the error.
     """
     if not isinstance(error_message, str) or not error_message.strip():
-        return "An error occurred in the application."
+        return ""
 
     parts = [f"Error: {error_message.strip()}"]
 
@@ -139,4 +139,4 @@ def generate_error_description(
     result = _call_nova(full_prompt, max_tokens=150)
     if result and result.strip():
         return result.strip()
-    return "An error occurred in the application. Review the stack trace for details."
+    return ""

@@ -42,6 +42,7 @@ interface KbSolution {
 
 interface AiRecommendation {
   recommendation: string | null;
+  description: string | null;
   solutions: KbSolution[];
 }
 
@@ -303,7 +304,9 @@ export function ErrorDetailModal({
     })[0];
   })();
 
-  const hasAiContent = !!(aiText || aiTopSolution);
+  const aiTextIsDuplicate = !!(aiText && aiTopSolution && aiText.trim() === aiTopSolution.solution?.trim());
+  const aiRecommendationText = aiText && !aiTextIsDuplicate ? aiText : null;
+  const hasAiContent = !!(aiRec?.description || aiRecommendationText || aiTopSolution);
 
   // ── Data fetching ─────────────────────────────────────────────────────────
 
@@ -644,6 +647,8 @@ export function ErrorDetailModal({
   // Does NOT search the KB — reads from data.solution only.
 
   function renderResolved() {
+    const resolvedSolution = activeSolution?.solution ? activeSolution : aiTopSolution;
+
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
         {/* Resolved banner */}
@@ -660,24 +665,24 @@ export function ErrorDetailModal({
         </div>
 
         {/* Solution used */}
-        {activeSolution?.solution ? (
+        {resolvedSolution ? (
           <div style={{
             padding: 16, borderRadius: 10,
             background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)',
           }}>
             <div style={{ ...sectionLabel, color: '#818cf8' }}>💡 Solution Used</div>
             <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', marginBottom: 6 }}>
-              {activeSolution.solution}
+              {resolvedSolution.solution}
             </div>
             <div style={metaRow}>
-              {activeSolution.version != null && <span>v{activeSolution.version}</span>}
-              {activeSolution.confidence_score != null && (
+              {resolvedSolution.version != null && <span>v{resolvedSolution.version}</span>}
+              {resolvedSolution.confidence_score != null && (
                 <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  Confidence: <ConfidenceBar score={activeSolution.confidence_score} />
+                  Confidence: <ConfidenceBar score={resolvedSolution.confidence_score} />
                 </span>
               )}
-              {activeSolution.usage_count != null && <span>Used {activeSolution.usage_count}×</span>}
-              {activeSolution.created_by && <span>Resolved by {activeSolution.created_by}</span>}
+              {resolvedSolution.usage_count != null && <span>Used {resolvedSolution.usage_count}×</span>}
+              {resolvedSolution.created_by && <span>Resolved by {resolvedSolution.created_by}</span>}
               {data?.resolved_at && <span>{fmt(data.resolved_at)}</span>}
             </div>
           </div>
@@ -704,22 +709,6 @@ export function ErrorDetailModal({
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
 
-        {/* ── Reopened banner ─────────────────────────────────────────────── */}
-        {isReopened && (
-          <div style={{
-            padding: '14px 18px', borderRadius: 10,
-            background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.25)',
-          }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: '#f87171', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6 }}>
-              ↺ Reopened
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-              This error has been reopened. Review the trace below, then continue with the open workflow.
-              {data?.reopened_at && ` Reopened ${fmt(data.reopened_at)}.`}
-            </div>
-          </div>
-        )}
-
         {/* ── Previously Used Solution (read-only, shown only after reopen) ─ */}
         {isReopened && activeSolution?.solution && (
           <div style={{
@@ -736,49 +725,6 @@ export function ErrorDetailModal({
               {data?.resolved_at && <span>Resolved {fmt(data.resolved_at)}</span>}
             </div>
             {/* Read-only — no buttons */}
-          </div>
-        )}
-
-        {/* ── 1. AI Recommended Solution ──────────────────────────────────── */}
-        {hasAiContent && (
-          <div style={{
-            padding: 16, borderRadius: 10,
-            background: 'rgba(56,189,248,0.07)', border: '1px solid rgba(56,189,248,0.2)',
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-              <span>🤖</span>
-              <span style={{ ...sectionLabel, color: '#38bdf8', marginBottom: 0 }}>AI Recommended Solution</span>
-            </div>
-
-            {/* Explanation text from the AI */}
-            {aiText && (
-              <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', marginBottom: aiTopSolution ? 14 : 0 }}>
-                {aiText}
-              </div>
-            )}
-
-            {/* Single best solution card */}
-            {aiTopSolution && (
-              <div style={{
-                padding: 12, borderRadius: 8,
-                background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
-              }}>
-                <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                  {aiTopSolution.solution}
-                </div>
-                <SolutionMeta sol={aiTopSolution} />
-                <div style={{ marginTop: 10 }}>
-                  {/* Single button — calls the same useSolution endpoint as every other Use button */}
-                  <button
-                    onClick={() => useSolution(aiTopSolution.id!)}
-                    disabled={actionBusy || !aiTopSolution.id}
-                    style={{ ...btnPrimary, opacity: actionBusy ? 0.6 : 1 }}
-                  >
-                    {actionBusy ? 'Working…' : 'Use Recommended Solution'}
-                  </button>
-                </div>
-              </div>
-            )}
           </div>
         )}
 
@@ -887,73 +833,6 @@ export function ErrorDetailModal({
                     );
                   })()}
                 </div>
-
-                {/* Full Stack Trace */}
-                <div style={{
-                  background: 'rgba(239,68,68,0.06)',
-                  border: '1px solid rgba(239,68,68,0.15)',
-                  borderRadius: 8,
-                  padding: '14px 18px',
-                }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: '#fca5a5', marginBottom: 12 }}>
-                    Full Call Stack ({data.parsed_stacktrace.frames.length} {data.parsed_stacktrace.frames.length === 1 ? 'frame' : 'frames'}):
-                  </div>
-                  {data.parsed_stacktrace.frames.map((frame, idx) => (
-                    <div
-                      key={idx}
-                      style={{
-                        padding: '10px 12px',
-                        marginBottom: 8,
-                        background: idx === 0 ? 'rgba(239,68,68,0.12)' : 'rgba(0,0,0,0.2)',
-                        border: idx === 0 ? '1px solid rgba(239,68,68,0.3)' : '1px solid rgba(255,255,255,0.05)',
-                        borderRadius: 6,
-                      }}
-                    >
-                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                        <span style={{
-                          fontSize: 11,
-                          fontWeight: 700,
-                          color: idx === 0 ? '#fbbf24' : 'rgba(252,165,165,0.5)',
-                          minWidth: 24,
-                        }}>
-                          #{idx + 1}
-                        </span>
-                        <span style={{
-                          fontFamily: 'ui-monospace, monospace',
-                          fontSize: 12,
-                          color: '#fca5a5',
-                          fontWeight: idx === 0 ? 700 : 400,
-                        }}>
-                          {frame.file_path}:{frame.line_number}
-                        </span>
-                        {frame.function_name && (
-                          <span style={{
-                            fontSize: 12,
-                            color: '#818cf8',
-                            fontFamily: 'ui-monospace, monospace',
-                          }}>
-                            in {frame.function_name}()
-                          </span>
-                        )}
-                      </div>
-                      {frame.code_line && idx < 5 && (
-                        <div style={{
-                          marginTop: 8,
-                          padding: '8px 10px',
-                          background: 'rgba(0,0,0,0.3)',
-                          borderRadius: 4,
-                          fontFamily: 'ui-monospace, monospace',
-                          fontSize: 11,
-                          color: 'rgba(254,243,199,0.9)',
-                          whiteSpace: 'pre',
-                          overflowX: 'auto',
-                        }}>
-                          {frame.code_line}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
               </div>
             ) : (
               <pre style={{
@@ -965,6 +844,63 @@ export function ErrorDetailModal({
               }}>
                 {data.error_detail}
               </pre>
+            )}
+          </div>
+        )}
+
+        {/* ── 1. AI Recommended Solution ──────────────────────────────────── */}
+        {hasAiContent && (
+          <div style={{
+            padding: 16, borderRadius: 10,
+            background: 'rgba(56,189,248,0.07)', border: '1px solid rgba(56,189,248,0.2)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              <span>🤖</span>
+              <span style={{ ...sectionLabel, color: '#38bdf8', marginBottom: 0 }}>AI Recommended Solution</span>
+            </div>
+
+            {/* Error Description from AI */}
+            {aiRec?.description && (
+              <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', marginBottom: 14, padding: '10px 0', borderBottom: '1px solid rgba(56,189,248,0.15)', paddingBottom: 14 }}>
+                <div style={{ fontSize: 12, lineHeight: 1.6, color: 'var(--text)' }}>
+                  {aiRec.description}
+                </div>
+              </div>
+            )}
+
+            {aiRecommendationText && (
+              <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', marginBottom: 14 }}>
+                {aiRecommendationText}
+              </div>
+            )}
+
+            {aiTopSolution && (
+              <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', marginBottom: 14 }}>
+                Recommended based on previous successful resolutions.
+              </div>
+            )}
+
+            {/* Single best solution card */}
+            {aiTopSolution && (
+              <div style={{
+                padding: 12, borderRadius: 8,
+                background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+              }}>
+                <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {aiTopSolution.solution}
+                </div>
+                <SolutionMeta sol={aiTopSolution} />
+                <div style={{ marginTop: 10 }}>
+                  {/* Single button — calls the same useSolution endpoint as every other Use button */}
+                  <button
+                    onClick={() => useSolution(aiTopSolution.id!)}
+                    disabled={actionBusy || !aiTopSolution.id}
+                    style={{ ...btnPrimary, opacity: actionBusy ? 0.6 : 1 }}
+                  >
+                    {actionBusy ? 'Working…' : 'Use Recommended Solution'}
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         )}
