@@ -706,13 +706,19 @@ def get_top_solutions(
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Return paginated solutions for a project + error message group.
 
+    Returns ONE card per solution family (identified by log_ref_id).  The
+    representative version shown is the "best" one in the family, chosen by:
+      1. Highest usage_count
+      2. Highest confidence_score (tiebreak)
+      3. Newest created_at (tiebreak)
+
+    This means Improve never adds a second top-level card — the new version
+    appears only inside the Versions panel, unless it becomes the best version.
+
     Group key resolution order (first match wins):
-      1. AI semantic match — find_matching_solution_group() asks Nova Lite to
-         identify the correct group by meaning, not exact wording.
+      1. AI semantic match — find_matching_solution_group() asks Nova Lite.
       2. Normalized text key — derive_solution_group_key(error_message).
       3. Legacy fallback — error_hash treated as the group key directly.
-
-    All occurrences that resolve to the same group_key see identical results.
     """
     group_key: Optional[str] = None
 
@@ -750,25 +756,49 @@ def get_top_solutions(
     conditions, params = _group_key_conditions(group_key, project_name)
     where = " AND ".join(conditions)
 
-    rows = query(
-        f"SELECT id, solution, created_by, created_at, usage_count, "
-        f"confidence_score, version, log_ref_id "
-        f"FROM {TABLE} WHERE {where} "
-        f"ORDER BY confidence_score DESC, usage_count DESC, created_at DESC "
-        f"LIMIT %s OFFSET %s",
-        tuple(params + [limit, offset]),
-    )
+    # Count distinct families (not rows) so pagination is family-accurate.
     total_rows = query(
-        f"SELECT COUNT(*) AS total FROM {TABLE} WHERE {where}",
+        f"SELECT COUNT(DISTINCT log_ref_id) AS total FROM {TABLE} WHERE {where}",
         tuple(params),
     )
     total = int(total_rows[0]["total"]) if total_rows else 0
 
-    logger.info(
-        "[KnowledgeBase] get_top_solutions group_key=%r project=%r total=%d",
-        group_key, project_name, total,
+    # Return the best representative version per family.
+    # "Best" = highest usage_count, then confidence_score, then newest created_at.
+    #
+    # We fetch all rows for the group, then pick the best per family in Python.
+    # This avoids DISTINCT ON (PostgreSQL-only) and window functions that may
+    # not be available on Aurora DSQL.  The total row count for a single error
+    # group is expected to be small (typically < 50), so the in-process grouping
+    # adds no meaningful overhead.
+    all_rows = query(
+        f"SELECT id, solution, created_by, created_at, usage_count, "
+        f"confidence_score, version, log_ref_id "
+        f"FROM {TABLE} WHERE {where} "
+        f"ORDER BY usage_count DESC NULLS LAST, "
+        f"         confidence_score DESC NULLS LAST, "
+        f"         created_at DESC NULLS LAST",
+        tuple(params),
     )
-    return rows, total
+
+    # Group by family (log_ref_id) and keep only the first (best) row per family.
+    seen_families: set = set()
+    best_per_family: List[Dict[str, Any]] = []
+    for r in all_rows:
+        fid = r.get("log_ref_id") or r.get("id")
+        if fid not in seen_families:
+            seen_families.add(fid)
+            best_per_family.append(r)
+
+    # Apply offset/limit to the deduplicated list
+    paginated = best_per_family[offset: offset + limit]
+
+    logger.info(
+        "[KnowledgeBase] get_top_solutions group_key=%r project=%r "
+        "families=%d shown=%d (best version per family)",
+        group_key, project_name, total, len(paginated),
+    )
+    return paginated, total
 
 
 def get_solution_versions(solution_id: str) -> List[Dict[str, Any]]:
