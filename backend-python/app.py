@@ -1838,21 +1838,75 @@ def upsert_error_solution():
 
 @app.route("/api/knowledge_base/<error_hash>", methods=["DELETE"])
 def delete_error_solution(error_hash):
-    """Delete all solution versions for the group that owns this occurrence.
+    """Delete one solution family (all versions created via Improve from the same root).
 
-    error_hash is the occurrence-specific hash from the log row.
-    Solutions are stored under a group_key (MD5 of normalized error message),
-    which differs from the occurrence hash.  We resolve the group_key by:
-      1. Looking up the log row for this occurrence hash to get the error text.
-      2. Deriving the group_key from that text.
-      3. Falling back to deleting by the raw error_hash if resolution fails
-         (handles pre-migration solution rows that stored occurrence hashes).
+    The frontend passes the solution_id of the specific solution card the user
+    clicked Delete on.  We load that solution row, find its family_id
+    (log_ref_id), and delete every row that shares the same log_ref_id.
+
+    Fallback (legacy / backward-compat): when solution_id is absent, the old
+    group-key deletion path runs so pre-migration rows are still removable.
     """
     project_name = request.args.get("project_name")
+    solution_id  = request.args.get("solution_id")
+
     try:
+        if solution_id:
+            # ── Primary path: delete by solution family ───────────────────────
+            # Load the target solution to find its family_id (log_ref_id).
+            target_rows = query(
+                f"SELECT id, log_ref_id, project_name FROM {TABLE} "
+                f"WHERE row_type = 'solution' AND id = %s",
+                (solution_id,),
+            )
+            if not target_rows:
+                return jsonify({"error": "Solution not found"}), 404
+
+            target        = target_rows[0]
+            # family_id is the root solution's ID stored in log_ref_id.
+            # For a root solution, log_ref_id == its own id.
+            family_id     = target.get("log_ref_id") or solution_id
+            sol_project   = target.get("project_name") or project_name
+
+            del_conditions = ["row_type = 'solution'", "log_ref_id = %s"]
+            del_params: list = [family_id]
+            if sol_project:
+                del_conditions.append("LOWER(project_name) = LOWER(%s)")
+                del_params.append(sol_project)
+
+            # Collect IDs first so we can clean up Pinecone vectors
+            id_rows = query(
+                f"SELECT id FROM {TABLE} WHERE {' AND '.join(del_conditions)}",
+                tuple(del_params),
+            )
+            execute(
+                f"DELETE FROM {TABLE} WHERE {' AND '.join(del_conditions)}",
+                tuple(del_params),
+            )
+
+            # Best-effort Pinecone cleanup — never block the response
+            for id_row in id_rows:
+                try:
+                    from ai.pinecone_service import delete_vector
+                    delete_vector(id_row["id"])
+                except Exception as _pexc:
+                    logger.warning(
+                        "[DeleteSolution] Pinecone cleanup failed for id=%r: %s",
+                        id_row.get("id"), _pexc,
+                    )
+
+            logger.info(
+                "[DeleteSolution] Deleted solution family — family_id=%r "
+                "rows=%d project=%r",
+                family_id, len(id_rows), sol_project,
+            )
+            return make_response("", 204)
+
+        # ── Legacy path: delete by error group key ────────────────────────────
+        # Kept for pre-migration rows that don't have a proper family_id, and
+        # for any caller that doesn't supply solution_id.
         from ai.error_matching import derive_solution_group_key
 
-        # Resolve the group_key from the occurrence hash via the log row
         group_key = None
         try:
             log_conditions = ["row_type = 'log'", "error IS NOT NULL"]
@@ -1879,9 +1933,7 @@ def delete_error_solution(error_hash):
         except Exception as _resolve_exc:
             logger.exception("[DeleteSolution] Group-key resolution failed: %s", _resolve_exc)
 
-        # Attempt delete by resolved group_key first, then fall back to raw hash
         keys_to_try = list(dict.fromkeys(filter(None, [group_key, error_hash])))
-
         for key in keys_to_try:
             if project_name:
                 execute(
@@ -1896,10 +1948,11 @@ def delete_error_solution(error_hash):
                 )
 
         logger.info(
-            "[DeleteSolution] Deleted solutions keys=%r project=%r",
+            "[DeleteSolution] Legacy delete — keys=%r project=%r",
             keys_to_try, project_name,
         )
         return make_response("", 204)
+
     except Exception as e:
         logger.exception("[DeleteSolution] Failed: %s", e)
         import traceback; traceback.print_exc()
