@@ -161,7 +161,7 @@ function Dashboard() {
             const r = periodToRange(comparisonPeriod, customFrom, customTo);
             fetchTopProjects(r.from, r.to);
             fetchTopErrorProjects(r.from, r.to);
-        }, 30000);
+        }, 3600000);
         return () => clearInterval(interval);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [comparisonPeriod, customApplyTick, fetchTopProjects, fetchTopErrorProjects]);

@@ -685,6 +685,20 @@ def project_logs(name):
                 "totalCost": None, "errors": [], "logs": [],
             })
 
+        # Get actual total counts (not limited to 500)
+        stats = query(
+            f"SELECT "
+            f"COUNT(*) as total, "
+            f"SUM(CASE WHEN error IS NULL OR error = '' THEN 1 ELSE 0 END) as success, "
+            f"SUM(CASE WHEN error IS NOT NULL AND error <> '' AND (error_status IS NULL OR error_status IN ('open', 'reopened')) THEN 1 ELSE 0 END) as failure "
+            f"FROM {TABLE} WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s)",
+            (project_name,),
+        )
+        total = int(stats[0].get("total", 0)) if stats else 0
+        success = int(stats[0].get("success", 0)) if stats else 0
+        failure = int(stats[0].get("failure", 0)) if stats else 0
+        
+        # Get recent 500 logs for display
         logs = query(
             f"SELECT file_name, timestamp, success_count, failure_count, error, "
             f"llm_usage, input_tokens, output_tokens, calculated_cost, word_count, file_type, "
@@ -693,9 +707,6 @@ def project_logs(name):
             f"ORDER BY timestamp DESC LIMIT 500",
             (project_name,),
         )
-        total = len(logs)
-        success = sum(1 for r in logs if not r.get("error"))
-        failure = sum(1 for r in logs if r.get("error") and r.get("error_status") != "resolved")
         raw_cost = sum(float(r.get("calculated_cost") or 0) for r in logs)
         total_cost = f"${raw_cost:.4f}" if raw_cost > 0 else None
         errors = [
