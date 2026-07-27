@@ -270,6 +270,10 @@ export function ErrorDetailModal({
   const [editorSaving, setEditorSaving] = useState(false);
   const [editorError, setEditorError] = useState('');
   const [duplicatePrompt, setDuplicatePrompt] = useState<DuplicatePromptState | null>(null);
+  /** When the user clicks Improve on a card, we store its id here so the
+   *  save payload can carry base_solution_id to the backend.  null means
+   *  the editor is in Create New mode. */
+  const [improveTargetId, setImproveTargetId] = useState<string | null>(null);
 
   // ── Action state ─────────────────────────────────────────────────────────
   const [actionBusy, setActionBusy] = useState(false);
@@ -442,7 +446,9 @@ export function ErrorDetailModal({
     setActionBusy(true);
     try {
       await apiFetch(
-        `/api/knowledge_base/${encodeURIComponent(effectiveErrorHash)}?project_name=${encodeURIComponent(projectName)}`,
+        `/api/knowledge_base/${encodeURIComponent(effectiveErrorHash)}` +
+        `?solution_id=${encodeURIComponent(solutionId)}` +
+        `&project_name=${encodeURIComponent(projectName)}`,
         { method: 'DELETE' },
       );
       setData(prev => prev ? { ...prev, solution: null } : prev);
@@ -479,6 +485,10 @@ export function ErrorDetailModal({
         solution: editorText.trim(),
         project_name: projectName,
         check_only: !forceCreate,
+        // When improving an existing solution, pass its id so the backend
+        // creates a new version within that solution's family instead of a
+        // new independent root.
+        ...(improveTargetId ? { base_solution_id: improveTargetId } : {}),
         ...(forceCreate ? { create_anyway: true } : {}),
       };
       const previewRes = await apiFetch('/api/knowledge_base', {
@@ -519,6 +529,7 @@ export function ErrorDetailModal({
         loadDetail();
       }
       setEditorText('');
+      setImproveTargetId(null);
     } catch (e) {
       setEditorError(e instanceof ApiError ? e.label : 'Failed to save solution.');
     } finally { setEditorSaving(false); }
@@ -532,12 +543,18 @@ export function ErrorDetailModal({
 
   // ── Improve: pre-fill editor with existing solution text ─────────────────
 
-  function handleImprove(solutionText: string) {
+  function handleImprove(solutionId: string, solutionText: string) {
+    setImproveTargetId(solutionId);
     setEditorText(solutionText);
     setTimeout(() => {
       document.getElementById('airbrake-solution-editor')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       document.getElementById('airbrake-solution-editor')?.focus();
     }, 50);
+  }
+
+  function handleCancelImprove() {
+    setImproveTargetId(null);
+    setEditorText('');
   }
 
   // ── Early returns ─────────────────────────────────────────────────────────
@@ -589,7 +606,7 @@ export function ErrorDetailModal({
             {actionBusy ? 'Working…' : 'Use'}
           </button>
           {opts.showImprove && (
-            <button onClick={() => handleImprove(sol.solution!)} style={btnSecondary}>Improve</button>
+            <button onClick={() => handleImprove(sol.id!, sol.solution!)} style={btnSecondary}>Improve</button>
           )}
           {sol.id && (
             <button onClick={() => loadVersions(sol.id!)} disabled={loadingVersions} style={btnSecondary}>
@@ -983,12 +1000,15 @@ export function ErrorDetailModal({
           )}
         </div>
 
-        {/* ── 4. Create New Solution ────────────────────────────────────────── */}
+        {/* ── 4. Create New Solution / Improve ─────────────────────────────── */}
         <div>
-          <div style={sectionLabel}>✏️ Create New Solution</div>
+          <div style={sectionLabel}>
+            {improveTargetId ? '✏️ Improve Solution' : '✏️ Create New Solution'}
+          </div>
           <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
-            Type a fix below. Saving will auto-resolve this error and update usage/confidence.
-            Duplicate detection runs before saving — you will be prompted if a similar solution exists.
+            {improveTargetId
+              ? 'Edit the solution below. Saving will create a new version of this solution only.'
+              : 'Type a fix below. Saving will auto-resolve this error and update usage/confidence. Duplicate detection runs before saving — you will be prompted if a similar solution exists.'}
           </div>
           <textarea
             id="airbrake-solution-editor"
@@ -1006,7 +1026,15 @@ export function ErrorDetailModal({
           {editorError && (
             <div style={{ fontSize: 12, color: '#f87171', marginTop: 6 }}>{editorError}</div>
           )}
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
+            {improveTargetId && (
+              <button
+                onClick={handleCancelImprove}
+                style={btnSecondary}
+              >
+                Cancel
+              </button>
+            )}
             <button
               onClick={() => handleSave(false)}
               disabled={editorSaving || !editorText.trim()}
@@ -1016,7 +1044,7 @@ export function ErrorDetailModal({
                 cursor: editorSaving || !editorText.trim() ? 'not-allowed' : 'pointer',
               }}
             >
-              {editorSaving ? 'Saving…' : 'Save Solution'}
+              {editorSaving ? 'Saving…' : improveTargetId ? 'Save Improved Version' : 'Save Solution'}
             </button>
           </div>
         </div>

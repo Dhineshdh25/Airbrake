@@ -57,16 +57,30 @@ def _create_embedding_safe(text: str) -> Optional[str]:
     """Generate a Titan embedding, returning it as a JSON string for the TEXT column.
     Returns None (not raises) on any failure so saves always succeed without embeddings.
     """
+    logger.info(
+        "[KnowledgeBase][Embedding] START — generating Titan embedding for %d chars",
+        len(text),
+    )
     try:
         from ai.embeddings import create_embedding
         vec = create_embedding(text)
         if vec and any(v != 0.0 for v in vec):
-            return json.dumps(vec)
-        logger.warning("[KnowledgeBase] Bedrock returned zero vector — embedding skipped")
+            emb_json = json.dumps(vec)
+            logger.info(
+                "[KnowledgeBase][Embedding] SUCCESS — length=%d, json_bytes=%d",
+                len(vec), len(emb_json),
+            )
+            return emb_json
+        logger.warning(
+            "[KnowledgeBase][Embedding] FAILED — Bedrock returned zero vector or empty list"
+            " (vec type=%s, len=%s) — embedding skipped",
+            type(vec).__name__,
+            len(vec) if isinstance(vec, list) else "n/a",
+        )
         return None
     except Exception as exc:
         logger.exception(
-            "[KnowledgeBase] Embedding generation failed — solution saved without embedding: %s", exc
+            "[KnowledgeBase][Embedding] FAILED — exception during create_embedding: %s", exc
         )
         return None
 
@@ -472,23 +486,87 @@ def insert_solution(
     if check_only:
         return {"duplicate": False, "duplicate_prompt": False}
 
-    # No duplicate (or force_create) — insert a new version ──────────────────
+    # ── Resolve the version family ────────────────────────────────────────────
+    # A solution family is identified by a family_id stored in the log_ref_id
+    # column.  The family_id is the ID of the first (root) version in the chain.
+    #
+    # Create New  (base_solution_id is None):
+    #   → Always a new independent root.  version=1, family_id = own new UUID.
+    #
+    # Improve  (base_solution_id is set by the frontend):
+    #   → New version appended to the parent's family.
+    #     family_id = parent's log_ref_id (which is already the root ID).
+    #     version  = MAX(version in that family) + 1.
+
+    is_improve = bool(base_solution_id)
+
+    if is_improve:
+        # Resolve the family_id from the parent solution's log_ref_id
+        parent_row = _find_solution(base_solution_id)
+        if not parent_row:
+            logger.warning(
+                "[KnowledgeBase] insert_solution: base_solution_id=%r not found — "
+                "treating as Create New", base_solution_id
+            )
+            is_improve = False
+
+    if is_improve and parent_row:
+        # The family is identified by the parent's log_ref_id (which is the root ID)
+        family_id = parent_row.get("log_ref_id") or base_solution_id
+    else:
+        # New root: the family_id will be set to the solution's own UUID after insert
+        family_id = None  # filled in during the insert loop below
+
+    # ── Insert the new solution row ───────────────────────────────────────────
     usage_count = 1
     confidence  = calculate_confidence(usage_count)
-    embedding   = _create_embedding_safe(solution)
+
+    logger.info(
+        "[KnowledgeBase][Pinecone] STAGE 1 — calling _create_embedding_safe "
+        "for solution (len=%d chars)", len(solution)
+    )
+    embedding = _create_embedding_safe(solution)
+
+    if embedding is None:
+        logger.warning(
+            "[KnowledgeBase][Pinecone] STAGE 1 RESULT — embedding=None "
+            "-- solution will be saved to Aurora WITHOUT a Pinecone vector. "
+            "Check [KnowledgeBase][Embedding] lines above for root cause."
+        )
+    else:
+        try:
+            _emb_len = len(json.loads(embedding))
+        except Exception:
+            _emb_len = "parse-error"
+        logger.info(
+            "[KnowledgeBase][Pinecone] STAGE 1 RESULT — embedding=JSON string "
+            "(dim=%s) -- Pinecone upsert WILL be attempted after Aurora insert.",
+            _emb_len,
+        )
 
     last_exc: Optional[Exception] = None
     for attempt in range(MAX_VERSION_RETRIES):
         try:
-            # Version is scoped to the group_key, not to a single log_ref_id.
-            # This ensures v1, v2, v3... are contiguous across all occurrences.
-            version_rows = query(
-                f"SELECT COALESCE(MAX(version), 0) AS max_version FROM {TABLE} "
-                f"WHERE row_type = 'solution' AND error_hash = %s "
-                f"AND LOWER(project_name) = LOWER(%s)",
-                (group_key, canonical_project),
-            )
-            version = int((version_rows[0]["max_version"] or 0)) + 1
+            # Assign a new UUID for this solution row
+            new_id = str(uuid.uuid4())
+
+            # For a new root (Create New), family_id == own ID.
+            # For an Improve, family_id was resolved above from the parent.
+            effective_family_id = family_id if family_id else new_id
+
+            if is_improve:
+                # Version number is scoped to the solution family (same log_ref_id),
+                # not to the entire error group. This is correct: two independent
+                # solutions for the same error each maintain their own v1, v2, v3...
+                version_rows = query(
+                    f"SELECT COALESCE(MAX(version), 0) AS max_version FROM {TABLE} "
+                    f"WHERE row_type = 'solution' AND log_ref_id = %s",
+                    (effective_family_id,),
+                )
+                version = int((version_rows[0]["max_version"] or 0)) + 1
+            else:
+                # Create New always starts at version 1
+                version = 1
 
             row = execute_returning(
                 f"INSERT INTO {TABLE} "
@@ -497,10 +575,10 @@ def insert_solution(
                 f"VALUES (%s,'solution',%s,%s,%s,%s,%s,NOW(),%s,%s,%s,%s) "
                 f"RETURNING *",
                 (
-                    str(uuid.uuid4()),
+                    new_id,
                     canonical_project,
-                    group_key,          # ← group key, NOT occurrence hash
-                    log_row["id"],      # log_ref_id kept for traceability only
+                    group_key,             # error group key for retrieval/Pinecone
+                    effective_family_id,   # solution family key for versioning
                     solution,
                     created_by,
                     usage_count,
@@ -512,23 +590,50 @@ def insert_solution(
             if row:
                 row["duplicate"] = False
                 logger.info(
-                    "[Solution] New version created — solution_id=%s version=%d "
-                    "group_key=%r project=%r",
-                    row.get("id"), version, group_key, canonical_project,
+                    "[Solution] %s — solution_id=%s version=%d "
+                    "family_id=%r group_key=%r project=%r",
+                    "Improve (new version)" if is_improve else "Create New (root)",
+                    row.get("id"), version, effective_family_id,
+                    group_key, canonical_project,
                 )
                 if embedding is not None:
+                    logger.info(
+                        "[KnowledgeBase][Pinecone] STAGE 2 — calling upsert_vector "
+                        "solution_id=%r version=%d project=%r group_key=%r",
+                        row.get("id"), version, canonical_project, group_key,
+                    )
                     try:
-                        upsert_vector(
+                        upsert_result = upsert_vector(
                             row["id"],
                             json.loads(embedding),
                             canonical_project,
                             group_key,
                             version,
                         )
+                        if upsert_result:
+                            logger.info(
+                                "[KnowledgeBase][Pinecone] STAGE 2 SUCCESS — "
+                                "vector upserted solution_id=%r", row.get("id")
+                            )
+                        else:
+                            logger.error(
+                                "[KnowledgeBase][Pinecone] STAGE 2 FAILED — "
+                                "upsert_vector returned False for solution_id=%r. "
+                                "See [Pinecone] FAILED lines above.", row.get("id")
+                            )
                     except Exception as exc:
                         logger.exception(
-                            "[KnowledgeBase] Pinecone sync failed — solution saved to Aurora only: %s", exc
+                            "[KnowledgeBase][Pinecone] STAGE 2 FAILED — "
+                            "upsert_vector raised for solution_id=%r: %s",
+                            row.get("id"), exc,
                         )
+                else:
+                    logger.warning(
+                        "[KnowledgeBase][Pinecone] STAGE 2 SKIPPED — "
+                        "embedding is None, upsert_vector NOT called for solution_id=%r. "
+                        "Bedrock embedding failed — check STAGE 1 logs above.",
+                        row.get("id"),
+                    )
             return row
 
         except Exception as exc:
@@ -667,23 +772,33 @@ def get_top_solutions(
 
 
 def get_solution_versions(solution_id: str) -> List[Dict[str, Any]]:
-    """Return all versions in the same solution group as solution_id.
+    """Return all versions in the same solution family as solution_id.
 
-    Versions are grouped by group_key (error_hash on the solution row) +
-    project_name, which covers all occurrences of the same error.
+    A solution family is identified by log_ref_id, which equals the ID of the
+    root (first) version in the Improve chain.  All versions created via
+    Improve share the same log_ref_id.  Solutions created via Create New each
+    have a unique log_ref_id (their own ID) and are never returned as versions
+    of each other.
+
+    The error_hash (group_key) is intentionally NOT used here — that key is for
+    retrieval/recommendation only and must not drive version grouping.
     """
     row = _find_solution(solution_id)
     if not row:
         return []
 
-    # The group key is stored in the solution row's error_hash column
-    group_key    = row.get("error_hash")
+    # The family key is the log_ref_id stored on the solution row.
+    # For a root solution it equals its own ID; for improved versions it equals
+    # the root's ID.
+    family_id    = row.get("log_ref_id") or solution_id
     project_name = row.get("project_name")
 
-    if not group_key:
-        return []
+    conditions: List[str] = ["row_type = 'solution'", "log_ref_id = %s"]
+    params: List[Any]     = [family_id]
+    if project_name:
+        conditions.append("LOWER(project_name) = LOWER(%s)")
+        params.append(project_name)
 
-    conditions, params = _group_key_conditions(group_key, project_name)
     return query(
         f"SELECT id, solution, created_by, created_at, usage_count, confidence_score, version "
         f"FROM {TABLE} WHERE {' AND '.join(conditions)} "
