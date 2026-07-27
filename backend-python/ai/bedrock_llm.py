@@ -93,3 +93,50 @@ def _build_recommendation_prompt(error_prompt: str, solutions: List[Any]) -> str
         f"Solutions: {solutions_text}. "
         "Be concise and mention the most relevant solution."
     )
+
+def generate_error_description(
+    error_message: str,
+    error_detail: Optional[str] = None,
+    project_name: Optional[str] = None,
+    solutions: Optional[List[Any]] = None,
+) -> str:
+    """Generate a concise explanation of what the error means.
+
+    Args:
+        error_message: The error title or message
+        error_detail: Stack trace or additional error context
+        project_name: Project name (optional context)
+        solutions: List of recommended solutions (for context, not output)
+
+    Returns:
+        A 40-80 word description explaining the error.
+    """
+    if not isinstance(error_message, str) or not error_message.strip():
+        return "An error occurred in the application."
+
+    parts = [f"Error: {error_message.strip()}"]
+
+    if error_detail and isinstance(error_detail, str) and error_detail.strip():
+        # Truncate stack trace to first 500 chars to avoid huge prompts
+        truncated_detail = error_detail.strip()[:500]
+        parts.append(f"Details: {truncated_detail}")
+
+    if project_name and isinstance(project_name, str) and project_name.strip():
+        parts.append(f"Project: {project_name.strip()}")
+
+    prompt = "\n".join(parts)
+
+    full_prompt = (
+        "Explain what this error means in 40-80 words. "
+        "Cover: 1) what the error indicates, 2) the likely cause, 3) the impact. "
+        "Be developer-friendly and concise. "
+        "Do not repeat the error message word-for-word. "
+        "Do not invent information not in the error context. "
+        "Return only the explanation.\n\n"
+        + prompt
+    )
+
+    result = _call_nova(full_prompt, max_tokens=150)
+    if result and result.strip():
+        return result.strip()
+    return "An error occurred in the application. Review the stack trace for details."

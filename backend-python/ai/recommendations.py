@@ -508,7 +508,7 @@ def get_ai_recommendations(
     project_name: Optional[str] = None,
     error_message: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Return { recommendation: str|None, solutions: [...] }.
+    """Return { recommendation: str|None, description: str|None, solutions: [...] }.
 
     error_message is now the primary lookup key.  error_hash is kept for
     backward compatibility and to resolve the error text when needed.
@@ -522,7 +522,7 @@ def get_ai_recommendations(
             error_message=error_message,
         )
         if not solutions:
-            return {"recommendation": None, "solutions": []}
+            return {"recommendation": None, "description": None, "solutions": []}
 
         # Use the supplied error_message text directly when available;
         # fall back to a DB lookup by hash only when necessary.
@@ -553,10 +553,26 @@ def get_ai_recommendations(
                 "[Recommendations] LLM unavailable — returning solutions without recommendation"
             )
 
-        return {"recommendation": recommendation, "solutions": solutions}
+        # Generate error description
+        description = None
+        if error_message or detail:
+            from ai.llm import generate_error_description
+            try:
+                description = generate_error_description(
+                    error_message=error_message or prompt,
+                    error_detail=detail,
+                    project_name=project_name,
+                    solutions=solutions[:5],
+                )
+            except Exception as desc_exc:
+                logger.warning(
+                    "[Recommendations] Error description generation failed: %s", desc_exc
+                )
+
+        return {"recommendation": recommendation, "description": description, "solutions": solutions}
 
     except Exception as exc:
         logger.exception(
             "[Recommendations] Recommendation generation failed — returning empty payload: %s", exc
         )
-        return {"recommendation": None, "solutions": []}
+        return {"recommendation": None, "description": None, "solutions": []}
