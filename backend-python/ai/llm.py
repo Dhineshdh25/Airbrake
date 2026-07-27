@@ -12,6 +12,6 @@ except Exception as exc:  # pragma: no cover - import safety
         return f"AI unavailable — component=ai.llm error={type(exc).__name__}: {exc}"
 
     def generate_error_description(error_message: str, error_detail=None, project_name=None, solutions=None) -> str:
-        return "An error occurred in the application. Review the stack trace for details."
+        return ""
 
 __all__ = ["generate_ai_response", "generate_suggested_solution", "generate_error_description"]
