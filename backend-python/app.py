@@ -703,6 +703,16 @@ def list_live_projects():
 @app.route("/api/projects/<path:name>/logs")
 def project_logs(name):
     project_name = name
+    page = max(1, int(request.args.get("page", 1)))
+    limit = min(100, max(1, int(request.args.get("limit", 50))))
+    offset = (page - 1) * limit
+    
+    # Date filter parameters
+    from_date = request.args.get("from")
+    to_date = request.args.get("to")
+    
+    print(f"[DEBUG] Date filter params - from: {from_date}, to: {to_date}")
+    
     try:
         # Check if project exists
         proj = query(
@@ -713,50 +723,109 @@ def project_logs(name):
         if not proj:
             return jsonify({
                 "exists": False, "tableName": project_name.replace(" ", "_"),
-                "total": 0, "filesProcessed": 0, "success": 0, "failure": 0,
+                "total": 0, "filesProcessed": 0, "success": 0, "failure": 0, "resolved": 0,
                 "totalCost": None, "errors": [], "logs": [],
+                "pagination": {
+                    "currentPage": 1, "totalPages": 0, "totalRecords": 0,
+                    "limit": limit, "hasNextPage": False, "hasPreviousPage": False
+                }
             })
 
-        # Get actual total counts (not limited to 500)
-        stats = query(
-            f"SELECT "
-            f"COUNT(*) as total, "
-            f"SUM(CASE WHEN error IS NULL OR error = '' THEN 1 ELSE 0 END) as success, "
-            f"SUM(CASE WHEN error IS NOT NULL AND error <> '' AND (error_status IS NULL OR error_status IN ('open', 'reopened')) THEN 1 ELSE 0 END) as failure "
-            f"FROM {TABLE} WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s)",
-            (project_name,),
-        )
-        total = int(stats[0].get("total", 0)) if stats else 0
-        success = int(stats[0].get("success", 0)) if stats else 0
-        failure = int(stats[0].get("failure", 0)) if stats else 0
+        # Build date filter WHERE clause
+        date_filter = ""
+        count_params = [project_name]
+        query_params = [project_name]
         
-        # Get recent 500 logs for display
-        logs = query(
+        if from_date:
+            # Convert ISO string to timestamp for comparison
+            # Remove timezone info if present and convert to date
+            from_date_clean = from_date.split('T')[0] if 'T' in from_date else from_date
+            date_filter += " AND DATE(timestamp) >= %s"
+            count_params.append(from_date_clean)
+            query_params.append(from_date_clean)
+            print(f"[DEBUG] Adding from_date filter: DATE(timestamp) >= {from_date_clean}")
+        if to_date:
+            # Convert ISO string to timestamp for comparison
+            to_date_clean = to_date.split('T')[0] if 'T' in to_date else to_date
+            date_filter += " AND DATE(timestamp) <= %s"
+            count_params.append(to_date_clean)
+            query_params.append(to_date_clean)
+            print(f"[DEBUG] Adding to_date filter: DATE(timestamp) <= {to_date_clean}")
+        
+        print(f"[DEBUG] Final date_filter clause: {date_filter}")
+        print(f"[DEBUG] Count params: {count_params}")
+
+        # Get total count first with date filter
+        count_query = (
+            f"SELECT COUNT(*) as total FROM {TABLE} "
+            f"WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){date_filter}"
+        )
+        print(f"[DEBUG] Count query: {count_query}")
+        count_result = query(count_query, tuple(count_params))
+        total_records = int(count_result[0].get("total", 0)) if count_result else 0
+        print(f"[DEBUG] Total records after filter: {total_records}")
+        total_pages = (total_records + limit - 1) // limit if limit > 0 else 0
+
+        # Add limit and offset to query params
+        query_params.extend([limit, offset])
+
+        # Fetch paginated logs with date filter
+        logs_query = (
             f"SELECT file_name, timestamp, success_count, failure_count, error, "
             f"llm_usage, input_tokens, output_tokens, calculated_cost, word_count, file_type, "
             f"error_status, resolved_at, reopened_at "
-            f"FROM {TABLE} WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s) "
-            f"ORDER BY timestamp DESC LIMIT 500",
-            (project_name,),
+            f"FROM {TABLE} WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){date_filter} "
+            f"ORDER BY timestamp DESC LIMIT %s OFFSET %s"
         )
+        print(f"[DEBUG] Logs query: {logs_query}")
+        logs = query(logs_query, tuple(query_params))
+
+        # Separate logs by status
+        resolved_logs = [r for r in logs if r.get("error") and r.get("error") != "" and r.get("error_status") == "resolved"]
+        active_logs = [r for r in logs if r.get("error") and r.get("error") != "" and r.get("error_status") != "resolved"]
+        successful_logs = [r for r in logs if not r.get("error") or r.get("error") == ""]
+
+        success = len(successful_logs)
+        failure = len(active_logs)
+        resolved = len(resolved_logs)
+
         raw_cost = sum(float(r.get("calculated_cost") or 0) for r in logs)
         total_cost = f"${raw_cost:.4f}" if raw_cost > 0 else None
+        
         errors = [
             {"timestamp": str(r["timestamp"]), "message": r["error"]}
-            for r in logs
-            if r.get("error") and r.get("error_status") in ("open", "reopened")
+            for r in active_logs
         ]
+
+        # Create visible logs with isResolved flag
         visible_logs = [
-            {**r, "error": None if r.get("error_status") == "resolved" else r.get("error")}
+            {**r, "isResolved": r.get("error") and r.get("error") != "" and r.get("error_status") == "resolved"}
             for r in logs
         ]
+        
         visible_logs = serialize_rows(visible_logs)
         errors = serialize_rows(errors)
+        
+        date_info = f", From: {from_date}" if from_date else ""
+        date_info += f", To: {to_date}" if to_date else ""
+        print(f"[DEBUG] Project: {project_name}, Page: {page}/{total_pages}{date_info}")
+        print(f"  - Total records: {total_records}")
+        print(f"  - Files with active errors (this page): {len(active_logs)}")
+        print(f"  - Files with resolved errors (this page): {len(resolved_logs)}")
+        
         return jsonify({
             "exists": True, "tableName": project_name.replace(" ", "_"),
-            "total": total, "filesProcessed": total,
-            "success": success, "failure": failure,
+            "total": total_records, "filesProcessed": total_records,
+            "success": success, "failure": failure, "resolved": resolved,
             "totalCost": total_cost, "errors": errors, "logs": visible_logs,
+            "pagination": {
+                "currentPage": page,
+                "totalPages": total_pages,
+                "totalRecords": total_records,
+                "limit": limit,
+                "hasNextPage": page < total_pages,
+                "hasPreviousPage": page > 1
+            }
         })
     except Exception as e:
         import traceback as _tb

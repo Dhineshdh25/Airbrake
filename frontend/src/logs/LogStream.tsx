@@ -75,6 +75,8 @@ function fmtDate(ts: string | null) {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
+type TimePeriod = 'daily' | 'weekly' | 'custom';
+
 function SummaryCard({ label, value, color, icon }: { label: string; value: string | number; color: string; icon: string }) {
   return (
     <div style={{
@@ -290,13 +292,55 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
   const [resolvedCollapsed, setResolvedCollapsed] = useState(true);
   const [successCollapsed, setSuccessCollapsed] = useState(true);
 
+  // Time period filter states
+  const [timePeriod, setTimePeriod] = useState<TimePeriod>('daily');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+  const [customApplyTick, setCustomApplyTick] = useState(0);
+
   useEffect(() => {
     setLoading(true);
-    apiFetch(`/api/projects/${encodeURIComponent(project.name)}/logs?page=${currentPage}&limit=50`)
+
+    // Build date filter params based on time period
+    let dateParams = '';
+    if (timePeriod === 'daily') {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      dateParams = `&from=${today.toISOString()}&to=${tomorrow.toISOString()}`;
+      console.log('[LogStream] Daily filter:', { from: today.toISOString(), to: tomorrow.toISOString() });
+    } else if (timePeriod === 'weekly') {
+      const weekAgo = new Date();
+      weekAgo.setDate(weekAgo.getDate() - 7);
+      weekAgo.setHours(0, 0, 0, 0);
+      const now = new Date();
+      dateParams = `&from=${weekAgo.toISOString()}&to=${now.toISOString()}`;
+      console.log('[LogStream] Weekly filter:', { from: weekAgo.toISOString(), to: now.toISOString() });
+    } else if (timePeriod === 'custom' && customFrom && customTo && customApplyTick > 0) {
+      const fromDate = new Date(customFrom);
+      fromDate.setHours(0, 0, 0, 0);
+      const toDate = new Date(customTo);
+      toDate.setHours(23, 59, 59, 999);
+      dateParams = `&from=${fromDate.toISOString()}&to=${toDate.toISOString()}`;
+      console.log('[LogStream] Custom filter:', { from: fromDate.toISOString(), to: toDate.toISOString() });
+    }
+
+    const apiUrl = `/api/projects/${encodeURIComponent(project.name)}/logs?page=${currentPage}&limit=50${dateParams}`;
+    console.log('[LogStream] Fetching:', apiUrl);
+
+    apiFetch(apiUrl)
       .then((r) => r.json())
-      .then((d) => { setStats(d as ProjectStats); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, [project.name, currentPage]);
+      .then((d) => {
+        console.log('[LogStream] Response:', d);
+        setStats(d as ProjectStats);
+        setLoading(false);
+      })
+      .catch((err) => {
+        console.error('[LogStream] Error:', err);
+        setLoading(false);
+      });
+  }, [project.name, currentPage, timePeriod, customApplyTick]);
 
   // Filter logs by status - no slicing, show all in current page
   const failedLogs = stats?.logs?.filter((r) => !!r.error && !r.isResolved) ?? [];
@@ -366,6 +410,99 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
         {/* ── Body ── */}
         <div style={{ overflow: 'auto', padding: '20px 22px', flex: 1 }}>
 
+          {/* ── Time Period Filter ── */}
+          <div style={{
+            marginBottom: 20,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: 10,
+            padding: '12px 14px',
+            background: 'rgba(255,255,255,0.02)',
+            border: '1px solid rgba(255,255,255,0.07)',
+            borderRadius: 10,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 11, fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                Time Period:
+              </span>
+              <div style={{
+                display: 'flex', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
+                borderRadius: 8, padding: 3, gap: 2,
+              }}>
+                {(['daily', 'weekly', 'custom'] as TimePeriod[]).map((period) => (
+                  <button
+                    key={period}
+                    onClick={() => {
+                      setTimePeriod(period);
+                      setCurrentPage(1); // Reset to first page when changing time period
+                    }}
+                    style={{
+                      padding: '5px 12px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+                      border: 'none', cursor: 'pointer', textTransform: 'capitalize',
+                      background: timePeriod === period ? '#6366f1' : 'transparent',
+                      color: timePeriod === period ? '#fff' : '#94a3b8',
+                      transition: 'background 0.15s, color 0.15s',
+                    }}
+                  >
+                    {period}
+                  </button>
+                ))}
+              </div>
+
+              {timePeriod === 'custom' && (
+                <>
+                  <input
+                    type="date"
+                    value={customFrom}
+                    onChange={(e) => setCustomFrom(e.target.value)}
+                    style={{
+                      background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)',
+                      borderRadius: 6, color: '#e2e8f0',
+                      padding: '5px 8px', fontSize: 11, outline: 'none',
+                      cursor: 'pointer', colorScheme: 'dark',
+                    } as React.CSSProperties}
+                  />
+                  <span style={{ fontSize: 11, color: '#64748b' }}>to</span>
+                  <input
+                    type="date"
+                    value={customTo}
+                    onChange={(e) => setCustomTo(e.target.value)}
+                    style={{
+                      background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)',
+                      borderRadius: 6, color: '#e2e8f0',
+                      padding: '5px 8px', fontSize: 11, outline: 'none',
+                      cursor: 'pointer', colorScheme: 'dark',
+                    } as React.CSSProperties}
+                  />
+                  <button
+                    onClick={() => {
+                      setCustomApplyTick((t) => t + 1);
+                      setCurrentPage(1);
+                    }}
+                    disabled={!customFrom || !customTo}
+                    style={{
+                      padding: '5px 14px', borderRadius: 6, fontSize: 11, fontWeight: 700,
+                      cursor: (!customFrom || !customTo) ? 'not-allowed' : 'pointer',
+                      background: '#6366f1', color: '#fff', border: 'none',
+                      opacity: (!customFrom || !customTo) ? 0.5 : 1,
+                    }}
+                  >
+                    Apply
+                  </button>
+                </>
+              )}
+            </div>
+
+            <span style={{ fontSize: 10, color: '#64748b', fontStyle: 'italic' }}>
+              {timePeriod === 'daily' && 'Today\'s data'}
+              {timePeriod === 'weekly' && 'Last 7 days'}
+              {timePeriod === 'custom' && customFrom && customTo && `${new Date(customFrom).toLocaleDateString()} - ${new Date(customTo).toLocaleDateString()}`}
+              {timePeriod === 'custom' && (!customFrom || !customTo) && 'Select date range'}
+            </span>
+          </div>
+
           {loading && (
             <div style={{ textAlign: 'center', color: '#475569', padding: '60px 0', fontSize: 14 }}>
               <div style={{ fontSize: 28, marginBottom: 12 }}>⏳</div>
@@ -408,7 +545,7 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
               {totalFailedLogs > 0 && (
                 <div style={{ marginBottom: 16 }}>
                   <SectionHeader
-                    title={totalFailedLogs > 50 ? `Failed Files (showing 50 of ${totalFailedLogs})` : "Failed Files"}
+                    title="Failed Files"
                     count={totalFailedLogs}
                     color="#f87171"
                     collapsed={failedCollapsed}
@@ -426,7 +563,7 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
               {totalResolvedLogs > 0 && (
                 <div style={{ marginBottom: 16 }}>
                   <SectionHeader
-                    title={totalResolvedLogs > 50 ? `Resolved Files (showing 50 of ${totalResolvedLogs})` : "Resolved Files"}
+                    title="Resolved Files"
                     count={totalResolvedLogs}
                     color="#8b5cf6"
                     collapsed={resolvedCollapsed}
@@ -606,6 +743,7 @@ export function LogStream() {
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState('All');
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
+  const [projectFilter, setProjectFilter] = useState(''); // New: project name filter
 
   useEffect(() => {
     setLoading(true);
@@ -619,7 +757,15 @@ export function LogStream() {
       .catch(() => setLoading(false));
   }, [activeCategory]);
 
-  const filtered = projects.filter((p) => p.name.toLowerCase().includes(search.toLowerCase()));
+  // Apply both search and project filter
+  const filtered = projects.filter((p) => {
+    const matchesSearch = p.name.toLowerCase().includes(search.toLowerCase());
+    const matchesProjectFilter = !projectFilter || p.name === projectFilter;
+    return matchesSearch && matchesProjectFilter;
+  });
+
+  // Get unique project names for the filter dropdown
+  const projectNames = Array.from(new Set(projects.map((p) => p.name))).sort();
 
   return (
     <div data-testid="log-stream">
@@ -649,8 +795,8 @@ export function LogStream() {
         })}
       </div>
 
-      {/* Search */}
-      <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
+      {/* Search and Filter */}
+      <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <input
           placeholder="Search projects…"
           value={search}
@@ -658,10 +804,28 @@ export function LogStream() {
           style={{
             background: 'var(--input-bg)', border: '1px solid var(--input-border)',
             borderRadius: 'var(--radius-sm)', color: 'var(--text)',
-            padding: '8px 14px', fontSize: 13, outline: 'none', width: 260,
+            padding: '8px 14px', fontSize: 13, outline: 'none', flex: '1 1 auto', minWidth: 200,
           }}
         />
-        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+        <select
+          value={projectFilter}
+          onChange={(e) => {
+            setProjectFilter(e.target.value);
+            setSearch(''); // Clear search when using dropdown
+          }}
+          style={{
+            background: 'var(--input-bg)', border: '1px solid var(--input-border)',
+            borderRadius: 6, color: 'var(--text)',
+            padding: '8px 12px', fontSize: 13, outline: 'none',
+            cursor: 'pointer', minWidth: 200,
+          }}
+        >
+          <option value="">All Projects</option>
+          {projectNames.map((name) => (
+            <option key={name} value={name}>{name}</option>
+          ))}
+        </select>
+        <span style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
           {filtered.length} project{filtered.length !== 1 ? 's' : ''} shown
         </span>
       </div>
