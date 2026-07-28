@@ -97,10 +97,10 @@ const breakGroupRepository: BreakGroupRepository = {
   save: async (group) => group,
   update: async (group) => group,
 };
-const aggBreakRepository: AggBreakRepo = { save: async (_b) => {} };
+const aggBreakRepository: AggBreakRepo = { save: async (_b) => { } };
 const searchIndexer: SearchIndexer = {
-  indexBreak: async (_b) => {},
-  indexBreakGroup: async (_g) => {},
+  indexBreak: async (_b) => { },
+  indexBreakGroup: async (_g) => { },
 };
 const errorAggregator = new DefaultErrorAggregator(
   breakGroupRepository,
@@ -118,18 +118,18 @@ const errorAggregator = new DefaultErrorAggregator(
 const sessionStore: SessionStore = {
   get: async (token: string) => {
     if (token === 'dev-token-admin')
-      return { userId: 'dev-admin',     role: 'admin',     createdAt: new Date(), expiresAt: new Date(Date.now() + 86400_000) };
+      return { userId: 'dev-admin', role: 'admin', createdAt: new Date(), expiresAt: new Date(Date.now() + 86400_000) };
     if (token === 'dev-token-developer')
       return { userId: 'dev-developer', role: 'developer', createdAt: new Date(), expiresAt: new Date(Date.now() + 86400_000) };
     if (token === 'dev-token-viewer')
-      return { userId: 'dev-viewer',    role: 'viewer',    createdAt: new Date(), expiresAt: new Date(Date.now() + 86400_000) };
+      return { userId: 'dev-viewer', role: 'viewer', createdAt: new Date(), expiresAt: new Date(Date.now() + 86400_000) };
     return null;
   },
-  set: async () => {},
-  delete: async () => {},
+  set: async () => { },
+  delete: async () => { },
 };
 
-const auditLogRepo: AuditLogRepository = { log: async () => {} };
+const auditLogRepo: AuditLogRepository = { log: async () => { } };
 
 // ─── DB-backed repositories ───────────────────────────────────────────────────
 
@@ -192,7 +192,7 @@ const alertRuleRepository: AlertRuleRepository = {
       `INSERT INTO alert_rules (name, threshold, window_seconds, trigger_on_new_error, channels, created_by, enabled)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
       [rule.name, rule.threshold, rule.windowSeconds, rule.triggerOnNewError,
-       JSON.stringify(rule.channels), rule.createdBy, rule.enabled ?? true],
+      JSON.stringify(rule.channels), rule.createdBy, rule.enabled ?? true],
     );
     return rows[0];
   },
@@ -247,12 +247,12 @@ const savedFilterRepository: SavedFilterRepository = {
 const logSearchRepository: LogSearchRepository = {
   search: async (filters) => {
     const conds: string[] = []; const vals: unknown[] = []; let i = 1;
-    if (filters.keyword)       { conds.push(`message ILIKE $${i++}`);        vals.push(`%${filters.keyword}%`); }
-    if (filters.severity)      { conds.push(`severity = $${i++}`);           vals.push(filters.severity); }
-    if (filters.applicationId) { conds.push(`application_id = $${i++}`);     vals.push(filters.applicationId); }
-    if (filters.environment)   { conds.push(`environment = $${i++}`);        vals.push(filters.environment); }
-    if (filters.from)          { conds.push(`timestamp >= $${i++}`);         vals.push(filters.from); }
-    if (filters.to)            { conds.push(`timestamp <= $${i++}`);         vals.push(filters.to); }
+    if (filters.keyword) { conds.push(`message ILIKE $${i++}`); vals.push(`%${filters.keyword}%`); }
+    if (filters.severity) { conds.push(`severity = $${i++}`); vals.push(filters.severity); }
+    if (filters.applicationId) { conds.push(`application_id = $${i++}`); vals.push(filters.applicationId); }
+    if (filters.environment) { conds.push(`environment = $${i++}`); vals.push(filters.environment); }
+    if (filters.from) { conds.push(`timestamp >= $${i++}`); vals.push(filters.from); }
+    if (filters.to) { conds.push(`timestamp <= $${i++}`); vals.push(filters.to); }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
     const offset = (filters.page - 1) * filters.limit;
     const [d, c] = await Promise.all([
@@ -263,12 +263,12 @@ const logSearchRepository: LogSearchRepository = {
   },
   searchAll: async (filters) => {
     const conds: string[] = []; const vals: unknown[] = []; let i = 1;
-    if (filters.keyword)       { conds.push(`message ILIKE $${i++}`);    vals.push(`%${filters.keyword}%`); }
-    if (filters.severity)      { conds.push(`severity = $${i++}`);       vals.push(filters.severity); }
+    if (filters.keyword) { conds.push(`message ILIKE $${i++}`); vals.push(`%${filters.keyword}%`); }
+    if (filters.severity) { conds.push(`severity = $${i++}`); vals.push(filters.severity); }
     if (filters.applicationId) { conds.push(`application_id = $${i++}`); vals.push(filters.applicationId); }
-    if (filters.environment)   { conds.push(`environment = $${i++}`);    vals.push(filters.environment); }
-    if (filters.from)          { conds.push(`timestamp >= $${i++}`);     vals.push(filters.from); }
-    if (filters.to)            { conds.push(`timestamp <= $${i++}`);     vals.push(filters.to); }
+    if (filters.environment) { conds.push(`environment = $${i++}`); vals.push(filters.environment); }
+    if (filters.from) { conds.push(`timestamp >= $${i++}`); vals.push(filters.from); }
+    if (filters.to) { conds.push(`timestamp <= $${i++}`); vals.push(filters.to); }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
     const { rows } = await pool.query(`SELECT * FROM logs ${where} ORDER BY timestamp DESC`, vals);
     return rows;
@@ -278,10 +278,10 @@ const logSearchRepository: LogSearchRepository = {
 const breakExportRepository: BreakExportRepository = {
   exportAll: async (filters) => {
     const conds: string[] = []; const vals: unknown[] = []; let i = 1;
-    if (filters.severity)      { conds.push(`severity = $${i++}`);       vals.push(filters.severity); }
+    if (filters.severity) { conds.push(`severity = $${i++}`); vals.push(filters.severity); }
     if (filters.applicationId) { conds.push(`application_id = $${i++}`); vals.push(filters.applicationId); }
-    if (filters.from)          { conds.push(`timestamp >= $${i++}`);     vals.push(filters.from); }
-    if (filters.to)            { conds.push(`timestamp <= $${i++}`);     vals.push(filters.to); }
+    if (filters.from) { conds.push(`timestamp >= $${i++}`); vals.push(filters.from); }
+    if (filters.to) { conds.push(`timestamp <= $${i++}`); vals.push(filters.to); }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
     const { rows } = await pool.query(`SELECT * FROM breaks ${where} ORDER BY timestamp DESC`, vals);
     return rows;
@@ -291,11 +291,11 @@ const breakExportRepository: BreakExportRepository = {
 const breakRepository: BreaksRouterRepo = {
   findAll: async (filters) => {
     const conds: string[] = []; const vals: unknown[] = []; let i = 1;
-    if (filters.status)        { conds.push(`status = $${i++}`);         vals.push(filters.status); }
-    if (filters.severity)      { conds.push(`severity = $${i++}`);       vals.push(filters.severity); }
+    if (filters.status) { conds.push(`status = $${i++}`); vals.push(filters.status); }
+    if (filters.severity) { conds.push(`severity = $${i++}`); vals.push(filters.severity); }
     if (filters.applicationId) { conds.push(`application_id = $${i++}`); vals.push(filters.applicationId); }
-    if (filters.from)          { conds.push(`timestamp >= $${i++}`);     vals.push(filters.from); }
-    if (filters.to)            { conds.push(`timestamp <= $${i++}`);     vals.push(filters.to); }
+    if (filters.from) { conds.push(`timestamp >= $${i++}`); vals.push(filters.from); }
+    if (filters.to) { conds.push(`timestamp <= $${i++}`); vals.push(filters.to); }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
     const offset = (filters.page - 1) * filters.limit;
     const [d, c] = await Promise.all([
@@ -458,9 +458,9 @@ app.get('/api/projects', async (req: any, res: any) => {
     // Returns the same shape { id, name, category } with category = 'Unknown'
     // so the frontend tile grid still renders.
     const SYSTEM_TABLES = [
-      'alert_rules','alert_history','users','projects','saved_filters',
-      'retention_policies','parse_errors','audit_log','break_groups',
-      'breaks','error_solutions',
+      'alert_rules', 'alert_history', 'users', 'projects', 'saved_filters',
+      'retention_policies', 'parse_errors', 'audit_log', 'break_groups',
+      'breaks', 'error_solutions',
     ];
     const exclude = SYSTEM_TABLES.map((_, i) => `$${i + 1}`).join(',');
     const { rows: tables } = await pool.query(`
@@ -492,6 +492,10 @@ app.get('/api/projects', async (req: any, res: any) => {
 app.get('/api/projects/:name/logs', async (req: any, res: any) => {
   try {
     const projectName: string = decodeURIComponent(req.params.name);
+    const page: number = parseInt(req.query.page as string) || 1;
+    const limit: number = parseInt(req.query.limit as string) || 50;
+    const offset: number = (page - 1) * limit;
+
     // Try the exact name (spaces→underscores) first, then lowercase version
     // to handle Aurora DSQL tables which may be all-lowercase
     const tableNameExact = projectName.replace(/ /g, '_');
@@ -504,31 +508,80 @@ app.get('/api/projects/:name/logs', async (req: any, res: any) => {
     );
 
     if (tableCheck.length === 0) {
-      return res.json({ exists: false, tableName: tableNameExact, total: 0, filesProcessed: 0, success: 0, failure: 0, totalCost: null, errors: [], logs: [] });
+      return res.json({ exists: false, tableName: tableNameExact, total: 0, filesProcessed: 0, success: 0, failure: 0, totalCost: null, errors: [], logs: [], pagination: { currentPage: 1, totalPages: 0, totalRecords: 0, limit: 50, hasNextPage: false, hasPreviousPage: false } });
     }
 
     // Use the actual table name as stored in the DB (preserves case)
     const actualTableName: string = tableCheck[0].table_name;
 
+    // Get total count first
+    const { rows: countResult } = await pool.query(
+      `SELECT COUNT(*) as total FROM "${actualTableName}"`
+    );
+    const totalRecords = parseInt(countResult[0].total, 10);
+    const totalPages = Math.ceil(totalRecords / limit);
+
+    // Fetch paginated logs
     const { rows: logs } = await pool.query(
       `SELECT file_name, timestamp, success_count, failure_count, error,
               llm_usage, input_tokens, output_tokens, calculated_cost, word_count, file_type,
               error_status, resolved_at, reopened_at
-       FROM "${actualTableName}" ORDER BY timestamp DESC LIMIT 500`,
+       FROM "${actualTableName}" ORDER BY timestamp DESC LIMIT $1 OFFSET $2`,
+      [limit, offset]
     );
 
-    const total        = logs.length;
+    const total = totalRecords;
     const filesProcessed = total;
-    const success      = logs.filter((r: any) => !r.error || r.error === '').length;
-    const failure      = logs.filter((r: any) => r.error && r.error !== '' && r.error_status !== 'resolved').length;
-    const rawCost      = logs.reduce((s: number, r: any) => s + (parseFloat(r.calculated_cost) || 0), 0);
-    const totalCost    = rawCost > 0 ? `$${rawCost.toFixed(4)}` : null;
-    const errors       = logs
-      .filter((r: any) => r.error && r.error !== '' && ['open', 'reopened'].includes(r.error_status))
-      .map((r: any) => ({ timestamp: r.timestamp, message: r.error }));
-    const visibleLogs  = logs.map((r: any) => ({ ...r, error: r.error_status === 'resolved' ? null : r.error }));
 
-    res.json({ exists: true, tableName: actualTableName, total, filesProcessed, success, failure, totalCost, errors, logs: visibleLogs });
+    // Separate resolved errors from active errors
+    const resolvedLogs = logs.filter((r: any) => r.error && r.error !== '' && r.error_status === 'resolved');
+    const activeLogs = logs.filter((r: any) => r.error && r.error !== '' && r.error_status !== 'resolved');
+    const successfulLogs = logs.filter((r: any) => !r.error || r.error === '');
+
+    const success = successfulLogs.length;
+    const failure = activeLogs.length; // Count of files with active errors in this page
+    const resolved = resolvedLogs.length; // Count of files with resolved errors in this page
+
+    // Sum the failure_count column for more accurate failure metrics
+    const totalFailureCount = activeLogs.reduce((sum: number, r: any) => sum + (r.failure_count || 0), 0);
+    const totalResolvedCount = resolvedLogs.reduce((sum: number, r: any) => sum + (r.failure_count || 0), 0);
+
+    const rawCost = logs.reduce((s: number, r: any) => s + (parseFloat(r.calculated_cost) || 0), 0);
+    const totalCost = rawCost > 0 ? `$${rawCost.toFixed(4)}` : null;
+
+    const errors = activeLogs.map((r: any) => ({ timestamp: r.timestamp, message: r.error }));
+
+    // Create visibleLogs with all data, but mark resolved errors distinctly
+    const visibleLogs = logs.map((r: any) => ({
+      ...r,
+      isResolved: r.error && r.error !== '' && r.error_status === 'resolved',
+    }));
+
+    console.log(`[DEBUG] Project: ${projectName}, Page: ${page}/${totalPages}`);
+    console.log(`  - Total records: ${totalRecords}`);
+    console.log(`  - Files with active errors (this page): ${activeLogs.length}`);
+    console.log(`  - Files with resolved errors (this page): ${resolvedLogs.length}`);
+
+    res.json({
+      exists: true,
+      tableName: actualTableName,
+      total,
+      filesProcessed,
+      success,
+      failure, // Number of files with active errors in current page
+      resolved, // Number of files with resolved errors in current page
+      totalCost,
+      errors,
+      logs: visibleLogs,
+      pagination: {
+        currentPage: page,
+        totalPages,
+        totalRecords,
+        limit,
+        hasNextPage: page < totalPages,
+        hasPreviousPage: page > 1
+      }
+    });
   } catch (err) {
     console.error('[Projects] logs error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -536,12 +589,12 @@ app.get('/api/projects/:name/logs', async (req: any, res: any) => {
 });
 
 // RBAC-protected legacy routes
-app.use('/api/logs',      createLogsRouterSync(logSearchRepository, breakExportRepository, sessionStore, auditLogRepo, rbac));
-app.use('/api/breaks',    createBreaksRouterSync(breakRepository, correlatedLogRepository, sessionStore, auditLogRepo, rbac, breakExportRepository));
+app.use('/api/logs', createLogsRouterSync(logSearchRepository, breakExportRepository, sessionStore, auditLogRepo, rbac));
+app.use('/api/breaks', createBreaksRouterSync(breakRepository, correlatedLogRepository, sessionStore, auditLogRepo, rbac, breakExportRepository));
 app.use('/api/dashboard', createDashboardRouterSync(dashboardRepository, sessionStore, auditLogRepo, rbac));
-app.use('/api/alerts',    createAlertsRouterSync(alertRuleRepository, sessionStore, auditLogRepo, rbac));
-app.use('/api/filters',   createFiltersRouterSync(savedFilterRepository, sessionStore, auditLogRepo, rbac));
+app.use('/api/alerts', createAlertsRouterSync(alertRuleRepository, sessionStore, auditLogRepo, rbac));
+app.use('/api/filters', createFiltersRouterSync(savedFilterRepository, sessionStore, auditLogRepo, rbac));
 // Admin routes — mounted at /api/admin (canonical path used by admin UI)
 // and also directly at /api so Settings.tsx can reach /api/users and /api/retention
-app.use('/api/admin',     createAdminRouterSync(userRepository, retentionPolicyRepository, sessionStore, auditLogRepo, rbac));
-app.use('/api',           createAdminRouterSync(userRepository, retentionPolicyRepository, sessionStore, auditLogRepo, rbac));
+app.use('/api/admin', createAdminRouterSync(userRepository, retentionPolicyRepository, sessionStore, auditLogRepo, rbac));
+app.use('/api', createAdminRouterSync(userRepository, retentionPolicyRepository, sessionStore, auditLogRepo, rbac));
