@@ -19,7 +19,7 @@ import time
 import random
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any
-from flask import Flask, request, jsonify, make_response, g
+from flask import Flask, request, jsonify, make_response, g, has_request_context
 
 logger = logging.getLogger(__name__)
 
@@ -412,6 +412,38 @@ def handle_unexpected_error(exc):
 # The single DSQL table used for ALL data
 TABLE = "projects_data"
 DEBUG_BREAK_DETAIL = str(os.getenv("DEBUG_BREAK_DETAIL", "true")).strip().lower() in ("1", "true", "yes", "on")
+
+
+class _RequestIdFilter(logging.Filter):
+    def filter(self, record):
+        if has_request_context():
+            record.request_id = getattr(g, "request_id", "n/a")
+        else:
+            record.request_id = "n/a"
+        return True
+
+
+def _configure_debug_logging() -> None:
+    if not DEBUG_BREAK_DETAIL:
+        return
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+
+    handler_exists = any(
+        isinstance(h, logging.StreamHandler) for h in root_logger.handlers
+    )
+    if not handler_exists:
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(
+            logging.Formatter("[req:%(request_id)s] %(message)s")
+        )
+        handler.addFilter(_RequestIdFilter())
+        root_logger.addHandler(handler)
+
+
+_configure_debug_logging()
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 ALLOWED_ORIGINS = {
