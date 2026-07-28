@@ -7,6 +7,8 @@ import logging
 import os
 from typing import Any, List, Optional
 
+logger = logging.getLogger(__name__)
+
 try:
     import boto3
 except Exception as exc:  # pragma: no cover - optional dependency
@@ -14,8 +16,6 @@ except Exception as exc:  # pragma: no cover - optional dependency
     _BOTO3_IMPORT_ERROR = exc
 else:
     _BOTO3_IMPORT_ERROR = None
-
-logger = logging.getLogger(__name__)
 
 
 def _get_bedrock_region() -> str:
@@ -35,19 +35,25 @@ def _get_runtime_client():
 def _call_nova(prompt: str, max_tokens: int = 256) -> Optional[str]:
     try:
         client = _get_runtime_client()
+        model_id = _get_nova_model_id()
+        logger.info("[Nova] Bedrock request about to send — model_id=%s prompt_length=%d max_tokens=%d", model_id, len(prompt), max_tokens)
         body = json.dumps({
             "messages": [{"role": "user", "content": [{"text": prompt}]}],
             "maxTokens": max_tokens,
             "temperature": 0.0,
         })
-        response = client.invoke_model(modelId=_get_nova_model_id(), body=body)
+        response = client.invoke_model(modelId=model_id, body=body)
         payload = json.loads(response.get("body").read().decode("utf-8"))
+        logger.info("[Nova] Bedrock raw response payload=%r", payload)
         output = payload.get("output", {})
         message = output.get("message", {})
         content = message.get("content") or []
         if content and isinstance(content, list):
             text = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-            return text.strip() or None
+            trimmed = text.strip()
+            logger.info("[Nova] Parsed Nova text response length=%d text=%r", len(trimmed), trimmed[:500])
+            return trimmed or None
+        logger.info("[Nova] No text content received from Nova response")
         return None
     except Exception as exc:
         logger.exception("Bedrock Nova failed — component=bedrock_llm operation=invoke_model")
@@ -56,16 +62,27 @@ def _call_nova(prompt: str, max_tokens: int = 256) -> Optional[str]:
 
 def generate_ai_response(prompt: str, context: Optional[Any] = None, max_tokens: int = 256) -> str:
     if not isinstance(prompt, str) or not prompt.strip():
+        logger.info("[Nova] Prompt empty — using fallback response")
         return _fallback_summary(context)
+    logger.info("[Nova] Prompt sent to Nova — length=%d", len(prompt))
     result = _call_nova(prompt, max_tokens=max_tokens)
-    return result or _fallback_summary(context)
+    if result and result.strip():
+        trimmed = result.strip()
+        logger.info("[Nova] Nova response received — length=%d text=%r", len(trimmed), trimmed[:300])
+        return trimmed
+    logger.info("[Nova] No response from Nova — using fallback")
+    fallback = _fallback_summary(context)
+    logger.info("[Nova] Fallback used: %r", fallback)
+    return fallback
 
 
 def generate_suggested_solution(prompt: str, context: Optional[Any] = None) -> str:
     if not isinstance(prompt, str) or not prompt.strip():
+        logger.info("[Nova] Recommendation prompt empty — using fallback")
         return _fallback_summary(context)
     if isinstance(context, list):
         prompt = _build_recommendation_prompt(prompt, context)
+    logger.info("[Nova] Recommendation context provided — solutions=%d", len(context) if isinstance(context, list) else 0)
     return generate_ai_response(prompt, context)
 
 
@@ -73,25 +90,40 @@ def _fallback_summary(context: Any) -> str:
     if isinstance(context, list) and context:
         first = context[0]
         if isinstance(first, dict):
-            sol = first.get("solution") or ""
             usage = first.get("usage_count") or 0
             ver = first.get("version") or 1
-            if sol:
-                return f'Consider: "{sol}". Used {usage} time(s), v{ver}.'
+            return (
+                "This recommendation is based on a previously successful resolution. "
+                f"Used {usage} time(s) • v{ver}."
+            )
     return "No similar solution was found."
 
 
 def _build_recommendation_prompt(error_prompt: str, solutions: List[Any]) -> str:
-    solutions_text = "; ".join(
-        f'"{s.get("solution", "")}" (used {s.get("usage_count", 0)} times, v{s.get("version", 1)})'
-        for s in solutions[:5] if s.get("solution")
-    )
+    solution_entries = []
+    for idx, s in enumerate(solutions[:5], start=1):
+        sol_text = (s.get("solution") or "").strip()
+        if not sol_text:
+            continue
+        usage = s.get("usage_count") or 0
+        version = s.get("version") or 1
+        confidence = s.get("confidence_score")
+        meta_parts = [f"Used {usage} times", f"v{version}"]
+        if confidence is not None:
+            meta_parts.append(f"confidence {confidence}%")
+        solution_entries.append(
+            f"{idx}. {sol_text} ({' • '.join(meta_parts)})"
+        )
+
+    solutions_text = "\n".join(solution_entries) if solution_entries else "No retrieved solutions available."
     return (
-        "Given these similar solutions from the knowledge base, write a SHORT 1-2 sentence "
-        "recommendation for the developer. "
-        f"Error: {error_prompt}. "
-        f"Solutions: {solutions_text}. "
-        "Be concise and mention the most relevant solution."
+        "Use the following information to write a concise developer-facing recommendation. "
+        "Do not repeat the full solution text verbatim; the actual solution will be shown separately. "
+        "Explain why the selected solution is relevant and how it matches this error. "
+        "Mention that the solution has been successfully used before if applicable.\n\n"
+        f"Error: {error_prompt}\n\n"
+        f"Top retrieved solutions:\n{solutions_text}\n\n"
+        "Output only the recommendation, not the full solution text."
     )
 
 def generate_error_description(

@@ -526,10 +526,12 @@ def get_ai_recommendations(
 
         # Use the supplied error_message text directly when available;
         # fall back to a DB lookup by hash only when necessary.
-        prompt = ""
+        prompt_parts = []
         detail = ""
+        if project_name and project_name.strip():
+            prompt_parts.append(f"Project: {project_name.strip()}")
         if error_message and error_message.strip():
-            prompt = error_message.strip()
+            prompt_parts.append(f"Error: {error_message.strip()}")
         else:
             error_rows = query(
                 f"SELECT error AS error_message, error_detail "
@@ -538,15 +540,20 @@ def get_ai_recommendations(
                 f"LIMIT 1",
                 (error_hash,),
             )
-            prompt = (error_rows[0].get("error_message") if error_rows else "") or ""
+            prompt_parts.append((error_rows[0].get("error_message") if error_rows else "") or "")
             detail = (error_rows[0].get("error_detail") if error_rows else "") or ""
 
         if detail:
-            prompt = f"{prompt}\n\nDetails:\n{detail}".strip()
+            prompt_parts.append(f"Stack trace:\n{detail.strip()}")
+
+        prompt = "\n\n".join(part for part in prompt_parts if part).strip()
 
         generate_suggested_solution = _get_llm()
         if generate_suggested_solution:
+            logger.info("[Recommendations] Retrieved context for Nova — solutions=%d", len(solutions[:5]))
+            logger.info("[Recommendations] Prompt sent to Nova")
             recommendation = generate_suggested_solution(prompt, solutions[:5])
+            logger.info("[Recommendations] Nova response generated")
         else:
             recommendation = None
             logger.warning(
@@ -558,14 +565,30 @@ def get_ai_recommendations(
         if error_message or detail:
             from ai.llm import generate_error_description
             try:
+                logger.info(
+                    "[Recommendations] Calling generate_error_description — project_name=%r error_message_present=%s detail_length=%d solutions=%d",
+                    project_name,
+                    bool(error_message and error_message.strip()),
+                    len(detail or ""),
+                    len(solutions[:5]),
+                )
                 description = generate_error_description(
                     error_message=error_message or prompt,
                     error_detail=detail,
                     project_name=project_name,
                     solutions=solutions[:5],
                 )
+                logger.info(
+                    "[Recommendations] generate_error_description returned length=%d description=%r",
+                    len(description or ""),
+                    (description or "")[:300],
+                )
+                if not description:
+                    logger.info("[Recommendations] Description was empty — using empty fallback")
+                else:
+                    logger.info("[Recommendations] Description generated successfully")
             except Exception as desc_exc:
-                logger.warning(
+                logger.exception(
                     "[Recommendations] Error description generation failed: %s", desc_exc
                 )
 

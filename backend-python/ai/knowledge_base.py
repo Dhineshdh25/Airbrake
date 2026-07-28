@@ -188,15 +188,26 @@ def detect_duplicate_solution(
     silently blocked.
     """
     try:
+        logger.info("[KnowledgeBase] Duplicate detection started — project_name=%r group_key=%r", project_name, group_key)
         from ai.embeddings import create_embedding
 
         embedding = create_embedding(solution_text)
-        if not embedding:
+        if embedding is None:
             logger.warning("[KnowledgeBase] Duplicate detection skipped — embedding unavailable")
             return {"is_duplicate": False, "decision": "new",
                     "reason": "embedding_unavailable", "duplicate_prompt": False}
 
+        logger.info("[KnowledgeBase] Titan embedding generated — length=%d", len(embedding))
         matches = query_similar(None, embedding, project_name, limit=limit, error_hash=None)
+        logger.info("[KnowledgeBase] Pinecone similarity search executed — matches=%d", len(matches))
+        for idx, match in enumerate(matches[:5], start=1):
+            metadata = match.get("metadata") or {}
+            solution_id = metadata.get("solution_id") or match.get("id")
+            score = max(float(match.get("score") or 0.0), 0.0)
+            logger.info(
+                "[KnowledgeBase] Top %d semantic match: solution_id=%s score=%.4f metadata=%s",
+                idx, solution_id, score, metadata,
+            )
         if not matches:
             return {"is_duplicate": False, "decision": "new",
                     "reason": "no_matches", "duplicate_prompt": False}
@@ -208,6 +219,8 @@ def detect_duplicate_solution(
             if not metadata.get("solution_id"):
                 continue
             similarity = max(float(match.get("score") or 0.0), 0.0)
+            logger.info("[KnowledgeBase] Similarity score for solution_id=%s: %.4f",
+                        metadata.get("solution_id"), similarity)
             if similarity > best_similarity:
                 best_similarity = similarity
                 candidate = match
@@ -234,6 +247,7 @@ def detect_duplicate_solution(
         # Tier 3: LLM confirmation at the 0.90–0.95 boundary
         if classification["decision"] == "warn":
             try:
+                logger.info("[KnowledgeBase] LLM confirmation triggered at boundary")
                 from ai.llm import generate_ai_response
                 nova_prompt = (
                     "Are these two solutions functionally the same? "
@@ -241,7 +255,9 @@ def detect_duplicate_solution(
                     f"Solution A: {solution_text}\n\n"
                     f"Solution B: {existing_solution.get('solution') if existing_solution else ''}"
                 )
+                logger.info("[KnowledgeBase] Nova confirmation prompt sent")
                 nova_reply = (generate_ai_response(nova_prompt, max_tokens=64) or "").strip().lower()
+                logger.info("[KnowledgeBase] Nova confirmation reply: %r", nova_reply)
                 if "yes" in nova_reply:
                     classification = {
                         "is_duplicate": True, "decision": "duplicate",
@@ -251,6 +267,11 @@ def detect_duplicate_solution(
                 logger.exception("[KnowledgeBase] Nova Lite confirmation failed: %s", exc)
 
         if classification["is_duplicate"]:
+            logger.info(
+                "[KnowledgeBase] Chosen duplicate solution_id=%s similarity=%.4f",
+                candidate.get("id"), best_similarity,
+            )
+            logger.info("[KnowledgeBase] Decision: MERGE WITH EXISTING")
             return {
                 "is_duplicate":      True,
                 "decision":          classification["decision"],
@@ -263,6 +284,11 @@ def detect_duplicate_solution(
             }
 
         if best_similarity >= 0.90:
+            logger.info(
+                "[KnowledgeBase] Potential duplicate solution_id=%s similarity=%.4f",
+                candidate.get("id"), best_similarity,
+            )
+            logger.info("[KnowledgeBase] Decision: CREATE NEW (warn boundary)")
             return {
                 "is_duplicate":      False,
                 "decision":          "warn",
@@ -273,6 +299,7 @@ def detect_duplicate_solution(
                 "existing_solution": existing_solution,
                 "duplicate_prompt":  True,
             }
+        logger.info("[KnowledgeBase] Decision: CREATE NEW")
 
         return {
             "is_duplicate":  False,
