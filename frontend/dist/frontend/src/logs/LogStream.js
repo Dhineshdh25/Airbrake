@@ -52,23 +52,44 @@ function SuccessBar({ success, total }) {
                         boxShadow: `0 0 8px ${color}66`,
                     } }) })] }));
 }
-function StatusBadge({ isError }) {
+function StatusBadge({ isError, isResolved }) {
+    const bgColor = isResolved
+        ? 'rgba(139,92,246,0.15)'
+        : (isError ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.15)');
+    const textColor = isResolved
+        ? '#a78bfa'
+        : (isError ? '#f87171' : '#34d399');
+    const borderColor = isResolved
+        ? 'rgba(139,92,246,0.3)'
+        : (isError ? 'rgba(239,68,68,0.3)' : 'rgba(16,185,129,0.3)');
+    const label = isResolved ? 'Resolved' : (isError ? 'Failed' : 'Success');
     return ((0, jsx_runtime_1.jsxs)("span", { style: {
             display: 'inline-flex', alignItems: 'center', gap: 4,
             padding: '3px 10px', borderRadius: 99, fontSize: 11, fontWeight: 700,
-            background: isError ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.15)',
-            color: isError ? '#f87171' : '#34d399',
-            border: `1px solid ${isError ? 'rgba(239,68,68,0.3)' : 'rgba(16,185,129,0.3)'}`,
-        }, children: [(0, jsx_runtime_1.jsx)("span", { style: { fontSize: 8 }, children: "\u25CF" }), isError ? 'Failed' : 'Success'] }));
+            background: bgColor,
+            color: textColor,
+            border: `1px solid ${borderColor}`,
+        }, children: [(0, jsx_runtime_1.jsx)("span", { style: { fontSize: 8 }, children: "\u25CF" }), label] }));
 }
 function FileCard({ row }) {
     const [expanded, setExpanded] = (0, react_1.useState)(false);
     const isError = !!row.error;
+    const isResolved = row.isResolved ?? false;
     const hasDetails = row.llm_usage || row.input_tokens || row.output_tokens || row.calculated_cost || row.word_count;
+    const borderColor = isResolved
+        ? 'rgba(139,92,246,0.25)'
+        : (isError ? 'rgba(239,68,68,0.25)' : 'rgba(255,255,255,0.07)');
+    const bgColor = isResolved
+        ? 'rgba(139,92,246,0.04)'
+        : (isError ? 'rgba(239,68,68,0.04)' : 'rgba(255,255,255,0.02)');
+    const iconBg = isResolved
+        ? 'rgba(139,92,246,0.15)'
+        : (isError ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.12)');
+    const icon = isResolved ? '✔️' : (isError ? '📄' : '✅');
     return ((0, jsx_runtime_1.jsxs)("div", { style: {
             borderRadius: 10,
-            border: `1px solid ${isError ? 'rgba(239,68,68,0.25)' : 'rgba(255,255,255,0.07)'}`,
-            background: isError ? 'rgba(239,68,68,0.04)' : 'rgba(255,255,255,0.02)',
+            border: `1px solid ${borderColor}`,
+            background: bgColor,
             overflow: 'hidden',
             transition: 'border-color 0.15s',
         }, children: [(0, jsx_runtime_1.jsxs)("div", { onClick: () => hasDetails && setExpanded((v) => !v), style: {
@@ -77,13 +98,21 @@ function FileCard({ row }) {
                     cursor: hasDetails ? 'pointer' : 'default',
                 }, children: [(0, jsx_runtime_1.jsx)("div", { style: {
                             width: 32, height: 32, borderRadius: 8, flexShrink: 0,
-                            background: isError ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.12)',
+                            background: iconBg,
                             display: 'flex', alignItems: 'center', justifyContent: 'center',
                             fontSize: 14,
-                        }, children: isError ? '📄' : '✅' }), (0, jsx_runtime_1.jsxs)("div", { style: { flex: 1, minWidth: 0 }, children: [(0, jsx_runtime_1.jsx)("div", { style: {
+                        }, children: icon }), (0, jsx_runtime_1.jsxs)("div", { style: { flex: 1, minWidth: 0 }, children: [(0, jsx_runtime_1.jsx)("div", { style: {
                                     fontSize: 13, fontWeight: 600, color: '#e2e8f0',
                                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                                }, children: row.file_name ?? 'Unknown file' }), isError && ((0, jsx_runtime_1.jsx)("div", { style: { fontSize: 11, color: '#f87171', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, children: row.error }))] }), (0, jsx_runtime_1.jsxs)("div", { style: { textAlign: 'right', flexShrink: 0 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 11, color: '#64748b', fontFamily: 'ui-monospace, monospace' }, children: fmtTime(row.timestamp) }), (0, jsx_runtime_1.jsx)("div", { style: { fontSize: 10, color: '#475569' }, children: fmtDate(row.timestamp) })] }), (0, jsx_runtime_1.jsx)("div", { style: { flexShrink: 0 }, children: (0, jsx_runtime_1.jsx)(StatusBadge, { isError: isError }) }), hasDetails && ((0, jsx_runtime_1.jsx)("div", { style: { color: '#475569', fontSize: 12, flexShrink: 0, transition: 'transform 0.2s', transform: expanded ? 'rotate(180deg)' : 'none' }, children: "\u25BE" }))] }), expanded && hasDetails && ((0, jsx_runtime_1.jsxs)("div", { style: {
+                                }, children: row.file_name ?? 'Unknown file' }), isError && ((0, jsx_runtime_1.jsx)("div", { style: {
+                                    fontSize: 11,
+                                    color: isResolved ? '#a78bfa' : '#f87171',
+                                    marginTop: 2,
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                    textDecoration: isResolved ? 'line-through' : 'none',
+                                }, children: row.error }))] }), (0, jsx_runtime_1.jsxs)("div", { style: { textAlign: 'right', flexShrink: 0 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 11, color: '#64748b', fontFamily: 'ui-monospace, monospace' }, children: fmtTime(row.timestamp) }), (0, jsx_runtime_1.jsx)("div", { style: { fontSize: 10, color: '#475569' }, children: fmtDate(row.timestamp) })] }), (0, jsx_runtime_1.jsx)("div", { style: { flexShrink: 0 }, children: (0, jsx_runtime_1.jsx)(StatusBadge, { isError: isError, isResolved: isResolved }) }), hasDetails && ((0, jsx_runtime_1.jsx)("div", { style: { color: '#475569', fontSize: 12, flexShrink: 0, transition: 'transform 0.2s', transform: expanded ? 'rotate(180deg)' : 'none' }, children: "\u25BE" }))] }), expanded && hasDetails && ((0, jsx_runtime_1.jsxs)("div", { style: {
                     borderTop: '1px solid rgba(255,255,255,0.06)',
                     padding: '12px 14px',
                     display: 'flex', flexWrap: 'wrap', gap: 10,
@@ -112,6 +141,7 @@ function ProjectModal({ project, onClose }) {
     const [stats, setStats] = (0, react_1.useState)(null);
     const [loading, setLoading] = (0, react_1.useState)(true);
     const [failedCollapsed, setFailedCollapsed] = (0, react_1.useState)(false);
+    const [resolvedCollapsed, setResolvedCollapsed] = (0, react_1.useState)(true);
     const [successCollapsed, setSuccessCollapsed] = (0, react_1.useState)(true);
     (0, react_1.useEffect)(() => {
         (0, api_1.apiFetch)(`/api/projects/${encodeURIComponent(project.name)}/logs`)
@@ -119,10 +149,13 @@ function ProjectModal({ project, onClose }) {
             .then((d) => { setStats(d); setLoading(false); })
             .catch(() => setLoading(false));
     }, [project.name]);
-    const failedLogs = (stats?.logs?.filter((r) => !!r.error) ?? []).slice(0, 50);
-    const successLogs = (stats?.logs?.filter((r) => !r.error) ?? []).slice(0, 50);
+    // Filter logs by status
+    const failedLogs = (stats?.logs?.filter((r) => !!r.error && !r.isResolved) ?? []).slice(0, 50);
+    const resolvedLogs = (stats?.logs?.filter((r) => !!r.error && r.isResolved) ?? []).slice(0, 50);
+    const successLogs = (stats?.logs?.filter((r) => !r.error) ?? []); // Show all successful logs, no limit
     // Count totals before slicing
-    const totalFailedLogs = stats?.logs?.filter((r) => !!r.error).length ?? 0;
+    const totalFailedLogs = stats?.logs?.filter((r) => !!r.error && !r.isResolved).length ?? 0;
+    const totalResolvedLogs = stats?.logs?.filter((r) => !!r.error && r.isResolved).length ?? 0;
     const totalSuccessLogs = stats?.logs?.filter((r) => !r.error).length ?? 0;
     // Aggregate token/cost totals if available
     const totalInputTokens = stats?.logs?.reduce((s, r) => s + (r.input_tokens ?? 0), 0) ?? 0;
@@ -158,7 +191,7 @@ function ProjectModal({ project, onClose }) {
                                 color: '#94a3b8', fontSize: 16, cursor: 'pointer',
                                 width: 32, height: 32, borderRadius: 8,
                                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            }, children: "\u2715" })] }), (0, jsx_runtime_1.jsxs)("div", { style: { overflow: 'auto', padding: '20px 22px', flex: 1 }, children: [loading && ((0, jsx_runtime_1.jsxs)("div", { style: { textAlign: 'center', color: '#475569', padding: '60px 0', fontSize: 14 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 28, marginBottom: 12 }, children: "\u23F3" }), "Loading logs\u2026"] })), !loading && stats && !stats.exists && ((0, jsx_runtime_1.jsxs)("div", { style: { textAlign: 'center', color: '#475569', padding: '60px 0', fontSize: 14 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 32, marginBottom: 12 }, children: "\uD83D\uDCED" }), "No data table found for this project yet."] })), !loading && stats && stats.exists && ((0, jsx_runtime_1.jsxs)(jsx_runtime_1.Fragment, { children: [(0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap', alignItems: 'stretch' }, children: [(0, jsx_runtime_1.jsx)(SummaryCard, { label: "Files Processed", value: stats.filesProcessed, color: "#3b82f6", icon: "\uD83D\uDCC1" }), (0, jsx_runtime_1.jsx)(SummaryCard, { label: "Total Success", value: stats.success, color: "#10b981", icon: "\u2705" }), (0, jsx_runtime_1.jsx)(SummaryCard, { label: "Total Failures", value: stats.failure, color: "#ef4444", icon: "\u274C" }), hasTokenData && ((0, jsx_runtime_1.jsx)(SummaryCard, { label: "Input Tokens", value: totalInputTokens.toLocaleString(), color: "#8b5cf6", icon: "\uD83D\uDD22" })), hasTokenData && ((0, jsx_runtime_1.jsx)(SummaryCard, { label: "Output Tokens", value: totalOutputTokens.toLocaleString(), color: "#6366f1", icon: "\uD83D\uDCE4" })), stats.totalCost && ((0, jsx_runtime_1.jsx)(SummaryCard, { label: "Total Cost", value: stats.totalCost, color: "#f59e0b", icon: "\uD83D\uDCB0" }))] }), (0, jsx_runtime_1.jsx)(SuccessBar, { success: stats.success, total: stats.filesProcessed }), totalFailedLogs > 0 && ((0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 16 }, children: [(0, jsx_runtime_1.jsx)(SectionHeader, { title: totalFailedLogs > 50 ? `Failed Files (showing 50 of ${totalFailedLogs})` : "Failed Files", count: totalFailedLogs, color: "#f87171", collapsed: failedCollapsed, onToggle: () => setFailedCollapsed((v) => !v) }), !failedCollapsed && ((0, jsx_runtime_1.jsx)("div", { style: { display: 'flex', flexDirection: 'column', gap: 6 }, children: failedLogs.map((row, i) => (0, jsx_runtime_1.jsx)(FileCard, { row: row }, i)) }))] })), totalSuccessLogs > 0 && ((0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 8 }, children: [(0, jsx_runtime_1.jsx)(SectionHeader, { title: totalSuccessLogs > 50 ? `Successful Files (showing 50 of ${totalSuccessLogs})` : "Successful Files", count: totalSuccessLogs, color: "#34d399", collapsed: successCollapsed, onToggle: () => setSuccessCollapsed((v) => !v) }), !successCollapsed && ((0, jsx_runtime_1.jsx)("div", { style: { display: 'flex', flexDirection: 'column', gap: 6 }, children: successLogs.map((row, i) => (0, jsx_runtime_1.jsx)(FileCard, { row: row }, i)) }))] })), stats.logs?.length === 0 && ((0, jsx_runtime_1.jsx)("div", { style: { textAlign: 'center', color: '#475569', padding: '30px 0', fontSize: 13 }, children: "No file logs recorded yet." }))] }))] })] }) }));
+                            }, children: "\u2715" })] }), (0, jsx_runtime_1.jsxs)("div", { style: { overflow: 'auto', padding: '20px 22px', flex: 1 }, children: [loading && ((0, jsx_runtime_1.jsxs)("div", { style: { textAlign: 'center', color: '#475569', padding: '60px 0', fontSize: 14 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 28, marginBottom: 12 }, children: "\u23F3" }), "Loading logs\u2026"] })), !loading && stats && !stats.exists && ((0, jsx_runtime_1.jsxs)("div", { style: { textAlign: 'center', color: '#475569', padding: '60px 0', fontSize: 14 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 32, marginBottom: 12 }, children: "\uD83D\uDCED" }), "No data table found for this project yet."] })), !loading && stats && stats.exists && ((0, jsx_runtime_1.jsxs)(jsx_runtime_1.Fragment, { children: [(0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap', alignItems: 'stretch' }, children: [(0, jsx_runtime_1.jsx)(SummaryCard, { label: "Files Processed", value: stats.filesProcessed, color: "#3b82f6", icon: "\uD83D\uDCC1" }), (0, jsx_runtime_1.jsx)(SummaryCard, { label: "Total Success", value: stats.success, color: "#10b981", icon: "\u2705" }), (0, jsx_runtime_1.jsx)(SummaryCard, { label: "Total Failures", value: stats.failure, color: "#ef4444", icon: "\u274C" }), (stats.resolved ?? 0) > 0 && ((0, jsx_runtime_1.jsx)(SummaryCard, { label: "Resolved Errors", value: stats.resolved ?? 0, color: "#8b5cf6", icon: "\u2714\uFE0F" })), hasTokenData && ((0, jsx_runtime_1.jsx)(SummaryCard, { label: "Input Tokens", value: totalInputTokens.toLocaleString(), color: "#8b5cf6", icon: "\uD83D\uDD22" })), hasTokenData && ((0, jsx_runtime_1.jsx)(SummaryCard, { label: "Output Tokens", value: totalOutputTokens.toLocaleString(), color: "#6366f1", icon: "\uD83D\uDCE4" })), stats.totalCost && ((0, jsx_runtime_1.jsx)(SummaryCard, { label: "Total Cost", value: stats.totalCost, color: "#f59e0b", icon: "\uD83D\uDCB0" }))] }), (0, jsx_runtime_1.jsx)(SuccessBar, { success: stats.success, total: stats.filesProcessed }), totalFailedLogs > 0 && ((0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 16 }, children: [(0, jsx_runtime_1.jsx)(SectionHeader, { title: totalFailedLogs > 50 ? `Failed Files (showing 50 of ${totalFailedLogs})` : "Failed Files", count: totalFailedLogs, color: "#f87171", collapsed: failedCollapsed, onToggle: () => setFailedCollapsed((v) => !v) }), !failedCollapsed && ((0, jsx_runtime_1.jsx)("div", { style: { display: 'flex', flexDirection: 'column', gap: 6 }, children: failedLogs.map((row, i) => (0, jsx_runtime_1.jsx)(FileCard, { row: row }, i)) }))] })), totalResolvedLogs > 0 && ((0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 16 }, children: [(0, jsx_runtime_1.jsx)(SectionHeader, { title: totalResolvedLogs > 50 ? `Resolved Files (showing 50 of ${totalResolvedLogs})` : "Resolved Files", count: totalResolvedLogs, color: "#8b5cf6", collapsed: resolvedCollapsed, onToggle: () => setResolvedCollapsed((v) => !v) }), !resolvedCollapsed && ((0, jsx_runtime_1.jsx)("div", { style: { display: 'flex', flexDirection: 'column', gap: 6 }, children: resolvedLogs.map((row, i) => (0, jsx_runtime_1.jsx)(FileCard, { row: row }, i)) }))] })), totalSuccessLogs > 0 && ((0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 8 }, children: [(0, jsx_runtime_1.jsx)(SectionHeader, { title: "Successful Files", count: totalSuccessLogs, color: "#34d399", collapsed: successCollapsed, onToggle: () => setSuccessCollapsed((v) => !v) }), !successCollapsed && ((0, jsx_runtime_1.jsx)("div", { style: { display: 'flex', flexDirection: 'column', gap: 6 }, children: successLogs.map((row, i) => (0, jsx_runtime_1.jsx)(FileCard, { row: row }, i)) }))] })), stats.logs?.length === 0 && ((0, jsx_runtime_1.jsx)("div", { style: { textAlign: 'center', color: '#475569', padding: '30px 0', fontSize: 13 }, children: "No file logs recorded yet." }))] }))] })] }) }));
 }
 // ─── Tile ─────────────────────────────────────────────────────────────────────
 function ProjectTile({ project, index, onClick }) {

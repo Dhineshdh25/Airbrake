@@ -483,15 +483,41 @@ exports.app.get('/api/projects/:name/logs', async (req, res) => {
        FROM "${actualTableName}" ORDER BY timestamp DESC LIMIT 500`);
         const total = logs.length;
         const filesProcessed = total;
-        const success = logs.filter((r) => !r.error || r.error === '').length;
-        const failure = logs.filter((r) => r.error && r.error !== '' && r.error_status !== 'resolved').length;
+        // Separate resolved errors from active errors
+        const resolvedLogs = logs.filter((r) => r.error && r.error !== '' && r.error_status === 'resolved');
+        const activeLogs = logs.filter((r) => r.error && r.error !== '' && r.error_status !== 'resolved');
+        const successfulLogs = logs.filter((r) => !r.error || r.error === '');
+        const success = successfulLogs.length;
+        const failure = activeLogs.length; // Count of files with active errors
+        const resolved = resolvedLogs.length; // Count of files with resolved errors
+        // Sum the failure_count column for more accurate failure metrics
+        const totalFailureCount = activeLogs.reduce((sum, r) => sum + (r.failure_count || 0), 0);
+        const totalResolvedCount = resolvedLogs.reduce((sum, r) => sum + (r.failure_count || 0), 0);
         const rawCost = logs.reduce((s, r) => s + (parseFloat(r.calculated_cost) || 0), 0);
         const totalCost = rawCost > 0 ? `$${rawCost.toFixed(4)}` : null;
-        const errors = logs
-            .filter((r) => r.error && r.error !== '' && ['open', 'reopened'].includes(r.error_status))
-            .map((r) => ({ timestamp: r.timestamp, message: r.error }));
-        const visibleLogs = logs.map((r) => ({ ...r, error: r.error_status === 'resolved' ? null : r.error }));
-        res.json({ exists: true, tableName: actualTableName, total, filesProcessed, success, failure, totalCost, errors, logs: visibleLogs });
+        const errors = activeLogs.map((r) => ({ timestamp: r.timestamp, message: r.error }));
+        // Create visibleLogs with all data, but mark resolved errors distinctly
+        const visibleLogs = logs.map((r) => ({
+            ...r,
+            isResolved: r.error && r.error !== '' && r.error_status === 'resolved',
+        }));
+        console.log(`[DEBUG] Project: ${projectName}`);
+        console.log(`  - Files with active errors: ${activeLogs.length}`);
+        console.log(`  - Sum of failure_count for active errors: ${totalFailureCount}`);
+        console.log(`  - Files with resolved errors: ${resolvedLogs.length}`);
+        console.log(`  - Sum of failure_count for resolved: ${totalResolvedCount}`);
+        res.json({
+            exists: true,
+            tableName: actualTableName,
+            total,
+            filesProcessed,
+            success,
+            failure, // Number of files with active errors
+            resolved, // Number of files with resolved errors
+            totalCost,
+            errors,
+            logs: visibleLogs
+        });
     }
     catch (err) {
         console.error('[Projects] logs error:', err);

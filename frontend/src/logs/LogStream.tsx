@@ -23,6 +23,7 @@ interface LogRow {
   calculated_cost: string | null;
   word_count: number | null;
   file_type: string | null;
+  isResolved?: boolean; // Added to identify resolved errors
 }
 
 interface ProjectStats {
@@ -32,9 +33,18 @@ interface ProjectStats {
   filesProcessed: number;
   success: number;
   failure: number;
+  resolved?: number; // Added to track resolved errors
   totalCost: string | null;
   errors: { timestamp: string | null; message: string }[];
   logs: LogRow[];
+  pagination?: {
+    currentPage: number;
+    totalPages: number;
+    totalRecords: number;
+    limit: number;
+    hasNextPage: boolean;
+    hasPreviousPage: boolean;
+  };
 }
 
 const CATEGORIES = ['All', 'Gen AI', 'Computer Vision', 'Traditional Model', 'RAG', 'Analytics'];
@@ -105,17 +115,28 @@ function SuccessBar({ success, total }: { success: number; total: number }) {
   );
 }
 
-function StatusBadge({ isError }: { isError: boolean }) {
+function StatusBadge({ isError, isResolved }: { isError: boolean; isResolved?: boolean }) {
+  const bgColor = isResolved
+    ? 'rgba(139,92,246,0.15)'
+    : (isError ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.15)');
+  const textColor = isResolved
+    ? '#a78bfa'
+    : (isError ? '#f87171' : '#34d399');
+  const borderColor = isResolved
+    ? 'rgba(139,92,246,0.3)'
+    : (isError ? 'rgba(239,68,68,0.3)' : 'rgba(16,185,129,0.3)');
+  const label = isResolved ? 'Resolved' : (isError ? 'Failed' : 'Success');
+
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 4,
       padding: '3px 10px', borderRadius: 99, fontSize: 11, fontWeight: 700,
-      background: isError ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.15)',
-      color: isError ? '#f87171' : '#34d399',
-      border: `1px solid ${isError ? 'rgba(239,68,68,0.3)' : 'rgba(16,185,129,0.3)'}`,
+      background: bgColor,
+      color: textColor,
+      border: `1px solid ${borderColor}`,
     }}>
       <span style={{ fontSize: 8 }}>●</span>
-      {isError ? 'Failed' : 'Success'}
+      {label}
     </span>
   );
 }
@@ -123,13 +144,25 @@ function StatusBadge({ isError }: { isError: boolean }) {
 function FileCard({ row }: { row: LogRow }) {
   const [expanded, setExpanded] = useState(false);
   const isError = !!row.error;
+  const isResolved = row.isResolved ?? false;
   const hasDetails = row.llm_usage || row.input_tokens || row.output_tokens || row.calculated_cost || row.word_count;
+
+  const borderColor = isResolved
+    ? 'rgba(139,92,246,0.25)'
+    : (isError ? 'rgba(239,68,68,0.25)' : 'rgba(255,255,255,0.07)');
+  const bgColor = isResolved
+    ? 'rgba(139,92,246,0.04)'
+    : (isError ? 'rgba(239,68,68,0.04)' : 'rgba(255,255,255,0.02)');
+  const iconBg = isResolved
+    ? 'rgba(139,92,246,0.15)'
+    : (isError ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.12)');
+  const icon = isResolved ? '✔️' : (isError ? '📄' : '✅');
 
   return (
     <div style={{
       borderRadius: 10,
-      border: `1px solid ${isError ? 'rgba(239,68,68,0.25)' : 'rgba(255,255,255,0.07)'}`,
-      background: isError ? 'rgba(239,68,68,0.04)' : 'rgba(255,255,255,0.02)',
+      border: `1px solid ${borderColor}`,
+      background: bgColor,
       overflow: 'hidden',
       transition: 'border-color 0.15s',
     }}>
@@ -145,11 +178,11 @@ function FileCard({ row }: { row: LogRow }) {
         {/* File icon */}
         <div style={{
           width: 32, height: 32, borderRadius: 8, flexShrink: 0,
-          background: isError ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.12)',
+          background: iconBg,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontSize: 14,
         }}>
-          {isError ? '📄' : '✅'}
+          {icon}
         </div>
 
         {/* File info */}
@@ -161,7 +194,15 @@ function FileCard({ row }: { row: LogRow }) {
             {row.file_name ?? 'Unknown file'}
           </div>
           {isError && (
-            <div style={{ fontSize: 11, color: '#f87171', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <div style={{
+              fontSize: 11,
+              color: isResolved ? '#a78bfa' : '#f87171',
+              marginTop: 2,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              textDecoration: isResolved ? 'line-through' : 'none',
+            }}>
               {row.error}
             </div>
           )}
@@ -175,7 +216,7 @@ function FileCard({ row }: { row: LogRow }) {
 
         {/* Badge */}
         <div style={{ flexShrink: 0 }}>
-          <StatusBadge isError={isError} />
+          <StatusBadge isError={isError} isResolved={isResolved} />
         </div>
 
         {/* Expand chevron */}
@@ -244,22 +285,28 @@ function SectionHeader({ title, count, color, collapsed, onToggle }: {
 function ProjectModal({ project, onClose }: { project: Project; onClose: () => void }) {
   const [stats, setStats] = useState<ProjectStats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [currentPage, setCurrentPage] = useState(1);
   const [failedCollapsed, setFailedCollapsed] = useState(false);
+  const [resolvedCollapsed, setResolvedCollapsed] = useState(true);
   const [successCollapsed, setSuccessCollapsed] = useState(true);
 
   useEffect(() => {
-    apiFetch(`/api/projects/${encodeURIComponent(project.name)}/logs`)
+    setLoading(true);
+    apiFetch(`/api/projects/${encodeURIComponent(project.name)}/logs?page=${currentPage}&limit=50`)
       .then((r) => r.json())
       .then((d) => { setStats(d as ProjectStats); setLoading(false); })
       .catch(() => setLoading(false));
-  }, [project.name]);
+  }, [project.name, currentPage]);
 
-  const failedLogs = (stats?.logs?.filter((r) => !!r.error) ?? []).slice(0, 50);
-  const successLogs = (stats?.logs?.filter((r) => !r.error) ?? []).slice(0, 50);
+  // Filter logs by status - no slicing, show all in current page
+  const failedLogs = stats?.logs?.filter((r) => !!r.error && !r.isResolved) ?? [];
+  const resolvedLogs = stats?.logs?.filter((r) => !!r.error && r.isResolved) ?? [];
+  const successLogs = stats?.logs?.filter((r) => !r.error) ?? [];
 
-  // Count totals before slicing
-  const totalFailedLogs = stats?.logs?.filter((r) => !!r.error).length ?? 0;
-  const totalSuccessLogs = stats?.logs?.filter((r) => !r.error).length ?? 0;
+  // Count totals
+  const totalFailedLogs = failedLogs.length;
+  const totalResolvedLogs = resolvedLogs.length;
+  const totalSuccessLogs = successLogs.length;
 
   // Aggregate token/cost totals if available
   const totalInputTokens = stats?.logs?.reduce((s, r) => s + (r.input_tokens ?? 0), 0) ?? 0;
@@ -340,6 +387,9 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
                 <SummaryCard label="Files Processed" value={stats.filesProcessed} color="#3b82f6" icon="📁" />
                 <SummaryCard label="Total Success" value={stats.success} color="#10b981" icon="✅" />
                 <SummaryCard label="Total Failures" value={stats.failure} color="#ef4444" icon="❌" />
+                {(stats.resolved ?? 0) > 0 && (
+                  <SummaryCard label="Resolved Errors" value={stats.resolved ?? 0} color="#8b5cf6" icon="✔️" />
+                )}
                 {hasTokenData && (
                   <SummaryCard label="Input Tokens" value={totalInputTokens.toLocaleString()} color="#8b5cf6" icon="🔢" />
                 )}
@@ -372,11 +422,29 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
                 </div>
               )}
 
+              {/* ── Resolved files ── */}
+              {totalResolvedLogs > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <SectionHeader
+                    title={totalResolvedLogs > 50 ? `Resolved Files (showing 50 of ${totalResolvedLogs})` : "Resolved Files"}
+                    count={totalResolvedLogs}
+                    color="#8b5cf6"
+                    collapsed={resolvedCollapsed}
+                    onToggle={() => setResolvedCollapsed((v) => !v)}
+                  />
+                  {!resolvedCollapsed && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {resolvedLogs.map((row, i) => <FileCard key={i} row={row} />)}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* ── Successful files ── */}
               {totalSuccessLogs > 0 && (
                 <div style={{ marginBottom: 8 }}>
                   <SectionHeader
-                    title={totalSuccessLogs > 50 ? `Successful Files (showing 50 of ${totalSuccessLogs})` : "Successful Files"}
+                    title="Successful Files"
                     count={totalSuccessLogs}
                     color="#34d399"
                     collapsed={successCollapsed}
@@ -394,6 +462,91 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
               {stats.logs?.length === 0 && (
                 <div style={{ textAlign: 'center', color: '#475569', padding: '30px 0', fontSize: 13 }}>
                   No file logs recorded yet.
+                </div>
+              )}
+
+              {/* ── Pagination ── */}
+              {stats.pagination && stats.pagination.totalPages > 1 && (
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginTop: 20,
+                  padding: '16px 0',
+                  borderTop: '1px solid rgba(255,255,255,0.07)'
+                }}>
+                  <div style={{ fontSize: 12, color: '#94a3b8' }}>
+                    Page {stats.pagination.currentPage} of {stats.pagination.totalPages}
+                    <span style={{ marginLeft: 8, color: '#64748b' }}>
+                      ({stats.pagination.totalRecords.toLocaleString()} total records)
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      onClick={() => setCurrentPage(1)}
+                      disabled={!stats.pagination.hasPreviousPage}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: 6,
+                        fontSize: 12,
+                        fontWeight: 600,
+                        cursor: stats.pagination.hasPreviousPage ? 'pointer' : 'not-allowed',
+                        background: stats.pagination.hasPreviousPage ? 'rgba(99,102,241,0.1)' : 'rgba(255,255,255,0.05)',
+                        border: `1px solid ${stats.pagination.hasPreviousPage ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.1)'}`,
+                        color: stats.pagination.hasPreviousPage ? '#818cf8' : '#475569',
+                      }}
+                    >
+                      First
+                    </button>
+                    <button
+                      onClick={() => setCurrentPage(currentPage - 1)}
+                      disabled={!stats.pagination.hasPreviousPage}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: 6,
+                        fontSize: 12,
+                        fontWeight: 600,
+                        cursor: stats.pagination.hasPreviousPage ? 'pointer' : 'not-allowed',
+                        background: stats.pagination.hasPreviousPage ? 'rgba(99,102,241,0.1)' : 'rgba(255,255,255,0.05)',
+                        border: `1px solid ${stats.pagination.hasPreviousPage ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.1)'}`,
+                        color: stats.pagination.hasPreviousPage ? '#818cf8' : '#475569',
+                      }}
+                    >
+                      ← Previous
+                    </button>
+                    <button
+                      onClick={() => setCurrentPage(currentPage + 1)}
+                      disabled={!stats.pagination.hasNextPage}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: 6,
+                        fontSize: 12,
+                        fontWeight: 600,
+                        cursor: stats.pagination.hasNextPage ? 'pointer' : 'not-allowed',
+                        background: stats.pagination.hasNextPage ? 'rgba(99,102,241,0.1)' : 'rgba(255,255,255,0.05)',
+                        border: `1px solid ${stats.pagination.hasNextPage ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.1)'}`,
+                        color: stats.pagination.hasNextPage ? '#818cf8' : '#475569',
+                      }}
+                    >
+                      Next →
+                    </button>
+                    <button
+                      onClick={() => setCurrentPage(stats.pagination!.totalPages)}
+                      disabled={!stats.pagination.hasNextPage}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: 6,
+                        fontSize: 12,
+                        fontWeight: 600,
+                        cursor: stats.pagination.hasNextPage ? 'pointer' : 'not-allowed',
+                        background: stats.pagination.hasNextPage ? 'rgba(99,102,241,0.1)' : 'rgba(255,255,255,0.05)',
+                        border: `1px solid ${stats.pagination.hasNextPage ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.1)'}`,
+                        color: stats.pagination.hasNextPage ? '#818cf8' : '#475569',
+                      }}
+                    >
+                      Last
+                    </button>
+                  </div>
                 </div>
               )}
             </>
