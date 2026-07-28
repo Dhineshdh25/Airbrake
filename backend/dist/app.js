@@ -466,6 +466,12 @@ exports.app.get('/api/projects', async (req, res) => {
 exports.app.get('/api/projects/:name/logs', async (req, res) => {
     try {
         const projectName = decodeURIComponent(req.params.name);
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 50;
+        const offset = (page - 1) * limit;
+        // Date filter parameters
+        const from = req.query.from;
+        const to = req.query.to;
         // Try the exact name (spaces→underscores) first, then lowercase version
         // to handle Aurora DSQL tables which may be all-lowercase
         const tableNameExact = projectName.replace(/ /g, '_');
@@ -473,23 +479,47 @@ exports.app.get('/api/projects/:name/logs', async (req, res) => {
         const { rows: tableCheck } = await client_1.pool.query(`SELECT table_name FROM information_schema.tables
        WHERE table_schema = 'public' AND LOWER(table_name) = LOWER($1)`, [tableNameExact]);
         if (tableCheck.length === 0) {
-            return res.json({ exists: false, tableName: tableNameExact, total: 0, filesProcessed: 0, success: 0, failure: 0, totalCost: null, errors: [], logs: [] });
+            return res.json({ exists: false, tableName: tableNameExact, total: 0, filesProcessed: 0, success: 0, failure: 0, totalCost: null, errors: [], logs: [], pagination: { currentPage: 1, totalPages: 0, totalRecords: 0, limit: 50, hasNextPage: false, hasPreviousPage: false } });
         }
         // Use the actual table name as stored in the DB (preserves case)
         const actualTableName = tableCheck[0].table_name;
+        // Build date filter WHERE clause
+        let dateFilter = '';
+        const queryParams = [limit, offset];
+        let paramIndex = 3;
+        if (from) {
+            dateFilter += ` AND timestamp >= $${paramIndex}`;
+            queryParams.push(from);
+            paramIndex++;
+        }
+        if (to) {
+            dateFilter += ` AND timestamp <= $${paramIndex}`;
+            queryParams.push(to);
+            paramIndex++;
+        }
+        // Get total count first with date filter
+        const countQuery = from || to
+            ? `SELECT COUNT(*) as total FROM "${actualTableName}" WHERE 1=1 ${dateFilter}`
+            : `SELECT COUNT(*) as total FROM "${actualTableName}"`;
+        const { rows: countResult } = await client_1.pool.query(countQuery, from || to ? queryParams.slice(2) : []);
+        const totalRecords = parseInt(countResult[0].total, 10);
+        const totalPages = Math.ceil(totalRecords / limit);
+        // Fetch paginated logs with date filter
         const { rows: logs } = await client_1.pool.query(`SELECT file_name, timestamp, success_count, failure_count, error,
               llm_usage, input_tokens, output_tokens, calculated_cost, word_count, file_type,
               error_status, resolved_at, reopened_at
-       FROM "${actualTableName}" ORDER BY timestamp DESC LIMIT 500`);
-        const total = logs.length;
+       FROM "${actualTableName}"
+       WHERE 1=1 ${dateFilter}
+       ORDER BY timestamp DESC LIMIT $1 OFFSET $2`, queryParams);
+        const total = totalRecords;
         const filesProcessed = total;
         // Separate resolved errors from active errors
         const resolvedLogs = logs.filter((r) => r.error && r.error !== '' && r.error_status === 'resolved');
         const activeLogs = logs.filter((r) => r.error && r.error !== '' && r.error_status !== 'resolved');
         const successfulLogs = logs.filter((r) => !r.error || r.error === '');
         const success = successfulLogs.length;
-        const failure = activeLogs.length; // Count of files with active errors
-        const resolved = resolvedLogs.length; // Count of files with resolved errors
+        const failure = activeLogs.length; // Count of files with active errors in this page
+        const resolved = resolvedLogs.length; // Count of files with resolved errors in this page
         // Sum the failure_count column for more accurate failure metrics
         const totalFailureCount = activeLogs.reduce((sum, r) => sum + (r.failure_count || 0), 0);
         const totalResolvedCount = resolvedLogs.reduce((sum, r) => sum + (r.failure_count || 0), 0);
@@ -501,22 +531,29 @@ exports.app.get('/api/projects/:name/logs', async (req, res) => {
             ...r,
             isResolved: r.error && r.error !== '' && r.error_status === 'resolved',
         }));
-        console.log(`[DEBUG] Project: ${projectName}`);
-        console.log(`  - Files with active errors: ${activeLogs.length}`);
-        console.log(`  - Sum of failure_count for active errors: ${totalFailureCount}`);
-        console.log(`  - Files with resolved errors: ${resolvedLogs.length}`);
-        console.log(`  - Sum of failure_count for resolved: ${totalResolvedCount}`);
+        console.log(`[DEBUG] Project: ${projectName}, Page: ${page}/${totalPages}, Date Filter: ${from ? `from ${from}` : ''} ${to ? `to ${to}` : ''}`);
+        console.log(`  - Total records: ${totalRecords}`);
+        console.log(`  - Files with active errors (this page): ${activeLogs.length}`);
+        console.log(`  - Files with resolved errors (this page): ${resolvedLogs.length}`);
         res.json({
             exists: true,
             tableName: actualTableName,
             total,
             filesProcessed,
             success,
-            failure, // Number of files with active errors
-            resolved, // Number of files with resolved errors
+            failure, // Number of files with active errors in current page
+            resolved, // Number of files with resolved errors in current page
             totalCost,
             errors,
-            logs: visibleLogs
+            logs: visibleLogs,
+            pagination: {
+                currentPage: page,
+                totalPages,
+                totalRecords,
+                limit,
+                hasNextPage: page < totalPages,
+                hasPreviousPage: page > 1
+            }
         });
     }
     catch (err) {

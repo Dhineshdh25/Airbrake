@@ -496,6 +496,10 @@ app.get('/api/projects/:name/logs', async (req: any, res: any) => {
     const limit: number = parseInt(req.query.limit as string) || 50;
     const offset: number = (page - 1) * limit;
 
+    // Date filter parameters
+    const from: string | undefined = req.query.from;
+    const to: string | undefined = req.query.to;
+
     // Try the exact name (spaces→underscores) first, then lowercase version
     // to handle Aurora DSQL tables which may be all-lowercase
     const tableNameExact = projectName.replace(/ /g, '_');
@@ -514,20 +518,43 @@ app.get('/api/projects/:name/logs', async (req: any, res: any) => {
     // Use the actual table name as stored in the DB (preserves case)
     const actualTableName: string = tableCheck[0].table_name;
 
-    // Get total count first
+    // Build date filter WHERE clause
+    let dateFilter = '';
+    const queryParams: any[] = [limit, offset];
+    let paramIndex = 3;
+
+    if (from) {
+      dateFilter += ` AND timestamp >= $${paramIndex}`;
+      queryParams.push(from);
+      paramIndex++;
+    }
+    if (to) {
+      dateFilter += ` AND timestamp <= $${paramIndex}`;
+      queryParams.push(to);
+      paramIndex++;
+    }
+
+    // Get total count first with date filter
+    const countQuery = from || to
+      ? `SELECT COUNT(*) as total FROM "${actualTableName}" WHERE 1=1 ${dateFilter}`
+      : `SELECT COUNT(*) as total FROM "${actualTableName}"`;
+
     const { rows: countResult } = await pool.query(
-      `SELECT COUNT(*) as total FROM "${actualTableName}"`
+      countQuery,
+      from || to ? queryParams.slice(2) : []
     );
     const totalRecords = parseInt(countResult[0].total, 10);
     const totalPages = Math.ceil(totalRecords / limit);
 
-    // Fetch paginated logs
+    // Fetch paginated logs with date filter
     const { rows: logs } = await pool.query(
       `SELECT file_name, timestamp, success_count, failure_count, error,
               llm_usage, input_tokens, output_tokens, calculated_cost, word_count, file_type,
               error_status, resolved_at, reopened_at
-       FROM "${actualTableName}" ORDER BY timestamp DESC LIMIT $1 OFFSET $2`,
-      [limit, offset]
+       FROM "${actualTableName}"
+       WHERE 1=1 ${dateFilter}
+       ORDER BY timestamp DESC LIMIT $1 OFFSET $2`,
+      queryParams
     );
 
     const total = totalRecords;
@@ -557,7 +584,7 @@ app.get('/api/projects/:name/logs', async (req: any, res: any) => {
       isResolved: r.error && r.error !== '' && r.error_status === 'resolved',
     }));
 
-    console.log(`[DEBUG] Project: ${projectName}, Page: ${page}/${totalPages}`);
+    console.log(`[DEBUG] Project: ${projectName}, Page: ${page}/${totalPages}${from ? `, From: ${from}` : ''}${to ? `, To: ${to}` : ''}`);
     console.log(`  - Total records: ${totalRecords}`);
     console.log(`  - Files with active errors (this page): ${activeLogs.length}`);
     console.log(`  - Files with resolved errors (this page): ${resolvedLogs.length}`);
