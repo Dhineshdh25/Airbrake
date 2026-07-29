@@ -614,6 +614,144 @@ def debug_ai_health():
         })
 
 
+@app.route("/api/debug/nova-direct")
+def debug_nova_direct():
+    events = []
+    try:
+        import traceback as _tb_mod
+        from ai import bedrock_llm
+
+        events.append({"stage": "starting"})
+        events.append({"stage": "import_bedrock_wrapper"})
+
+        client = bedrock_llm._get_runtime_client()
+        events.append({"stage": "client_initialized"})
+
+        model_id = bedrock_llm._get_nova_model_id()
+        events.append({"stage": "model_identified", "model_id": model_id})
+
+        prompt = (
+            "You are analyzing application errors for an automated error-monitoring system.\n\n"
+            "Below are errors that may be different in wording but represent the same underlying problem.\n\n"
+            "Errors:\n\n"
+            "1. \"400: Input file does not exist or is not a file\"\n"
+            "2. \"400: Input file is empty\"\n"
+            "3. \"400: Unable to read the uploaded file\"\n"
+            "4. \"FileNotFoundError: requested input document could not be located\"\n"
+            "5. \"Permission denied while accessing input file\"\n"
+            "6. \"JSONDecodeError: Invalid JSON payload\"\n"
+            "7. \"ValueError: Malformed request body\"\n"
+            "8. \"400: Request payload has an invalid format\"\n"
+            "9. \"TimeoutError: Database connection timed out\"\n"
+            "10. \"Database connection could not be established within the timeout period\"\n"
+            "11. \"Connection refused by PostgreSQL server\"\n"
+            "12. \"Authentication failed for database user\"\n\n"
+            "Your task is NOT to simply repeat the error messages.\n\n"
+            "Perform high-level semantic analysis:\n"
+            "1. Identify which errors belong to the same underlying problem/domain.\n"
+            "2. Group semantically related errors together even when their exact wording is different.\n"
+            "3. Do NOT group errors merely because they have the same HTTP status code.\n"
+            "4. Give each group a concise, generalized group name that describes the underlying problem rather than copying an error message.\n"
+            "5. The group name should be useful to a developer looking at an error dashboard.\n\n"
+            "For each error, return:\n"
+            "- original_error\n"
+            "- group_name\n"
+            "- reason_for_grouping\n\n"
+            "Also identify errors that should NOT be grouped together and explain why.\n\n"
+            "Finally, explain the general rule you used to determine whether two errors are semantically related.\n\n"
+            "Do not rely on exact string matching, error hashes, or HTTP status codes. The goal is to test whether you can understand the underlying meaning of different error messages and derive meaningful generalized categories."
+        )
+        body = {
+            "messages": [{"role": "user", "content": [{"text": prompt}]}],
+            "maxTokens": 512,
+            "temperature": 0.0,
+        }
+        events.append({"stage": "request_constructed", "request_payload": body})
+
+        events.append({"stage": "invoking_bedrock"})
+        response = client.invoke_model(modelId=model_id, body=json.dumps(body))
+        events.append({"stage": "response_received", "response_keys": list(response.keys())})
+
+        raw_body = response.get("body")
+        if raw_body is None:
+            events.append({"stage": "body_missing"})
+            raise RuntimeError("Bedrock invoke_model returned no body")
+
+        if isinstance(raw_body, (bytes, bytearray)):
+            raw_bytes = bytes(raw_body)
+        elif hasattr(raw_body, "read"):
+            raw_bytes = raw_body.read()
+        else:
+            raw_bytes = str(raw_body).encode("utf-8")
+
+        events.append({"stage": "body_decoded"})
+        try:
+            body_text = raw_bytes.decode("utf-8")
+        except Exception as exc:
+            events.append({
+                "stage": "body_decode_failed",
+                "exception_type": type(exc).__name__,
+                "message": str(exc),
+                "traceback": _tb_mod.format_exc(),
+            })
+            raise
+
+        events.append({"stage": "body_text_extracted", "body_text": body_text})
+        events.append({"stage": "parsing_response"})
+        try:
+            payload = json.loads(body_text or "{}")
+        except Exception as exc:
+            events.append({
+                "stage": "json_parse_failed",
+                "exception_type": type(exc).__name__,
+                "message": str(exc),
+                "traceback": _tb_mod.format_exc(),
+            })
+            raise
+
+        parsed_text = bedrock_llm._extract_nova_text(payload)
+        events.append({"stage": "parsed_response", "parsed_text": parsed_text})
+
+        result = {
+            "status": "success" if parsed_text.strip() == "NOVA_TEST_SUCCESS" else "failed",
+            "model_id": model_id,
+            "request_payload": body,
+            "response_metadata": {
+                "keys": list(response.keys()),
+                "response_metadata": response.get("ResponseMetadata"),
+            },
+            "body_text": body_text,
+            "payload": payload,
+            "parsed_text": parsed_text,
+            "events": events,
+        }
+
+        if parsed_text.strip() == "NOVA_TEST_SUCCESS":
+            events.append({"stage": "success"})
+            result["status"] = "success"
+            return jsonify(result)
+
+        events.append({"stage": "unexpected_text"})
+        result["status"] = "failed"
+        return jsonify(result), 502
+    except Exception as exc:
+        import traceback as _tb_mod
+        tb_str = _tb_mod.format_exc()
+        events.append({
+            "stage": "exception",
+            "exception_type": type(exc).__name__,
+            "message": str(exc),
+            "traceback": tb_str,
+        })
+        return jsonify({
+            "status": "error",
+            "error": str(exc),
+            "exception_type": type(exc).__name__,
+            "traceback": tb_str,
+            "events": events,
+        }), 500
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # PROJECTS
 # ═══════════════════════════════════════════════════════════════════════════════
