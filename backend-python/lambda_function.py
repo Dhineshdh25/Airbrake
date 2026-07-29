@@ -15,7 +15,13 @@ Handler setting in Lambda console:
 """
 
 import asyncio
+import os
+import sys
 import traceback
+
+# Ensure the backend-python directory is always on sys.path so local imports
+# like `from app import app` resolve correctly in Lambda execution environments.
+sys.path.insert(0, os.path.dirname(__file__))
 
 # Python 3.14 removed the implicit auto-creation of an event loop in
 # asyncio.get_event_loop() when called from the main thread with no
@@ -62,10 +68,32 @@ def _build_fallback_app():
 try:
     from app import app as _flask_app
 except Exception as exc:
-    print(f"[lambda] app import failed — falling back to degraded startup: {type(exc).__name__}: {exc}")
-    print(traceback.format_exc())
+    import traceback as _tb
+    print("========================================")
+    print("FAILED TO IMPORT APP")
+    print(f"exception type: {type(exc).__name__}")
+    print(f"exception message: {exc}")
+    print("full traceback:")
+    print(_tb.format_exc())
+    print("Fallback app will be created.")
+    print("========================================")
     app = _build_fallback_app()
 else:
+    print("========================================")
+    print("REAL Flask app imported successfully.")
+    try:
+        routes = sorted([f"{rule.rule} {sorted(rule.methods)}" for rule in _flask_app.url_map.iter_rules()])
+        print("Loaded Flask app routes:")
+        for route in routes:
+            print(f"  {route}")
+        print("app.url_map:", _flask_app.url_map)
+    except Exception as route_exc:
+        import traceback as _tb
+        print("Failed to inspect app.url_map")
+        print(f"exception type: {type(route_exc).__name__}")
+        print(f"exception message: {route_exc}")
+        print(_tb.format_exc())
+    print("========================================")
     app = _flask_app
 
 # -- Main HTTP handler ----------------------------------------------------
