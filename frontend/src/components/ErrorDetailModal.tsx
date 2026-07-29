@@ -10,6 +10,7 @@ export interface ErrorRow {
   error_hash?: string | null;
   error_detail?: string | null;
   timestamp: string | null;
+  representative_id?: string | null;  // specific log row id — used for single-row resolve/reopen
 }
 
 interface Occurrence {
@@ -280,6 +281,12 @@ export function ErrorDetailModal({
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState('');
 
+  // ── The specific log row id to target for resolve/reopen ─────────────────
+  // When opened from BreaksList, row.representative_id is the most-recent
+  // open log row id from the grouped query. We send it on every resolve/reopen
+  // call so only THAT row changes status, not every row sharing the hash.
+  const targetLogId: string | null = row?.representative_id ?? null;
+
   // ── Derived ──────────────────────────────────────────────────────────────
   const projectName = data?.project_name ?? row?.project ?? projectNameProp ?? '';
   const errorMessage = data?.error_message ?? row?.error ?? '';
@@ -393,6 +400,9 @@ export function ErrorDetailModal({
           solution_id: solutionId,
           error_hash: effectiveErrorHash,
           project_name: projectName,
+          // Target only the specific occurrence that was opened, not all rows
+          // sharing the same hash (which would resolve unrelated occurrences).
+          ...(targetLogId ? { log_id: targetLogId } : {}),
         }),
       });
       if (!r.ok) throw new Error((await r.json()).error ?? 'Failed');
@@ -430,7 +440,12 @@ export function ErrorDetailModal({
       const r = await apiFetch('/api/knowledge_base/reopen', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ error_hash: effectiveErrorHash, project_name: projectName }),
+        body: JSON.stringify({
+          error_hash: effectiveErrorHash,
+          project_name: projectName,
+          // Target only this specific occurrence.
+          ...(targetLogId ? { log_id: targetLogId } : {}),
+        }),
       });
       if (!r.ok) throw new Error((await r.json()).error ?? 'Failed');
       onRefresh?.();
@@ -871,12 +886,6 @@ export function ErrorDetailModal({
             {aiRecommendationText && (
               <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', marginBottom: 14 }}>
                 {aiRecommendationText}
-              </div>
-            )}
-
-            {aiTopSolution && (
-              <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', marginBottom: 14 }}>
-                Recommended based on previous successful resolutions.
               </div>
             )}
 
