@@ -788,6 +788,12 @@ def project_logs(name):
         success = len(successful_logs)
         failure = len(active_logs)
         resolved = len(resolved_logs)
+        
+        print(f"[DEBUG] Project: {project_name}, Page: {page}/{total_pages}")
+        print(f"  - Files processed: {total_records}")
+        print(f"  - Success (this page): {success}")
+        print(f"  - Active errors (this page): {failure}")
+        print(f"  - Resolved errors (this page): {resolved}")
 
         raw_cost = sum(float(r.get("calculated_cost") or 0) for r in logs)
         total_cost = f"${raw_cost:.4f}" if raw_cost > 0 else None
@@ -2963,3 +2969,21 @@ def rename_error_group():
     except Exception as e:
         logger.exception("[ErrorGroups] rename failed: %s", e)
         return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEVELOPMENT SERVER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    print("=" * 70)
+    print("🚀 Airbrake Backend - Python Flask Server")
+    print("=" * 70)
+    print(f"📊 Database: {TABLE}")
+    print(f"🔧 Debug Mode: {DEBUG_BREAK_DETAIL}")
+    print(f"🤖 KB Available: {KB_AVAILABLE}")
+    print(f"🧠 AI Recommendations: {AI_RECOMMENDATIONS_AVAILABLE}")
+    print("=" * 70)
+    print("🌐 Starting server on http://localhost:5000")
+    print("=" * 70)
+    app.run(host="0.0.0.0", port=5000, debug=True)
