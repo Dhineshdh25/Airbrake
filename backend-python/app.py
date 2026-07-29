@@ -780,20 +780,47 @@ def project_logs(name):
         print(f"[DEBUG] Logs query: {logs_query}")
         logs = query(logs_query, tuple(query_params))
 
-        # Separate logs by status
+        # Get TOTAL counts across all pages (not just current page)
+        # Success: files with no error or empty error
+        success_query = (
+            f"SELECT COUNT(*) as total FROM {TABLE} "
+            f"WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){date_filter} "
+            f"AND (error IS NULL OR error = '')"
+        )
+        success_result = query(success_query, tuple(count_params))
+        success = int(success_result[0].get("total", 0)) if success_result else 0
+        
+        # Failure: files with errors that are not resolved
+        failure_query = (
+            f"SELECT COUNT(*) as total FROM {TABLE} "
+            f"WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){date_filter} "
+            f"AND error IS NOT NULL AND error != '' AND (error_status IS NULL OR error_status != 'resolved')"
+        )
+        failure_result = query(failure_query, tuple(count_params))
+        failure = int(failure_result[0].get("total", 0)) if failure_result else 0
+        
+        # Resolved: files with errors that have been resolved
+        resolved_query = (
+            f"SELECT COUNT(*) as total FROM {TABLE} "
+            f"WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){date_filter} "
+            f"AND error IS NOT NULL AND error != '' AND error_status = 'resolved'"
+        )
+        resolved_result = query(resolved_query, tuple(count_params))
+        resolved = int(resolved_result[0].get("total", 0)) if resolved_result else 0
+
+        # Separate logs by status for the current page (for display purposes)
         resolved_logs = [r for r in logs if r.get("error") and r.get("error") != "" and r.get("error_status") == "resolved"]
         active_logs = [r for r in logs if r.get("error") and r.get("error") != "" and r.get("error_status") != "resolved"]
         successful_logs = [r for r in logs if not r.get("error") or r.get("error") == ""]
-
-        success = len(successful_logs)
-        failure = len(active_logs)
-        resolved = len(resolved_logs)
         
         print(f"[DEBUG] Project: {project_name}, Page: {page}/{total_pages}")
-        print(f"  - Files processed: {total_records}")
-        print(f"  - Success (this page): {success}")
-        print(f"  - Active errors (this page): {failure}")
-        print(f"  - Resolved errors (this page): {resolved}")
+        print(f"  - Files processed (total): {total_records}")
+        print(f"  - Success (total): {success}")
+        print(f"  - Active errors (total): {failure}")
+        print(f"  - Resolved errors (total): {resolved}")
+        print(f"  - Success (current page): {len(successful_logs)}")
+        print(f"  - Active errors (current page): {len(active_logs)}")
+        print(f"  - Resolved errors (current page): {len(resolved_logs)}")
 
         raw_cost = sum(float(r.get("calculated_cost") or 0) for r in logs)
         total_cost = f"${raw_cost:.4f}" if raw_cost > 0 else None
