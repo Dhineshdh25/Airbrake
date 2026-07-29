@@ -1198,6 +1198,17 @@ def ingest_error():
         )
         print(f'[Ingest] ❌ Error row → "{actual_name}" | {error}')
         row = serialize_row(inserted)
+        # ── Async-style classification: best-effort, never blocks ingest ──────
+        try:
+            from ai.error_grouper import classify_error as _classify
+            _classify(
+                log_id        = inserted["id"],
+                error_message = error,
+                project_name  = actual_name,
+                error_detail  = error_detail,
+            )
+        except Exception as _cexc:
+            logger.warning("[Ingest] classify_error failed (non-fatal): %s", _cexc)
         return jsonify({"success": True, "type": "error", **row}), 201
     except Exception as e:
         print(f"[Ingest] error: {e}")
@@ -1244,6 +1255,18 @@ def ingest_log():
         if is_error:
             print(f'[Ingest] ❌ error row → "{actual_name}" | {error}')
         row = serialize_row(inserted)
+        # ── Classification for error rows — best-effort, never blocks ────────
+        if is_error:
+            try:
+                from ai.error_grouper import classify_error as _classify
+                _classify(
+                    log_id        = inserted["id"],
+                    error_message = error,
+                    project_name  = actual_name,
+                    error_detail  = error_detail,
+                )
+            except Exception as _cexc:
+                logger.warning("[Ingest] classify_error (log) failed (non-fatal): %s", _cexc)
         return jsonify({"success": True, "type": t, **row}), 201
     except Exception as e:
         print(f"[Ingest] log error: {e}")
@@ -1397,10 +1420,11 @@ def dashboard_errors():
 def breaks_grouped():
     page = max(1, int(request.args.get("page", 1) or 1))
     limit = min(100, max(1, int(request.args.get("limit", 20) or 20)))
-    status_f = request.args.get("status", "")
-    project_f = request.args.get("project", "")
+    status_f        = request.args.get("status", "")
+    project_f       = request.args.get("project", "")
+    semantic_group_f = request.args.get("semantic_group", "")   # NEW: filter by error_group_id
     from_ts = request.args.get("from", "")
-    to_ts = request.args.get("to", "")
+    to_ts   = request.args.get("to", "")
 
     try:
         conditions = [
@@ -1418,6 +1442,9 @@ def breaks_grouped():
         if project_f:
             conditions.append("LOWER(project_name) = LOWER(%s)")
             params.append(project_f)
+        if semantic_group_f:
+            conditions.append("error_group_id = %s")
+            params.append(semantic_group_f)
 
         where = " AND ".join(conditions)
 
@@ -1425,6 +1452,8 @@ def breaks_grouped():
             f"SELECT project_name, "
             f"error AS error_message, "
             f"COALESCE(error_hash, MD5(LOWER(TRIM(error)))) AS error_hash, "
+            f"COALESCE(error_group_id, '') AS error_group_id, "
+            f"MAX(error_group_name) AS error_group_name, "
             f"SUM(failure_count)::int AS occurrence_count, "
             f"MIN(timestamp) AS first_seen, "
             f"GREATEST(MAX(timestamp), MAX(COALESCE(reopened_at, timestamp))) AS last_seen, "
@@ -1432,9 +1461,27 @@ def breaks_grouped():
             f"  WHEN BOOL_OR(error_status = 'reopened') THEN 'regression' "
             f"  WHEN SUM(failure_count) = 1 THEN 'new' "
             f"  ELSE 'existing' "
-            f"END AS status "
+            f"END AS status, "
+            # representative_id: pick the id of the most recently active open/reopened row
+            # for this exact (project, error, hash, group) combination.
+            # MAX(CASE...) over id would give UUID ordering — wrong.
+            # Instead we select the id of the row with the highest timestamp among
+            # open/reopened rows by using a correlated scalar subquery.
+            # The GROUP BY columns (project_name, error, error_hash, error_group_id)
+            # are in scope for the subquery so the correlation is valid.
+            f"(SELECT sub.id "
+            f" FROM {TABLE} sub "
+            f" WHERE sub.row_type = 'log' "
+            f"   AND LOWER(sub.project_name) = LOWER(project_name) "
+            f"   AND sub.error = error "
+            f"   AND COALESCE(sub.error_hash, MD5(LOWER(TRIM(sub.error)))) "
+            f"       = COALESCE(error_hash, MD5(LOWER(TRIM(error)))) "
+            f"   AND sub.error_status IN ('open', 'reopened') "
+            f" ORDER BY COALESCE(sub.reopened_at, sub.timestamp) DESC NULLS LAST "
+            f" LIMIT 1) AS representative_id "
             f"FROM {TABLE} WHERE {where} "
-            f"GROUP BY project_name, error, COALESCE(error_hash, MD5(LOWER(TRIM(error))))"
+            f"GROUP BY project_name, error, COALESCE(error_hash, MD5(LOWER(TRIM(error)))), "
+            f"COALESCE(error_group_id, '')"
         )
 
         # Apply status filter on the grouped result
@@ -2015,17 +2062,31 @@ def reopen_error_solution():
     body         = request.get_json() or {}
     error_hash   = body.get("error_hash")
     project_name = body.get("project_name")
+    log_id       = body.get("log_id") or None
+
     if not error_hash or not project_name:
         return jsonify({"error": "error_hash and project_name are required"}), 400
+    if not log_id:
+        return jsonify({
+            "error": "log_id is required",
+            "detail": (
+                "Reopen must target a specific log row by id to avoid "
+                "reopening unrelated occurrences that share the same error_hash. "
+                "The frontend supplies this from representative_id in breaks_grouped."
+            ),
+        }), 400
+
     try:
         count = execute(
-            f"UPDATE {TABLE} SET error_status = 'reopened', reopened_at = NOW(), resolved_at = NULL "
-            f"WHERE row_type = 'log' AND error_hash = %s AND LOWER(project_name) = LOWER(%s) "
-            f"AND error_status IN ('resolved', 'reopened')",
-            (error_hash, project_name),
+            f"UPDATE {TABLE} "
+            f"SET error_status = 'reopened', reopened_at = NOW(), resolved_at = NULL "
+            f"WHERE row_type = 'log' "
+            f"  AND id = %s "
+            f"  AND error_status IN ('resolved', 'reopened')",
+            (log_id,),
         )
-        logger.info("[Reopen] error_hash=%r project=%r rows_updated=%d",
-                    error_hash, project_name, count)
+        logger.info("[Reopen] log_id=%r error_hash=%r project=%r rows_updated=%d",
+                    log_id, error_hash, project_name, count)
         return jsonify({"reopened": count, "project_name": project_name, "error_hash": error_hash})
     except Exception as e:
         logger.exception("[Reopen] Failed: %s", e)
@@ -2037,17 +2098,30 @@ def resolve_error_solution():
     body         = request.get_json() or {}
     error_hash   = body.get("error_hash")
     project_name = body.get("project_name")
+    log_id       = body.get("log_id") or None
+
     if not error_hash or not project_name:
         return jsonify({"error": "error_hash and project_name are required"}), 400
+    if not log_id:
+        return jsonify({
+            "error": "log_id is required",
+            "detail": (
+                "resolve must target a specific log row by id to avoid "
+                "resolving unrelated occurrences that share the same error_hash."
+            ),
+        }), 400
+
     try:
         count = execute(
-            f"UPDATE {TABLE} SET error_status = 'resolved', resolved_at = NOW() "
-            f"WHERE row_type = 'log' AND error_hash = %s AND LOWER(project_name) = LOWER(%s) "
-            f"AND error_status IN ('open', 'reopened')",
-            (error_hash, project_name),
+            f"UPDATE {TABLE} "
+            f"SET error_status = 'resolved', resolved_at = NOW() "
+            f"WHERE row_type = 'log' "
+            f"  AND id = %s "
+            f"  AND error_status IN ('open', 'reopened')",
+            (log_id,),
         )
-        logger.info("[Resolve] error_hash=%r project=%r rows_updated=%d",
-                    error_hash, project_name, count)
+        logger.info("[Resolve] log_id=%r error_hash=%r project=%r rows_updated=%d",
+                    log_id, error_hash, project_name, count)
         return jsonify({"resolved": count, "project_name": project_name, "error_hash": error_hash})
     except Exception as e:
         logger.exception("[Resolve] Failed: %s", e)
@@ -2060,24 +2134,36 @@ def use_solution():
     solution_id  = body.get("solution_id")
     error_hash   = body.get("error_hash")
     project_name = body.get("project_name")
+    log_id       = body.get("log_id") or None
+
     if not solution_id or not error_hash or not project_name:
         return jsonify({"error": "solution_id, error_hash and project_name are required"}), 400
+    if not log_id:
+        return jsonify({
+            "error": "log_id is required",
+            "detail": (
+                "use_solution must target a specific log row by id to avoid "
+                "resolving unrelated occurrences that share the same error_hash. "
+                "The frontend supplies this from representative_id in breaks_grouped."
+            ),
+        }), 400
+
     try:
         # Atomically increment usage and get the updated solution row
         updated_solution = increment_usage(solution_id)
 
-        # Mark the error as resolved
+        # Resolve exactly the one log row the user is looking at.
         execute(
-            f"UPDATE {TABLE} SET error_status = 'resolved', resolved_at = NOW() "
-            f"WHERE row_type = 'log' AND error_hash = %s "
-            f"AND LOWER(project_name) = LOWER(%s) "
-            f"AND error_status IN ('open', 'reopened')",
-            (error_hash, project_name),
+            f"UPDATE {TABLE} "
+            f"SET error_status = 'resolved', resolved_at = NOW() "
+            f"WHERE row_type = 'log' "
+            f"  AND id = %s "
+            f"  AND error_status IN ('open', 'reopened')",
+            (log_id,),
         )
-        logger.info("[Solution] Usage incremented and error resolved — solution_id=%s error_hash=%r",
-                    solution_id, error_hash)
+        logger.info("[Solution] Resolved — solution_id=%s log_id=%r error_hash=%r",
+                    solution_id, log_id, error_hash)
 
-        # Return updated solution metrics so the frontend can refresh in-place
         sol = serialize_row(updated_solution) if updated_solution else {}
         return jsonify({
             "used":             True,
@@ -2680,3 +2766,200 @@ def test_parser():
                 "error_detail": error_detail[:200] + "..." if len(error_detail) > 200 else error_detail,
             },
         }), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SEMANTIC ERROR GROUPS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/error-groups", methods=["GET"])
+def list_error_groups():
+    """
+    GET /api/error-groups[?project_name=xxx]
+
+    Returns all distinct semantic groups with occurrence counts.
+    Cross-project by default; pass project_name to scope to one project.
+    """
+    project_name = request.args.get("project_name", "").strip() or None
+    try:
+        from ai.error_grouper import list_groups
+        rows = list_groups(project_name=project_name)
+        return jsonify({"groups": serialize_rows(rows)})
+    except Exception as e:
+        logger.exception("[ErrorGroups] list failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/error-groups/classify", methods=["POST"])
+def classify_single_error():
+    """
+    POST /api/error-groups/classify
+    Body: { "log_id": "...", "error_message": "...", "project_name": "...", "error_detail": "..." }
+
+    Classifies one log row immediately (on-demand, e.g. from the detail page).
+    Skips rows that have manual_group_override = TRUE.
+    """
+    body         = request.get_json() or {}
+    log_id       = body.get("log_id")
+    error_message= body.get("error_message", "").strip()
+    project_name = body.get("project_name", "").strip()
+    error_detail = body.get("error_detail") or None
+
+    if not log_id or not error_message or not project_name:
+        return jsonify({"error": "log_id, error_message and project_name are required"}), 400
+
+    try:
+        from ai.error_grouper import classify_error
+        result = classify_error(
+            log_id        = log_id,
+            error_message = error_message,
+            project_name  = project_name,
+            error_detail  = error_detail,
+        )
+        return jsonify(result)
+    except Exception as e:
+        logger.exception("[ErrorGroups] classify failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/error-groups/backfill", methods=["POST"])
+def backfill_error_groups():
+    """
+    POST /api/error-groups/backfill
+    Body (all optional):
+      {
+        "batch_size":   50,
+        "max_batches":  20,
+        "project_name": "my_project"   // scope to one project
+      }
+
+    Classifies existing log rows that have error_group_id IS NULL.
+    Safe to call repeatedly — already-classified rows are skipped.
+    Returns a summary so the caller knows how many were processed and
+    whether more rows remain (call again if done=false).
+    """
+    body         = request.get_json() or {}
+    batch_size   = int(body.get("batch_size",  50))
+    max_batches  = int(body.get("max_batches", 20))
+    project_name = body.get("project_name", "").strip() or None
+
+    try:
+        from ai.error_grouper import backfill_unclassified
+        summary = backfill_unclassified(
+            batch_size   = batch_size,
+            max_batches  = max_batches,
+            project_name = project_name,
+        )
+        return jsonify(summary)
+    except Exception as e:
+        logger.exception("[ErrorGroups] backfill failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/error-groups/override", methods=["PATCH"])
+def override_error_group():
+    """
+    PATCH /api/error-groups/override
+    Body:
+      {
+        "log_id":      "...",
+        "group_id":    "...",   // existing group_id OR a new UUID
+        "group_name":  "..."
+      }
+
+    Manually assigns a log row to a semantic group.
+    Sets manual_group_override = TRUE so the AI will never reclassify this row.
+    """
+    body       = request.get_json() or {}
+    log_id     = body.get("log_id")
+    group_id   = body.get("group_id")
+    group_name = body.get("group_name", "").strip()
+
+    if not log_id or not group_id or not group_name:
+        return jsonify({"error": "log_id, group_id and group_name are required"}), 400
+
+    try:
+        from ai.error_grouper import apply_manual_override
+        ok = apply_manual_override(log_id=log_id, group_id=group_id, group_name=group_name)
+        if ok:
+            return jsonify({"updated": True, "log_id": log_id, "group_id": group_id, "group_name": group_name})
+        return jsonify({"error": "Update failed"}), 500
+    except Exception as e:
+        logger.exception("[ErrorGroups] override failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/error-groups/merge", methods=["POST"])
+def merge_error_groups():
+    """
+    POST /api/error-groups/merge
+    Body:
+      {
+        "source_group_id": "...",
+        "target_group_id": "...",
+        "target_group_name": "..."   // new canonical name for the merged group
+      }
+
+    Moves all log rows from source_group_id into target_group_id.
+    All affected rows get manual_group_override = TRUE so AI won't undo the merge.
+    """
+    body              = request.get_json() or {}
+    source_group_id   = body.get("source_group_id")
+    target_group_id   = body.get("target_group_id")
+    target_group_name = body.get("target_group_name", "").strip()
+
+    if not source_group_id or not target_group_id or not target_group_name:
+        return jsonify({"error": "source_group_id, target_group_id and target_group_name are required"}), 400
+
+    if source_group_id == target_group_id:
+        return jsonify({"error": "source and target groups are the same"}), 400
+
+    try:
+        count = execute(
+            f"UPDATE {TABLE} "
+            f"SET error_group_id = %s, error_group_name = %s, manual_group_override = TRUE "
+            f"WHERE row_type = 'log' AND error_group_id = %s",
+            (target_group_id, target_group_name, source_group_id),
+        )
+        logger.info(
+            "[ErrorGroups] merge source=%r -> target=%r rows=%s",
+            source_group_id, target_group_id, count,
+        )
+        return jsonify({
+            "merged":            True,
+            "source_group_id":   source_group_id,
+            "target_group_id":   target_group_id,
+            "target_group_name": target_group_name,
+            "rows_moved":        count,
+        })
+    except Exception as e:
+        logger.exception("[ErrorGroups] merge failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/error-groups/rename", methods=["PATCH"])
+def rename_error_group():
+    """
+    PATCH /api/error-groups/rename
+    Body: { "group_id": "...", "group_name": "..." }
+
+    Renames a semantic group across all its log rows.
+    """
+    body       = request.get_json() or {}
+    group_id   = body.get("group_id")
+    group_name = body.get("group_name", "").strip()
+
+    if not group_id or not group_name:
+        return jsonify({"error": "group_id and group_name are required"}), 400
+
+    try:
+        count = execute(
+            f"UPDATE {TABLE} SET error_group_name = %s "
+            f"WHERE row_type = 'log' AND error_group_id = %s",
+            (group_name, group_id),
+        )
+        logger.info("[ErrorGroups] rename group_id=%r name=%r rows=%s", group_id, group_name, count)
+        return jsonify({"renamed": True, "group_id": group_id, "group_name": group_name, "rows_updated": count})
+    except Exception as e:
+        logger.exception("[ErrorGroups] rename failed: %s", e)
+        return jsonify({"error": str(e)}), 500

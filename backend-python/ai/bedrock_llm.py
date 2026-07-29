@@ -45,14 +45,30 @@ def _call_nova(prompt: str, max_tokens: int = 256) -> Optional[str]:
         response = client.invoke_model(modelId=model_id, body=body)
         payload = json.loads(response.get("body").read().decode("utf-8"))
         logger.info("[Nova] Bedrock raw response payload=%r", payload)
-        output = payload.get("output", {})
-        message = output.get("message", {})
-        content = message.get("content") or []
-        if content and isinstance(content, list):
-            text = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-            trimmed = text.strip()
+        output = payload.get("output")
+        output_items = []
+        if isinstance(output, dict):
+            output_items = [output]
+        elif isinstance(output, list):
+            output_items = output
+
+        text_parts = []
+        for item in output_items:
+            if not isinstance(item, dict):
+                continue
+            message = item.get("message") if isinstance(item.get("message"), dict) else item
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict):
+                        text_parts.append(str(part.get("text", "")))
+            elif isinstance(content, str):
+                text_parts.append(content)
+
+        trimmed = "".join(text_parts).strip()
+        if trimmed:
             logger.info("[Nova] Parsed Nova text response length=%d text=%r", len(trimmed), trimmed[:500])
-            return trimmed or None
+            return trimmed
         logger.info("[Nova] No text content received from Nova response")
         return None
     except Exception as exc:
