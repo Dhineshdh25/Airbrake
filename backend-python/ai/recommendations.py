@@ -549,16 +549,25 @@ def get_ai_recommendations(
         prompt = "\n\n".join(part for part in prompt_parts if part).strip()
 
         generate_suggested_solution = _get_llm()
+        nova_diagnostics = {}
         if generate_suggested_solution:
             logger.info("[Recommendations] Retrieved context for Nova — solutions=%d", len(solutions[:5]))
             logger.info("[Recommendations] Prompt sent to Nova")
             recommendation = generate_suggested_solution(prompt, solutions[:5])
             logger.info("[Recommendations] Nova response generated")
+            try:
+                from ai.bedrock_llm import get_last_nova_diagnostics
+                nova_diagnostics = get_last_nova_diagnostics()
+            except Exception as diag_exc:
+                logger.exception("[Recommendations] failed to fetch Nova diagnostics: %s", diag_exc)
         else:
             recommendation = None
             logger.warning(
                 "[Recommendations] LLM unavailable — returning solutions without recommendation"
             )
+
+        result = {"recommendation": recommendation, "description": description, "solutions": solutions, "nova_diagnostics": nova_diagnostics}
+        return result
 
         # Generate error description
         description = None
