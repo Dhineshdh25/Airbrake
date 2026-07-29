@@ -1453,6 +1453,7 @@ def dashboard_errors():
 def breaks_grouped():
     page = max(1, int(request.args.get("page", 1) or 1))
     limit = min(100, max(1, int(request.args.get("limit", 20) or 20)))
+    offset = (page - 1) * limit
     status_f        = request.args.get("status", "")
     project_f       = request.args.get("project", "")
     semantic_group_f = request.args.get("semantic_group", "")   # NEW: filter by error_group_id
@@ -1481,64 +1482,45 @@ def breaks_grouped():
 
         where = " AND ".join(conditions)
 
-        grouped_sql = (
-            f"SELECT project_name, "
+        row_sql = (
+            f"SELECT id AS representative_id, "
+            f"project_name, "
             f"error AS error_message, "
             f"COALESCE(error_hash, MD5(LOWER(TRIM(error)))) AS error_hash, "
             f"COALESCE(error_group_id, '') AS error_group_id, "
-            f"MAX(error_group_name) AS error_group_name, "
-            f"SUM(failure_count)::int AS occurrence_count, "
-            f"MIN(timestamp) AS first_seen, "
-            f"GREATEST(MAX(timestamp), MAX(COALESCE(reopened_at, timestamp))) AS last_seen, "
+            f"error_group_name, "
+            f"failure_count::int AS occurrence_count, "
+            f"timestamp AS first_seen, "
+            f"GREATEST(COALESCE(reopened_at, timestamp), timestamp) AS last_seen, "
             f"CASE "
-            f"  WHEN BOOL_OR(error_status = 'reopened') THEN 'regression' "
-            f"  WHEN SUM(failure_count) = 1 THEN 'new' "
+            f"  WHEN error_status = 'reopened' THEN 'regression' "
+            f"  WHEN failure_count = 1 THEN 'new' "
             f"  ELSE 'existing' "
-            f"END AS status, "
-            # representative_id: pick the id of the most recently active open/reopened row
-            # for this exact (project, error, hash, group) combination.
-            # MAX(CASE...) over id would give UUID ordering — wrong.
-            # Instead we select the id of the row with the highest timestamp among
-            # open/reopened rows by using a correlated scalar subquery.
-            # The GROUP BY columns (project_name, error, error_hash, error_group_id)
-            # are in scope for the subquery so the correlation is valid.
-            f"(SELECT sub.id "
-            f" FROM {TABLE} sub "
-            f" WHERE sub.row_type = 'log' "
-            f"   AND LOWER(sub.project_name) = LOWER(project_name) "
-            f"   AND sub.error = error "
-            f"   AND COALESCE(sub.error_hash, MD5(LOWER(TRIM(sub.error)))) "
-            f"       = COALESCE(error_hash, MD5(LOWER(TRIM(error)))) "
-            f"   AND sub.error_status IN ('open', 'reopened') "
-            f" ORDER BY COALESCE(sub.reopened_at, sub.timestamp) DESC NULLS LAST "
-            f" LIMIT 1) AS representative_id "
-            f"FROM {TABLE} WHERE {where} "
-            f"GROUP BY project_name, error, COALESCE(error_hash, MD5(LOWER(TRIM(error)))), "
-            f"COALESCE(error_group_id, '')"
+            f"END AS status "
+            f"FROM {TABLE} WHERE {where}"
         )
 
-        # Apply status filter on the grouped result
-        outer_conditions = []
-        outer_params = []
         if status_f:
-            outer_conditions.append("status = %s")
-            outer_params.append(status_f)
+            count_sql = f"SELECT COUNT(*) AS cnt FROM ({row_sql}) AS g WHERE status = %s"
+            total_rows = query(count_sql, tuple(params + [status_f]))
+            total = total_rows[0].get("cnt", 0) if total_rows else 0
+            data_sql = (
+                f"SELECT * FROM ({row_sql}) AS g "
+                f"WHERE status = %s "
+                f"ORDER BY last_seen DESC NULLS LAST LIMIT %s OFFSET %s"
+            )
+            all_params = params + [status_f, limit, offset]
+        else:
+            count_sql = f"SELECT COUNT(*) AS cnt FROM ({row_sql}) AS g"
+            total_rows = query(count_sql, tuple(params) if params else None)
+            total = total_rows[0].get("cnt", 0) if total_rows else 0
+            data_sql = (
+                f"SELECT * FROM ({row_sql}) AS g "
+                f"ORDER BY last_seen DESC NULLS LAST LIMIT %s OFFSET %s"
+            )
+            all_params = params + [limit, offset]
 
-        outer_where = f"WHERE {' AND '.join(outer_conditions)}" if outer_conditions else ""
-
-        # Count total
-        count_sql = f"SELECT COUNT(*) AS cnt FROM ({grouped_sql}) AS g {outer_where}"
-        total_rows = query(count_sql, params + outer_params if (params or outer_params) else None)
-        total = int(total_rows[0]["cnt"]) if total_rows else 0
-
-        # Paginated data
-        offset = (page - 1) * limit
-        data_sql = (
-            f"SELECT * FROM ({grouped_sql}) AS g {outer_where} "
-            f"ORDER BY last_seen DESC NULLS LAST LIMIT %s OFFSET %s"
-        )
-        all_params = params + outer_params + [limit, offset]
-        data = query(data_sql, all_params)
+        data = query(data_sql, tuple(all_params))
         return jsonify({"data": serialize_rows(data), "total": total, "page": page, "limit": limit})
     except Exception as e:
         print(f"[Breaks] grouped error: {e}")
@@ -1965,10 +1947,36 @@ def get_break_detail(error_hash):
                 error_message=first["error_message"],
             )
             debug_info["ai_stage"] = "ai_executed"
+            if isinstance(ai_recommendation, dict):
+                debug_info["ai_recommendation"] = {
+                    "recommendation": ai_recommendation.get("recommendation"),
+                    "description": ai_recommendation.get("description"),
+                    "solution_count": len(ai_recommendation.get("solutions") or []),
+                    "nova_diagnostics": ai_recommendation.get("nova_diagnostics"),
+                }
+                try:
+                    print(json.dumps({
+                        "req": request_id,
+                        "event": "ai_recommendation_result",
+                        "recommendation": ai_recommendation.get("recommendation"),
+                        "description": ai_recommendation.get("description"),
+                        "solution_count": len(ai_recommendation.get("solutions") or []),
+                        "nova_diagnostics": ai_recommendation.get("nova_diagnostics"),
+                    }, default=str))
+                except Exception:
+                    print(f"[req:{request_id}] [Breaks] ai recommendation result: {ai_recommendation}")
         except Exception as e:
             print(f"[Breaks] ai recommendation error: {e}")
             debug_info["ai_stage"] = "ai_exception"
             debug_info["ai_error"] = {"type": type(e).__name__, "message": str(e)}
+            try:
+                print(json.dumps({
+                    "req": request_id,
+                    "event": "ai_recommendation_exception",
+                    "error": {"type": type(e).__name__, "message": str(e)},
+                }, default=str))
+            except Exception:
+                pass
 
         # Parse stack trace to extract structured frame information with source code lines
         parsed_stacktrace = None

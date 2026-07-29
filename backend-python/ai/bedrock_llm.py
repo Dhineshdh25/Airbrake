@@ -9,6 +9,8 @@ from typing import Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
+_LAST_NOVA_DIAGNOSTICS: dict[str, object] = {}
+
 try:
     import boto3
 except Exception as exc:  # pragma: no cover - optional dependency
@@ -32,20 +34,24 @@ def _get_runtime_client():
     return boto3.client("bedrock-runtime", region_name=_get_bedrock_region())
 
 
-def _call_nova(prompt: str, max_tokens: int = 256) -> Optional[str]:
-    try:
-        client = _get_runtime_client()
-        model_id = _get_nova_model_id()
-        logger.info("[Nova] Bedrock request about to send — model_id=%s prompt_length=%d max_tokens=%d", model_id, len(prompt), max_tokens)
-        body = json.dumps({
-            "messages": [{"role": "user", "content": [{"text": prompt}]}],
-            "maxTokens": max_tokens,
-            "temperature": 0.0,
-        })
-        response = client.invoke_model(modelId=model_id, body=body)
-        payload = json.loads(response.get("body").read().decode("utf-8"))
-        logger.info("[Nova] Bedrock raw response payload=%r", payload)
+def _extract_nova_text(payload: Any) -> str:
+    if not payload:
+        return ""
+
+    if isinstance(payload, str):
+        return payload.strip()
+
+    if isinstance(payload, dict):
+        if isinstance(payload.get("output_text"), str):
+            return payload["output_text"].strip()
+
+        if isinstance(payload.get("text"), str):
+            return payload["text"].strip()
+
         output = payload.get("output")
+        if output is None and isinstance(payload.get("message"), dict):
+            output = payload["message"]
+
         output_items = []
         if isinstance(output, dict):
             output_items = [output]
@@ -56,24 +62,102 @@ def _call_nova(prompt: str, max_tokens: int = 256) -> Optional[str]:
         for item in output_items:
             if not isinstance(item, dict):
                 continue
-            message = item.get("message") if isinstance(item.get("message"), dict) else item
-            content = message.get("content") if isinstance(message, dict) else None
-            if isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict):
-                        text_parts.append(str(part.get("text", "")))
-            elif isinstance(content, str):
-                text_parts.append(content)
 
-        trimmed = "".join(text_parts).strip()
-        if trimmed:
-            logger.info("[Nova] Parsed Nova text response length=%d text=%r", len(trimmed), trimmed[:500])
-            return trimmed
-        logger.info("[Nova] No text content received from Nova response")
+            message = item.get("message") if isinstance(item.get("message"), dict) else item
+            content = None
+            if isinstance(message, dict):
+                content = message.get("content")
+            elif isinstance(message, str):
+                text_parts.append(message)
+
+            if isinstance(content, str):
+                text_parts.append(content)
+            elif isinstance(content, dict):
+                if isinstance(content.get("text"), str):
+                    text_parts.append(content["text"])
+                elif isinstance(content.get("output_text"), str):
+                    text_parts.append(content["output_text"])
+            elif isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if isinstance(part.get("text"), str):
+                        text_parts.append(part["text"])
+                    elif isinstance(part.get("output_text"), str):
+                        text_parts.append(part["output_text"])
+                    elif isinstance(part.get("content"), str):
+                        text_parts.append(part["content"])
+
+        if text_parts:
+            return "\n".join([t.strip() for t in text_parts if isinstance(t, str) and t.strip()]).strip()
+
+    return ""
+
+
+def get_last_nova_diagnostics() -> dict[str, object]:
+    return _LAST_NOVA_DIAGNOSTICS.copy()
+
+
+def _call_nova(prompt: str, max_tokens: int = 256) -> Optional[str]:
+    diagnostics: dict[str, object] = {
+        "model_id": None,
+        "max_tokens": max_tokens,
+        "request_payload": None,
+        "raw_payload": None,
+        "parsed_text": None,
+        "fallback_text": None,
+        "fallback_reason": None,
+        "error": None,
+        "status": None,
+    }
+    try:
+        client = _get_runtime_client()
+        model_id = _get_nova_model_id()
+        diagnostics["model_id"] = model_id
+        logger.info("[Nova] Bedrock request about to send — model_id=%s prompt_length=%d max_tokens=%d", model_id, len(prompt), max_tokens)
+        body = {
+            "messages": [{"role": "user", "content": [{"text": prompt}]}],
+            "maxTokens": max_tokens,
+            "temperature": 0.0,
+        }
+        diagnostics["request_payload"] = body
+        response = client.invoke_model(modelId=model_id, body=json.dumps(body))
+        raw_body = response.get("body")
+        raw_text = raw_body.read().decode("utf-8") if raw_body is not None else ""
+        payload = json.loads(raw_text or "{}")
+        diagnostics["raw_payload"] = payload
+        logger.info("[Nova] Bedrock raw response payload=%s", json.dumps(payload, default=str)[:4000])
+
+        parsed = _extract_nova_text(payload)
+        diagnostics["parsed_text"] = parsed
+        if parsed:
+            diagnostics["status"] = "parsed"
+            logger.info("[Nova] Parsed Nova text response length=%d text=%r", len(parsed), parsed[:500])
+            return parsed
+
+        diagnostics["status"] = "no_text"
+        logger.info("[Nova] No text content received from Nova response; attempting fallback to raw payload")
+        if isinstance(payload, dict):
+            fallback_text = payload.get("output_text") or payload.get("text")
+            diagnostics["fallback_text"] = fallback_text
+            if isinstance(fallback_text, str) and fallback_text.strip():
+                diagnostics["status"] = "fallback_text"
+                diagnostics["fallback_reason"] = "raw_field"
+                return fallback_text.strip()
+
+        diagnostics["fallback_reason"] = "empty_response"
         return None
     except Exception as exc:
+        diagnostics["error"] = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+        }
+        diagnostics["status"] = "error"
         logger.exception("Bedrock Nova failed — component=bedrock_llm operation=invoke_model")
         return None
+    finally:
+        global _LAST_NOVA_DIAGNOSTICS
+        _LAST_NOVA_DIAGNOSTICS = diagnostics.copy()
 
 
 def generate_ai_response(prompt: str, context: Optional[Any] = None, max_tokens: int = 256) -> str:
