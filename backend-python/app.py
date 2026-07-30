@@ -17,9 +17,12 @@ import re
 import json
 import time
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional, Any
-from flask import Flask, request, jsonify, make_response, g, has_request_context
+from flask import Flask, request, jsonify, make_response, g, has_request_context, Response, stream_with_context
+from queue import Queue
+from threading import Lock
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -387,6 +390,86 @@ except Exception as exc:
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 
+# ── SSE (Server-Sent Events) Infrastructure ──────────────────────────────────
+class SSEConnectionManager:
+    """Manages SSE connections for real-time log streaming."""
+    
+    def __init__(self):
+        self.connections: Dict[str, Queue] = {}
+        self.connection_filters: Dict[str, Dict[str, Any]] = {}
+        self.lock = Lock()
+    
+    def add_connection(self, connection_id: str, filters: Dict[str, Any]) -> Queue:
+        """Register a new SSE connection with optional filters."""
+        with self.lock:
+            queue = Queue(maxsize=100)
+            self.connections[connection_id] = queue
+            self.connection_filters[connection_id] = filters
+            logger.info(f"[SSE] New connection: {connection_id} with filters: {filters}")
+            return queue
+    
+    def remove_connection(self, connection_id: str):
+        """Remove an SSE connection."""
+        with self.lock:
+            if connection_id in self.connections:
+                del self.connections[connection_id]
+                del self.connection_filters[connection_id]
+                logger.info(f"[SSE] Connection closed: {connection_id}")
+    
+    def broadcast_log(self, log_data: Dict[str, Any]):
+        """Broadcast a new log entry to all matching connections."""
+        with self.lock:
+            for conn_id, queue in list(self.connections.items()):
+                try:
+                    # Check if log matches connection filters
+                    filters = self.connection_filters.get(conn_id, {})
+                    if self._matches_filters(log_data, filters):
+                        if not queue.full():
+                            queue.put(log_data)
+                        else:
+                            # Drop oldest message if queue is full
+                            try:
+                                queue.get_nowait()
+                                queue.put(log_data)
+                            except:
+                                pass
+                except Exception as e:
+                    logger.error(f"[SSE] Failed to broadcast to {conn_id}: {e}")
+    
+    def _matches_filters(self, log_data: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+        """Check if log entry matches the connection's filters."""
+        if not filters:
+            return True
+        
+        # Project filter
+        project_name = filters.get('project_name')
+        if project_name and log_data.get('project_name') != project_name:
+            return False
+        
+        # Error status filter (errors only, resolved, etc.)
+        status_filter = filters.get('status')
+        if status_filter == 'errors_only' and not log_data.get('error'):
+            return False
+        if status_filter == 'resolved' and log_data.get('error_status') != 'resolved':
+            return False
+        if status_filter == 'active' and log_data.get('error_status') == 'resolved':
+            return False
+        
+        # Severity filter (if we add severity levels)
+        severity = filters.get('severity')
+        if severity and log_data.get('severity') != severity:
+            return False
+        
+        return True
+    
+    def get_connection_count(self) -> int:
+        """Get the number of active connections."""
+        with self.lock:
+            return len(self.connections)
+
+# Global SSE manager
+sse_manager = SSEConnectionManager()
+
 
 @app.before_request
 def attach_request_context():
@@ -556,6 +639,100 @@ def _resolve_project_name(project_name):
 @app.route("/api/health")
 def health():
     return jsonify({"status": "ok", "ts": datetime.now(timezone.utc).isoformat()})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# REAL-TIME LOG STREAMING (SSE)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/logs/stream")
+def stream_logs():
+    """
+    GET /api/logs/stream
+    
+    Server-Sent Events (SSE) endpoint for real-time log streaming.
+    
+    Query Parameters:
+      - project_name: Filter by specific project
+      - status: Filter by status (errors_only, resolved, active, all)
+      - severity: Filter by severity level
+    
+    Usage:
+      const eventSource = new EventSource('/api/logs/stream?project_name=MyProject&status=errors_only');
+      eventSource.onmessage = (event) => {
+        const log = JSON.parse(event.data);
+        console.log('New log:', log);
+      };
+    """
+    connection_id = str(uuid.uuid4())
+    
+    # Parse filters from query parameters
+    filters = {
+        'project_name': request.args.get('project_name'),
+        'status': request.args.get('status', 'all'),
+        'severity': request.args.get('severity'),
+    }
+    
+    # Register connection
+    message_queue = sse_manager.add_connection(connection_id, filters)
+    
+    def generate():
+        """Generator function for SSE stream."""
+        try:
+            # Send initial connection confirmation
+            yield f"data: {json.dumps({'type': 'connected', 'connection_id': connection_id, 'filters': filters})}\n\n"
+            
+            # Send periodic heartbeat and messages
+            last_heartbeat = time.time()
+            heartbeat_interval = 30  # seconds
+            
+            while True:
+                try:
+                    # Non-blocking get with timeout
+                    if not message_queue.empty():
+                        message = message_queue.get(timeout=1)
+                        yield f"data: {json.dumps({'type': 'log', 'data': message})}\n\n"
+                    else:
+                        # Send heartbeat if needed
+                        current_time = time.time()
+                        if current_time - last_heartbeat >= heartbeat_interval:
+                            yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.now(timezone.utc).isoformat()})}\n\n"
+                            last_heartbeat = current_time
+                        time.sleep(0.5)  # Prevent tight loop
+                        
+                except Exception as e:
+                    logger.error(f"[SSE] Error in stream for {connection_id}: {e}")
+                    break
+                    
+        finally:
+            # Clean up connection
+            sse_manager.remove_connection(connection_id)
+    
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',  # Disable nginx buffering
+            'Connection': 'keep-alive',
+        }
+    )
+
+
+@app.route("/api/logs/stream/stats")
+def stream_stats():
+    """
+    GET /api/logs/stream/stats
+    
+    Get statistics about active SSE connections.
+    """
+    return jsonify({
+        "active_connections": sse_manager.get_connection_count(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+
 
 
 @app.route("/api/debug/project-tables")
@@ -843,6 +1020,2093 @@ def list_live_projects():
         return jsonify({"error": "Internal server error"}), 500
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADVANCED FILTERING & MULTI-PROJECT LOGS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/logs/multi-project")
+def multi_project_logs():
+    """
+    GET /api/logs/multi-project
+    
+    Get logs from multiple projects at once with advanced filtering.
+    
+    Query Parameters:
+      - projects: Comma-separated list of project names (required)
+      - from, to: Date range filters
+      - search: Full-text search
+      - regex: Regex pattern search
+      - severity: Severity filter
+      - status: Status filter (all, errors, resolved, active, success)
+      - page, limit: Pagination
+    
+    Example:
+      GET /api/logs/multi-project?projects=Project1,Project2&status=errors&search=timeout
+    """
+    projects_param = request.args.get("projects", "")
+    if not projects_param:
+        return jsonify({"error": "projects parameter is required"}), 400
+    
+    project_names = [p.strip() for p in projects_param.split(",") if p.strip()]
+    if not project_names:
+        return jsonify({"error": "At least one project name is required"}), 400
+    
+    page = max(1, int(request.args.get("page", 1)))
+    limit = min(100, max(1, int(request.args.get("limit", 50))))
+    offset = (page - 1) * limit
+    
+    # Parse filters
+    from_date = request.args.get("from")
+    to_date = request.args.get("to")
+    search = request.args.get("search")
+    regex_pattern = request.args.get("regex")
+    severity = request.args.get("severity")
+    file_path = request.args.get("file_path")
+    status_filter = request.args.get("status", "all")
+    
+    try:
+        # Build WHERE clause for multiple projects
+        project_conditions = " OR ".join(["LOWER(project_name) = LOWER(%s)"] * len(project_names))
+        filters = [f"({project_conditions})"]
+        count_params = list(project_names)
+        query_params = list(project_names)
+        
+        # Date filters
+        if from_date:
+            from_date_clean = from_date.split('T')[0] if 'T' in from_date else from_date
+            filters.append("DATE(timestamp) >= %s")
+            count_params.append(from_date_clean)
+            query_params.append(from_date_clean)
+        
+        if to_date:
+            to_date_clean = to_date.split('T')[0] if 'T' in to_date else to_date
+            filters.append("DATE(timestamp) <= %s")
+            count_params.append(to_date_clean)
+            query_params.append(to_date_clean)
+        
+        # Full-text search
+        if search:
+            filters.append("(LOWER(error) LIKE LOWER(%s) OR LOWER(error_detail) LIKE LOWER(%s) OR LOWER(file_name) LIKE LOWER(%s))")
+            search_pattern = f"%{search}%"
+            count_params.extend([search_pattern, search_pattern, search_pattern])
+            query_params.extend([search_pattern, search_pattern, search_pattern])
+        
+        # Regex search
+        if regex_pattern:
+            try:
+                re.compile(regex_pattern)
+                filters.append("(error ~* %s OR error_detail ~* %s)")
+                count_params.extend([regex_pattern, regex_pattern])
+                query_params.extend([regex_pattern, regex_pattern])
+            except re.error as regex_error:
+                return jsonify({"error": f"Invalid regex pattern: {str(regex_error)}"}), 400
+        
+        # Severity filter
+        if severity:
+            filters.append("severity = %s")
+            count_params.append(severity)
+            query_params.append(severity)
+        
+        # File path filter
+        if file_path:
+            filters.append("LOWER(file_name) LIKE LOWER(%s)")
+            file_pattern = f"%{file_path}%"
+            count_params.append(file_pattern)
+            query_params.append(file_pattern)
+        
+        # Status filter
+        if status_filter == "errors":
+            filters.append("error IS NOT NULL AND error != ''")
+        elif status_filter == "resolved":
+            filters.append("error IS NOT NULL AND error != '' AND error_status = 'resolved'")
+        elif status_filter == "active":
+            filters.append("error IS NOT NULL AND error != '' AND (error_status IS NULL OR error_status != 'resolved')")
+        elif status_filter == "success":
+            filters.append("(error IS NULL OR error = '')")
+        
+        where_clause = " AND ".join(filters)
+        
+        # Get total count
+        count_query = f"SELECT COUNT(*) as total FROM {TABLE} WHERE row_type = 'log' AND {where_clause}"
+        count_result = query(count_query, tuple(count_params))
+        total_records = int(count_result[0].get("total", 0)) if count_result else 0
+        total_pages = (total_records + limit - 1) // limit if limit > 0 else 0
+        
+        # Add pagination params
+        query_params.extend([limit, offset])
+        
+        # Fetch logs
+        logs_query = (
+            f"SELECT project_name, file_name, timestamp, success_count, failure_count, error, "
+            f"error_detail, error_status, resolved_at, reopened_at, "
+            f"llm_usage, input_tokens, output_tokens, calculated_cost "
+            f"FROM {TABLE} WHERE row_type = 'log' AND {where_clause} "
+            f"ORDER BY timestamp DESC LIMIT %s OFFSET %s"
+        )
+        logs = query(logs_query, tuple(query_params))
+        
+        # Calculate stats per project
+        project_stats = {}
+        for log in logs:
+            proj = log.get("project_name")
+            if proj not in project_stats:
+                project_stats[proj] = {"total": 0, "errors": 0, "success": 0}
+            project_stats[proj]["total"] += 1
+            if log.get("error"):
+                project_stats[proj]["errors"] += 1
+            else:
+                project_stats[proj]["success"] += 1
+        
+        return jsonify({
+            "logs": serialize_rows(logs),
+            "total": total_records,
+            "projects": project_names,
+            "projectStats": project_stats,
+            "appliedFilters": {
+                "from": from_date,
+                "to": to_date,
+                "search": search,
+                "regex": regex_pattern,
+                "severity": severity,
+                "file_path": file_path,
+                "status": status_filter,
+            },
+            "pagination": {
+                "currentPage": page,
+                "totalPages": total_pages,
+                "totalRecords": total_records,
+                "limit": limit,
+                "hasNextPage": page < total_pages,
+                "hasPreviousPage": page > 1
+            }
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({"error": str(e), "traceback": _tb.format_exc()}), 500
+
+
+@app.route("/api/filters/presets", methods=["GET"])
+def get_filter_presets():
+    """
+    GET /api/filters/presets
+    
+    Get saved filter presets for the current user.
+    Returns common presets plus user-defined ones.
+    """
+    # TODO: Add user authentication and load user-specific presets from DB
+    # For now, return system-wide common presets
+    
+    common_presets = [
+        {
+            "id": "recent-errors",
+            "name": "Recent Errors (24h)",
+            "description": "All errors from the last 24 hours",
+            "filters": {
+                "status": "errors",
+                "from": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+                "to": datetime.now(timezone.utc).isoformat(),
+            },
+            "isSystem": True,
+        },
+        {
+            "id": "critical-errors",
+            "name": "Critical Errors",
+            "description": "High-severity unresolved errors",
+            "filters": {
+                "status": "active",
+                "severity": "critical",
+            },
+            "isSystem": True,
+        },
+        {
+            "id": "timeout-errors",
+            "name": "Timeout Errors",
+            "description": "All timeout-related errors",
+            "filters": {
+                "status": "errors",
+                "search": "timeout",
+            },
+            "isSystem": True,
+        },
+        {
+            "id": "database-errors",
+            "name": "Database Errors",
+            "description": "Database connection and query errors",
+            "filters": {
+                "status": "errors",
+                "regex": "database|sql|connection|query",
+            },
+            "isSystem": True,
+        },
+        {
+            "id": "this-week-resolved",
+            "name": "Resolved This Week",
+            "description": "Errors resolved in the last 7 days",
+            "filters": {
+                "status": "resolved",
+                "from": (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(),
+            },
+            "isSystem": True,
+        },
+    ]
+    
+    return jsonify({"presets": common_presets})
+
+
+@app.route("/api/filters/presets", methods=["POST"])
+def create_filter_preset():
+    """
+    POST /api/filters/presets
+    
+    Create a new saved filter preset.
+    
+    Body:
+      {
+        "name": "My Custom Filter",
+        "description": "Description of the filter",
+        "filters": {
+          "status": "errors",
+          "search": "keyword",
+          ...
+        }
+      }
+    """
+    body = request.get_json() or {}
+    name = body.get("name", "").strip()
+    description = body.get("description", "").strip()
+    filters = body.get("filters", {})
+    
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+    
+    if not filters:
+        return jsonify({"error": "filters object is required"}), 400
+    
+    # TODO: Add user authentication and save to database
+    # For now, just return the preset as confirmation
+    preset_id = str(uuid.uuid4())
+    
+    preset = {
+        "id": preset_id,
+        "name": name,
+        "description": description,
+        "filters": filters,
+        "isSystem": False,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    }
+    
+    return jsonify({"preset": preset, "message": "Preset created (in-memory only, not persisted yet)"}), 201
+
+
+@app.route("/api/filters/presets/<preset_id>", methods=["DELETE"])
+def delete_filter_preset(preset_id):
+    """
+    DELETE /api/filters/presets/:id
+    
+    Delete a saved filter preset.
+    """
+    # TODO: Add user authentication and delete from database
+    return jsonify({"message": f"Preset {preset_id} deleted (in-memory only)"}), 200
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOG GROUPING & AGGREGATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/logs/grouping/by-error-type")
+def group_by_error_type():
+    """
+    GET /api/logs/grouping/by-error-type
+    
+    Group logs by error type/hash with occurrence counts.
+    
+    Query Parameters:
+      - project_name: Filter by project (optional)
+      - from, to: Date range
+      - status: Filter by status (all, active, resolved)
+      - limit: Max groups to return (default: 50)
+    
+    Returns errors grouped by their error_hash with counts and latest occurrence.
+    """
+    project_name = request.args.get("project_name")
+    from_date = request.args.get("from")
+    to_date = request.args.get("to")
+    status_filter = request.args.get("status", "all")
+    limit = min(100, max(1, int(request.args.get("limit", 50))))
+    
+    try:
+        filters = ["row_type = 'log'", "error IS NOT NULL", "error != ''"]
+        params = []
+        
+        if project_name:
+            filters.append("LOWER(project_name) = LOWER(%s)")
+            params.append(project_name)
+        
+        if from_date:
+            from_date_clean = from_date.split('T')[0] if 'T' in from_date else from_date
+            filters.append("DATE(timestamp) >= %s")
+            params.append(from_date_clean)
+        
+        if to_date:
+            to_date_clean = to_date.split('T')[0] if 'T' in to_date else to_date
+            filters.append("DATE(timestamp) <= %s")
+            params.append(to_date_clean)
+        
+        if status_filter == "active":
+            filters.append("(error_status IS NULL OR error_status != 'resolved')")
+        elif status_filter == "resolved":
+            filters.append("error_status = 'resolved'")
+        
+        where_clause = " AND ".join(filters)
+        params.append(limit)
+        
+        query_sql = f"""
+            SELECT 
+                error_hash,
+                error_group_id,
+                error_group_name,
+                COUNT(*) as occurrence_count,
+                MAX(timestamp) as latest_occurrence,
+                MIN(timestamp) as first_occurrence,
+                STRING_AGG(DISTINCT project_name, ', ') as affected_projects,
+                STRING_AGG(DISTINCT file_name, ', ') as affected_files,
+                MAX(error) as sample_error_message,
+                SUM(failure_count) as total_failures
+            FROM {TABLE}
+            WHERE {where_clause}
+            GROUP BY error_hash, error_group_id, error_group_name
+            ORDER BY occurrence_count DESC, latest_occurrence DESC
+            LIMIT %s
+        """
+        
+        groups = query(query_sql, tuple(params))
+        
+        return jsonify({
+            "groups": serialize_rows(groups),
+            "total_groups": len(groups),
+            "filters": {
+                "project_name": project_name,
+                "from": from_date,
+                "to": to_date,
+                "status": status_filter,
+            }
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({"error": str(e), "traceback": _tb.format_exc()}), 500
+
+
+@app.route("/api/logs/grouping/by-file")
+def group_by_file():
+    """
+    GET /api/logs/grouping/by-file
+    
+    Group logs by file/module with error statistics.
+    
+    Query Parameters:
+      - project_name: Filter by project (optional)
+      - from, to: Date range
+      - status: Filter by status
+      - limit: Max files to return (default: 50)
+    
+    Returns files with error counts, success counts, and failure rates.
+    """
+    project_name = request.args.get("project_name")
+    from_date = request.args.get("from")
+    to_date = request.args.get("to")
+    status_filter = request.args.get("status", "all")
+    limit = min(100, max(1, int(request.args.get("limit", 50))))
+    
+    try:
+        filters = ["row_type = 'log'", "file_name IS NOT NULL"]
+        params = []
+        
+        if project_name:
+            filters.append("LOWER(project_name) = LOWER(%s)")
+            params.append(project_name)
+        
+        if from_date:
+            from_date_clean = from_date.split('T')[0] if 'T' in from_date else from_date
+            filters.append("DATE(timestamp) >= %s")
+            params.append(from_date_clean)
+        
+        if to_date:
+            to_date_clean = to_date.split('T')[0] if 'T' in to_date else to_date
+            filters.append("DATE(timestamp) <= %s")
+            params.append(to_date_clean)
+        
+        where_clause = " AND ".join(filters)
+        params.append(limit)
+        
+        query_sql = f"""
+            SELECT 
+                file_name,
+                project_name,
+                COUNT(*) as total_logs,
+                COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) as error_count,
+                COUNT(CASE WHEN error IS NULL OR error = '' THEN 1 END) as success_count,
+                COUNT(CASE WHEN error IS NOT NULL AND error != '' AND error_status = 'resolved' THEN 1 END) as resolved_count,
+                COUNT(CASE WHEN error IS NOT NULL AND error != '' AND (error_status IS NULL OR error_status != 'resolved') THEN 1 END) as active_error_count,
+                MAX(timestamp) as latest_log,
+                ROUND(
+                    100.0 * COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) / NULLIF(COUNT(*), 0),
+                    2
+                ) as error_rate_percent
+            FROM {TABLE}
+            WHERE {where_clause}
+            GROUP BY file_name, project_name
+            ORDER BY error_count DESC, total_logs DESC
+            LIMIT %s
+        """
+        
+        groups = query(query_sql, tuple(params))
+        
+        return jsonify({
+            "files": serialize_rows(groups),
+            "total_files": len(groups),
+            "filters": {
+                "project_name": project_name,
+                "from": from_date,
+                "to": to_date,
+                "status": status_filter,
+            }
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({"error": str(e), "traceback": _tb.format_exc()}), 500
+
+
+@app.route("/api/logs/grouping/by-time")
+def group_by_time():
+    """
+    GET /api/logs/grouping/by-time
+    
+    Group logs by time buckets (hourly, daily, weekly).
+    
+    Query Parameters:
+      - project_name: Filter by project (optional)
+      - from, to: Date range (required)
+      - bucket: Time bucket size (hour, day, week) - default: day
+      - status: Filter by status
+    
+    Returns time-series data showing error trends over time.
+    """
+    project_name = request.args.get("project_name")
+    from_date = request.args.get("from")
+    to_date = request.args.get("to")
+    bucket = request.args.get("bucket", "day")
+    status_filter = request.args.get("status", "all")
+    
+    if not from_date or not to_date:
+        return jsonify({"error": "from and to date parameters are required"}), 400
+    
+    if bucket not in ["hour", "day", "week"]:
+        return jsonify({"error": "bucket must be one of: hour, day, week"}), 400
+    
+    try:
+        filters = ["row_type = 'log'"]
+        params = []
+        
+        if project_name:
+            filters.append("LOWER(project_name) = LOWER(%s)")
+            params.append(project_name)
+        
+        from_date_clean = from_date.split('T')[0] if 'T' in from_date else from_date
+        to_date_clean = to_date.split('T')[0] if 'T' in to_date else to_date
+        filters.append("DATE(timestamp) >= %s")
+        filters.append("DATE(timestamp) <= %s")
+        params.extend([from_date_clean, to_date_clean])
+        
+        # Determine PostgreSQL date_trunc format
+        trunc_format = {
+            "hour": "hour",
+            "day": "day",
+            "week": "week"
+        }[bucket]
+        
+        where_clause = " AND ".join(filters)
+        
+        query_sql = f"""
+            SELECT 
+                DATE_TRUNC('{trunc_format}', timestamp) as time_bucket,
+                COUNT(*) as total_logs,
+                COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) as error_count,
+                COUNT(CASE WHEN error IS NULL OR error = '' THEN 1 END) as success_count,
+                COUNT(CASE WHEN error IS NOT NULL AND error != '' AND error_status = 'resolved' THEN 1 END) as resolved_count,
+                COUNT(CASE WHEN error IS NOT NULL AND error != '' AND (error_status IS NULL OR error_status != 'resolved') THEN 1 END) as active_error_count,
+                ROUND(
+                    100.0 * COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) / NULLIF(COUNT(*), 0),
+                    2
+                ) as error_rate_percent
+            FROM {TABLE}
+            WHERE {where_clause}
+            GROUP BY time_bucket
+            ORDER BY time_bucket ASC
+        """
+        
+        time_series = query(query_sql, tuple(params))
+        
+        return jsonify({
+            "timeSeries": serialize_rows(time_series),
+            "bucket": bucket,
+            "dataPoints": len(time_series),
+            "filters": {
+                "project_name": project_name,
+                "from": from_date,
+                "to": to_date,
+                "status": status_filter,
+            }
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({"error": str(e), "traceback": _tb.format_exc()}), 500
+
+
+@app.route("/api/logs/grouping/by-project")
+def group_by_project():
+    """
+    GET /api/logs/grouping/by-project
+    
+    Aggregate statistics across all projects.
+    
+    Query Parameters:
+      - from, to: Date range
+      - status: Filter by status
+      - sort: Sort by (errors, total, error_rate) - default: errors
+    
+    Returns project-level aggregations with error rates and trends.
+    """
+    from_date = request.args.get("from")
+    to_date = request.args.get("to")
+    status_filter = request.args.get("status", "all")
+    sort_by = request.args.get("sort", "errors")
+    
+    if sort_by not in ["errors", "total", "error_rate"]:
+        return jsonify({"error": "sort must be one of: errors, total, error_rate"}), 400
+    
+    try:
+        filters = ["row_type = 'log'"]
+        params = []
+        
+        if from_date:
+            from_date_clean = from_date.split('T')[0] if 'T' in from_date else from_date
+            filters.append("DATE(timestamp) >= %s")
+            params.append(from_date_clean)
+        
+        if to_date:
+            to_date_clean = to_date.split('T')[0] if 'T' in to_date else to_date
+            filters.append("DATE(timestamp) <= %s")
+            params.append(to_date_clean)
+        
+        where_clause = " AND ".join(filters)
+        
+        # Determine sort column
+        sort_column = {
+            "errors": "error_count",
+            "total": "total_logs",
+            "error_rate": "error_rate_percent"
+        }[sort_by]
+        
+        query_sql = f"""
+            SELECT 
+                project_name,
+                COUNT(*) as total_logs,
+                COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) as error_count,
+                COUNT(CASE WHEN error IS NULL OR error = '' THEN 1 END) as success_count,
+                COUNT(CASE WHEN error IS NOT NULL AND error != '' AND error_status = 'resolved' THEN 1 END) as resolved_count,
+                COUNT(CASE WHEN error IS NOT NULL AND error != '' AND (error_status IS NULL OR error_status != 'resolved') THEN 1 END) as active_error_count,
+                COUNT(DISTINCT error_hash) as unique_error_types,
+                MAX(timestamp) as latest_log,
+                MIN(timestamp) as first_log,
+                ROUND(
+                    100.0 * COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) / NULLIF(COUNT(*), 0),
+                    2
+                ) as error_rate_percent,
+                SUM(COALESCE(calculated_cost, 0)) as total_cost
+            FROM {TABLE}
+            WHERE {where_clause}
+            GROUP BY project_name
+            ORDER BY {sort_column} DESC
+        """
+        
+        projects = query(query_sql, tuple(params))
+        
+        # Calculate totals
+        total_logs = sum(p.get("total_logs", 0) for p in projects)
+        total_errors = sum(p.get("error_count", 0) for p in projects)
+        total_success = sum(p.get("success_count", 0) for p in projects)
+        
+        return jsonify({
+            "projects": serialize_rows(projects),
+            "total_projects": len(projects),
+            "totals": {
+                "total_logs": total_logs,
+                "total_errors": total_errors,
+                "total_success": total_success,
+                "overall_error_rate": round(100.0 * total_errors / total_logs, 2) if total_logs > 0 else 0,
+            },
+            "filters": {
+                "from": from_date,
+                "to": to_date,
+                "status": status_filter,
+                "sort": sort_by,
+            }
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({"error": str(e), "traceback": _tb.format_exc()}), 500
+
+
+@app.route("/api/logs/deduplication/similar")
+def find_similar_errors():
+    """
+    GET /api/logs/deduplication/similar
+    
+    Find and group similar errors that may be duplicates.
+    Uses error_hash and error_group_id for semantic similarity.
+    
+    Query Parameters:
+      - project_name: Filter by project (required)
+      - from, to: Date range
+      - min_occurrences: Minimum occurrences to include (default: 2)
+      - time_window: Time window in hours to consider duplicates (default: 24)
+    
+    Returns groups of similar errors with deduplication suggestions.
+    """
+    project_name = request.args.get("project_name")
+    if not project_name:
+        return jsonify({"error": "project_name parameter is required"}), 400
+    
+    from_date = request.args.get("from")
+    to_date = request.args.get("to")
+    min_occurrences = max(1, int(request.args.get("min_occurrences", 2)))
+    time_window_hours = max(1, int(request.args.get("time_window", 24)))
+    
+    try:
+        filters = [
+            "row_type = 'log'",
+            "LOWER(project_name) = LOWER(%s)",
+            "error IS NOT NULL",
+            "error != ''"
+        ]
+        params = [project_name]
+        
+        if from_date:
+            from_date_clean = from_date.split('T')[0] if 'T' in from_date else from_date
+            filters.append("DATE(timestamp) >= %s")
+            params.append(from_date_clean)
+        
+        if to_date:
+            to_date_clean = to_date.split('T')[0] if 'T' in to_date else to_date
+            filters.append("DATE(timestamp) <= %s")
+            params.append(to_date_clean)
+        
+        where_clause = " AND ".join(filters)
+        params.extend([min_occurrences, time_window_hours])
+        
+        query_sql = f"""
+            WITH similar_groups AS (
+                SELECT 
+                    COALESCE(error_hash, MD5(LOWER(TRIM(error)))) as group_key,
+                    error_group_id,
+                    error_group_name,
+                    COUNT(*) as occurrence_count,
+                    MAX(timestamp) as latest_occurrence,
+                    MIN(timestamp) as first_occurrence,
+                    EXTRACT(EPOCH FROM (MAX(timestamp) - MIN(timestamp))) / 3600 as time_span_hours,
+                    STRING_AGG(DISTINCT file_name, ', ') as affected_files,
+                    MAX(error) as sample_error,
+                    MAX(error_detail) as sample_detail
+                FROM {TABLE}
+                WHERE {where_clause}
+                GROUP BY group_key, error_group_id, error_group_name
+                HAVING 
+                    COUNT(*) >= %s
+                    AND EXTRACT(EPOCH FROM (MAX(timestamp) - MIN(timestamp))) / 3600 <= %s
+            )
+            SELECT *,
+                CASE 
+                    WHEN occurrence_count >= 10 THEN 'high'
+                    WHEN occurrence_count >= 5 THEN 'medium'
+                    ELSE 'low'
+                END as duplication_severity
+            FROM similar_groups
+            ORDER BY occurrence_count DESC, latest_occurrence DESC
+        """
+        
+        duplicates = query(query_sql, tuple(params))
+        
+        return jsonify({
+            "duplicateGroups": serialize_rows(duplicates),
+            "total_groups": len(duplicates),
+            "summary": {
+                "high_duplication": len([d for d in duplicates if d.get("duplication_severity") == "high"]),
+                "medium_duplication": len([d for d in duplicates if d.get("duplication_severity") == "medium"]),
+                "low_duplication": len([d for d in duplicates if d.get("duplication_severity") == "low"]),
+            },
+            "filters": {
+                "project_name": project_name,
+                "from": from_date,
+                "to": to_date,
+                "min_occurrences": min_occurrences,
+                "time_window_hours": time_window_hours,
+            }
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({"error": str(e), "traceback": _tb.format_exc()}), 500
+
+
+@app.route("/api/logs/aggregation/summary")
+def aggregation_summary():
+    """
+    GET /api/logs/aggregation/summary
+    
+    Get high-level aggregation summary with key metrics.
+    
+    Query Parameters:
+      - project_name: Filter by project (optional)
+      - from, to: Date range
+    
+    Returns comprehensive summary with counts, rates, and trends.
+    """
+    project_name = request.args.get("project_name")
+    from_date = request.args.get("from")
+    to_date = request.args.get("to")
+    
+    try:
+        filters = ["row_type = 'log'"]
+        params = []
+        
+        if project_name:
+            filters.append("LOWER(project_name) = LOWER(%s)")
+            params.append(project_name)
+        
+        if from_date:
+            from_date_clean = from_date.split('T')[0] if 'T' in from_date else from_date
+            filters.append("DATE(timestamp) >= %s")
+            params.append(from_date_clean)
+        
+        if to_date:
+            to_date_clean = to_date.split('T')[0] if 'T' in to_date else to_date
+            filters.append("DATE(timestamp) <= %s")
+            params.append(to_date_clean)
+        
+        where_clause = " AND ".join(filters)
+        
+        query_sql = f"""
+            SELECT 
+                COUNT(*) as total_logs,
+                COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) as total_errors,
+                COUNT(CASE WHEN error IS NULL OR error = '' THEN 1 END) as total_success,
+                COUNT(CASE WHEN error IS NOT NULL AND error != '' AND error_status = 'resolved' THEN 1 END) as resolved_errors,
+                COUNT(CASE WHEN error IS NOT NULL AND error != '' AND (error_status IS NULL OR error_status != 'resolved') THEN 1 END) as active_errors,
+                COUNT(DISTINCT error_hash) as unique_error_types,
+                COUNT(DISTINCT project_name) as affected_projects,
+                COUNT(DISTINCT file_name) as affected_files,
+                MAX(timestamp) as latest_log_time,
+                MIN(timestamp) as first_log_time,
+                SUM(COALESCE(calculated_cost, 0)) as total_cost,
+                AVG(COALESCE(input_tokens, 0)) as avg_input_tokens,
+                AVG(COALESCE(output_tokens, 0)) as avg_output_tokens,
+                ROUND(
+                    100.0 * COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) / NULLIF(COUNT(*), 0),
+                    2
+                ) as error_rate_percent,
+                ROUND(
+                    100.0 * COUNT(CASE WHEN error_status = 'resolved' THEN 1 END) / 
+                    NULLIF(COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END), 0),
+                    2
+                ) as resolution_rate_percent
+            FROM {TABLE}
+            WHERE {where_clause}
+        """
+        
+        result = query(query_sql, tuple(params))
+        summary = serialize_row(result[0]) if result else {}
+        
+        return jsonify({
+            "summary": summary,
+            "filters": {
+                "project_name": project_name,
+                "from": from_date,
+                "to": to_date,
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({"error": str(e), "traceback": _tb.format_exc()}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VISUALIZATION DATA ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/visualization/timeline")
+def visualization_timeline():
+    """
+    GET /api/visualization/timeline
+    
+    Get timeline chart data showing error frequency over time.
+    Optimized for line charts and area charts.
+    
+    Query Parameters:
+      - project_name: Filter by project (optional)
+      - from, to: Date range (required)
+      - bucket: hour, day, week (default: day)
+      - metric: errors, total, error_rate (default: errors)
+    
+    Returns data formatted for Chart.js, Recharts, or similar libraries.
+    """
+    project_name = request.args.get("project_name")
+    from_date = request.args.get("from")
+    to_date = request.args.get("to")
+    bucket = request.args.get("bucket", "day")
+    metric = request.args.get("metric", "errors")
+    
+    if not from_date or not to_date:
+        return jsonify({"error": "from and to parameters are required"}), 400
+    
+    if bucket not in ["hour", "day", "week"]:
+        return jsonify({"error": "bucket must be one of: hour, day, week"}), 400
+    
+    if metric not in ["errors", "total", "error_rate"]:
+        return jsonify({"error": "metric must be one of: errors, total, error_rate"}), 400
+    
+    try:
+        filters = ["row_type = 'log'"]
+        params = []
+        
+        if project_name:
+            filters.append("LOWER(project_name) = LOWER(%s)")
+            params.append(project_name)
+        
+        from_date_clean = from_date.split('T')[0] if 'T' in from_date else from_date
+        to_date_clean = to_date.split('T')[0] if 'T' in to_date else to_date
+        filters.append("DATE(timestamp) >= %s")
+        filters.append("DATE(timestamp) <= %s")
+        params.extend([from_date_clean, to_date_clean])
+        
+        trunc_format = {"hour": "hour", "day": "day", "week": "week"}[bucket]
+        where_clause = " AND ".join(filters)
+        
+        query_sql = f"""
+            SELECT 
+                DATE_TRUNC('{trunc_format}', timestamp) as time_bucket,
+                COUNT(*) as total,
+                COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) as errors,
+                ROUND(
+                    100.0 * COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) / NULLIF(COUNT(*), 0),
+                    2
+                ) as error_rate
+            FROM {TABLE}
+            WHERE {where_clause}
+            GROUP BY time_bucket
+            ORDER BY time_bucket ASC
+        """
+        
+        time_series = query(query_sql, tuple(params))
+        
+        # Format for chart libraries
+        labels = [row["time_bucket"].isoformat() if row["time_bucket"] else "" for row in time_series]
+        data = [float(row[metric]) if row[metric] is not None else 0 for row in time_series]
+        
+        # Calculate statistics
+        avg_value = sum(data) / len(data) if data else 0
+        max_value = max(data) if data else 0
+        min_value = min(data) if data else 0
+        
+        return jsonify({
+            "chartData": {
+                "labels": labels,
+                "datasets": [{
+                    "label": metric.replace("_", " ").title(),
+                    "data": data,
+                    "metric": metric,
+                }]
+            },
+            "statistics": {
+                "average": round(avg_value, 2),
+                "maximum": round(max_value, 2),
+                "minimum": round(min_value, 2),
+                "dataPoints": len(data),
+            },
+            "config": {
+                "bucket": bucket,
+                "metric": metric,
+                "from": from_date,
+                "to": to_date,
+            }
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({"error": str(e), "traceback": _tb.format_exc()}), 500
+
+
+@app.route("/api/visualization/heatmap")
+def visualization_heatmap():
+    """
+    GET /api/visualization/heatmap
+    
+    Get heatmap data showing error density by hour of day and day of week.
+    Perfect for identifying patterns in error occurrence times.
+    
+    Query Parameters:
+      - project_name: Filter by project (optional)
+      - from, to: Date range (required)
+    
+    Returns matrix data for heatmap visualization.
+    """
+    project_name = request.args.get("project_name")
+    from_date = request.args.get("from")
+    to_date = request.args.get("to")
+    
+    if not from_date or not to_date:
+        return jsonify({"error": "from and to parameters are required"}), 400
+    
+    try:
+        filters = ["row_type = 'log'", "error IS NOT NULL", "error != ''"]
+        params = []
+        
+        if project_name:
+            filters.append("LOWER(project_name) = LOWER(%s)")
+            params.append(project_name)
+        
+        from_date_clean = from_date.split('T')[0] if 'T' in from_date else from_date
+        to_date_clean = to_date.split('T')[0] if 'T' in to_date else to_date
+        filters.append("DATE(timestamp) >= %s")
+        filters.append("DATE(timestamp) <= %s")
+        params.extend([from_date_clean, to_date_clean])
+        
+        where_clause = " AND ".join(filters)
+        
+        query_sql = f"""
+            SELECT 
+                EXTRACT(DOW FROM timestamp) as day_of_week,
+                EXTRACT(HOUR FROM timestamp) as hour_of_day,
+                COUNT(*) as error_count
+            FROM {TABLE}
+            WHERE {where_clause}
+            GROUP BY day_of_week, hour_of_day
+            ORDER BY day_of_week, hour_of_day
+        """
+        
+        results = query(query_sql, tuple(params))
+        
+        # Build heatmap matrix (7 days x 24 hours)
+        heatmap = [[0 for _ in range(24)] for _ in range(7)]
+        max_count = 0
+        
+        for row in results:
+            day = int(row["day_of_week"])  # 0=Sunday, 6=Saturday
+            hour = int(row["hour_of_day"])  # 0-23
+            count = int(row["error_count"])
+            heatmap[day][hour] = count
+            max_count = max(max_count, count)
+        
+        # Day labels
+        day_labels = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+        hour_labels = [f"{h:02d}:00" for h in range(24)]
+        
+        return jsonify({
+            "heatmapData": {
+                "matrix": heatmap,
+                "xLabels": hour_labels,
+                "yLabels": day_labels,
+                "maxValue": max_count,
+            },
+            "insights": {
+                "peakDay": day_labels[max(range(7), key=lambda d: sum(heatmap[d]))],
+                "peakHour": f"{max(range(24), key=lambda h: sum(heatmap[d][h] for d in range(7))):02d}:00",
+                "totalErrors": sum(sum(row) for row in heatmap),
+            },
+            "config": {
+                "from": from_date,
+                "to": to_date,
+                "project_name": project_name,
+            }
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({"error": str(e), "traceback": _tb.format_exc()}), 500
+
+
+@app.route("/api/visualization/distribution")
+def visualization_distribution():
+    """
+    GET /api/visualization/distribution
+    
+    Get distribution data for pie charts and donut charts.
+    Shows breakdown by project, error type, status, etc.
+    
+    Query Parameters:
+      - project_name: Filter by project (optional)
+      - from, to: Date range
+      - dimension: What to distribute by (project, status, file, error_type)
+      - limit: Max slices (default: 10)
+    
+    Returns data formatted for pie/donut charts.
+    """
+    project_name = request.args.get("project_name")
+    from_date = request.args.get("from")
+    to_date = request.args.get("to")
+    dimension = request.args.get("dimension", "status")
+    limit = min(20, max(1, int(request.args.get("limit", 10))))
+    
+    if dimension not in ["project", "status", "file", "error_type"]:
+        return jsonify({"error": "dimension must be one of: project, status, file, error_type"}), 400
+    
+    try:
+        filters = ["row_type = 'log'"]
+        params = []
+        
+        if project_name:
+            filters.append("LOWER(project_name) = LOWER(%s)")
+            params.append(project_name)
+        
+        if from_date:
+            from_date_clean = from_date.split('T')[0] if 'T' in from_date else from_date
+            filters.append("DATE(timestamp) >= %s")
+            params.append(from_date_clean)
+        
+        if to_date:
+            to_date_clean = to_date.split('T')[0] if 'T' in to_date else to_date
+            filters.append("DATE(timestamp) <= %s")
+            params.append(to_date_clean)
+        
+        where_clause = " AND ".join(filters)
+        
+        # Build query based on dimension
+        if dimension == "status":
+            query_sql = f"""
+                SELECT 
+                    CASE 
+                        WHEN error IS NULL OR error = '' THEN 'Success'
+                        WHEN error_status = 'resolved' THEN 'Resolved'
+                        ELSE 'Active Error'
+                    END as label,
+                    COUNT(*) as value
+                FROM {TABLE}
+                WHERE {where_clause}
+                GROUP BY label
+                ORDER BY value DESC
+            """
+        elif dimension == "project":
+            params.append(limit)
+            query_sql = f"""
+                SELECT 
+                    project_name as label,
+                    COUNT(*) as value
+                FROM {TABLE}
+                WHERE {where_clause}
+                GROUP BY project_name
+                ORDER BY value DESC
+                LIMIT %s
+            """
+        elif dimension == "file":
+            filters.append("file_name IS NOT NULL")
+            where_clause = " AND ".join(filters)
+            params.append(limit)
+            query_sql = f"""
+                SELECT 
+                    file_name as label,
+                    COUNT(*) as value
+                FROM {TABLE}
+                WHERE {where_clause}
+                GROUP BY file_name
+                ORDER BY value DESC
+                LIMIT %s
+            """
+        elif dimension == "error_type":
+            filters.append("error IS NOT NULL")
+            filters.append("error != ''")
+            where_clause = " AND ".join(filters)
+            params.append(limit)
+            query_sql = f"""
+                SELECT 
+                    COALESCE(error_group_name, SUBSTRING(error FROM 1 FOR 50)) as label,
+                    COUNT(*) as value
+                FROM {TABLE}
+                WHERE {where_clause}
+                GROUP BY label
+                ORDER BY value DESC
+                LIMIT %s
+            """
+        
+        results = query(query_sql, tuple(params))
+        
+        labels = [row["label"] for row in results]
+        values = [int(row["value"]) for row in results]
+        total = sum(values)
+        percentages = [round(100.0 * v / total, 2) if total > 0 else 0 for v in values]
+        
+        # Generate colors
+        colors = [
+            "#FF6384", "#36A2EB", "#FFCE56", "#4BC0C0", "#9966FF",
+            "#FF9F40", "#FF6384", "#C9CBCF", "#4BC0C0", "#FF6384"
+        ]
+        
+        return jsonify({
+            "chartData": {
+                "labels": labels,
+                "datasets": [{
+                    "data": values,
+                    "backgroundColor": colors[:len(labels)],
+                    "percentages": percentages,
+                }]
+            },
+            "summary": {
+                "total": total,
+                "categories": len(labels),
+                "topCategory": labels[0] if labels else None,
+                "topCategoryCount": values[0] if values else 0,
+            },
+            "config": {
+                "dimension": dimension,
+                "limit": limit,
+            }
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({"error": str(e), "traceback": _tb.format_exc()}), 500
+
+
+@app.route("/api/visualization/bar-chart")
+def visualization_bar_chart():
+    """
+    GET /api/visualization/bar-chart
+    
+    Get bar chart data comparing metrics across categories.
+    
+    Query Parameters:
+      - project_name: Filter by project (optional)
+      - from, to: Date range
+      - category: Group by (project, file, error_type) - default: project
+      - metric: What to measure (errors, total, error_rate) - default: errors
+      - limit: Max bars (default: 10)
+    
+    Returns data formatted for bar charts.
+    """
+    project_name = request.args.get("project_name")
+    from_date = request.args.get("from")
+    to_date = request.args.get("to")
+    category = request.args.get("category", "project")
+    metric = request.args.get("metric", "errors")
+    limit = min(50, max(1, int(request.args.get("limit", 10))))
+    
+    if category not in ["project", "file", "error_type"]:
+        return jsonify({"error": "category must be one of: project, file, error_type"}), 400
+    
+    if metric not in ["errors", "total", "error_rate"]:
+        return jsonify({"error": "metric must be one of: errors, total, error_rate"}), 400
+    
+    try:
+        filters = ["row_type = 'log'"]
+        params = []
+        
+        if project_name:
+            filters.append("LOWER(project_name) = LOWER(%s)")
+            params.append(project_name)
+        
+        if from_date:
+            from_date_clean = from_date.split('T')[0] if 'T' in from_date else from_date
+            filters.append("DATE(timestamp) >= %s")
+            params.append(from_date_clean)
+        
+        if to_date:
+            to_date_clean = to_date.split('T')[0] if 'T' in to_date else to_date
+            filters.append("DATE(timestamp) <= %s")
+            params.append(to_date_clean)
+        
+        where_clause = " AND ".join(filters)
+        params.append(limit)
+        
+        # Build query based on category
+        if category == "project":
+            group_col = "project_name"
+        elif category == "file":
+            group_col = "file_name"
+            filters.append("file_name IS NOT NULL")
+            where_clause = " AND ".join(filters)
+        elif category == "error_type":
+            group_col = "COALESCE(error_group_name, SUBSTRING(error FROM 1 FOR 50))"
+            filters.append("error IS NOT NULL")
+            filters.append("error != ''")
+            where_clause = " AND ".join(filters)
+        
+        query_sql = f"""
+            SELECT 
+                {group_col} as label,
+                COUNT(*) as total,
+                COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) as errors,
+                ROUND(
+                    100.0 * COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) / NULLIF(COUNT(*), 0),
+                    2
+                ) as error_rate
+            FROM {TABLE}
+            WHERE {where_clause}
+            GROUP BY {group_col}
+            ORDER BY {metric} DESC
+            LIMIT %s
+        """
+        
+        results = query(query_sql, tuple(params))
+        
+        labels = [row["label"] for row in results]
+        data = [float(row[metric]) if row[metric] is not None else 0 for row in results]
+        
+        return jsonify({
+            "chartData": {
+                "labels": labels,
+                "datasets": [{
+                    "label": metric.replace("_", " ").title(),
+                    "data": data,
+                    "backgroundColor": "#36A2EB",
+                }]
+            },
+            "summary": {
+                "categories": len(labels),
+                "highest": labels[0] if labels else None,
+                "highestValue": data[0] if data else 0,
+            },
+            "config": {
+                "category": category,
+                "metric": metric,
+                "limit": limit,
+            }
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({"error": str(e), "traceback": _tb.format_exc()}), 500
+
+
+@app.route("/api/visualization/sparklines")
+def visualization_sparklines():
+    """
+    GET /api/visualization/sparklines
+    
+    Get compact sparkline data for mini-charts in dashboards.
+    Returns last 24 data points for quick trend visualization.
+    
+    Query Parameters:
+      - project_name: Filter by project (required)
+      - metric: errors, total, error_rate (default: errors)
+      - points: Number of points (default: 24, max: 100)
+    
+    Returns minimal data array for sparkline charts.
+    """
+    project_name = request.args.get("project_name")
+    if not project_name:
+        return jsonify({"error": "project_name parameter is required"}), 400
+    
+    metric = request.args.get("metric", "errors")
+    points = min(100, max(1, int(request.args.get("points", 24))))
+    
+    if metric not in ["errors", "total", "error_rate"]:
+        return jsonify({"error": "metric must be one of: errors, total, error_rate"}), 400
+    
+    try:
+        # Get last N hours of data
+        query_sql = f"""
+            SELECT 
+                DATE_TRUNC('hour', timestamp) as time_bucket,
+                COUNT(*) as total,
+                COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) as errors,
+                ROUND(
+                    100.0 * COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) / NULLIF(COUNT(*), 0),
+                    2
+                ) as error_rate
+            FROM {TABLE}
+            WHERE row_type = 'log' 
+                AND LOWER(project_name) = LOWER(%s)
+                AND timestamp >= NOW() - INTERVAL '%s hours'
+            GROUP BY time_bucket
+            ORDER BY time_bucket DESC
+            LIMIT %s
+        """
+        
+        results = query(query_sql, (project_name, points, points))
+        
+        # Reverse to get chronological order
+        results.reverse()
+        
+        data = [float(row[metric]) if row[metric] is not None else 0 for row in results]
+        timestamps = [row["time_bucket"].isoformat() if row["time_bucket"] else "" for row in results]
+        
+        # Calculate trend
+        trend = "stable"
+        if len(data) >= 2:
+            recent_avg = sum(data[-5:]) / min(5, len(data))
+            older_avg = sum(data[:5]) / min(5, len(data))
+            if recent_avg > older_avg * 1.2:
+                trend = "increasing"
+            elif recent_avg < older_avg * 0.8:
+                trend = "decreasing"
+        
+        return jsonify({
+            "sparklineData": {
+                "values": data,
+                "timestamps": timestamps,
+                "metric": metric,
+            },
+            "statistics": {
+                "current": data[-1] if data else 0,
+                "average": round(sum(data) / len(data), 2) if data else 0,
+                "maximum": max(data) if data else 0,
+                "minimum": min(data) if data else 0,
+                "trend": trend,
+            },
+            "config": {
+                "project_name": project_name,
+                "metric": metric,
+                "points": len(data),
+            }
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({"error": str(e), "traceback": _tb.format_exc()}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENHANCED STACK TRACE FEATURES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/stacktrace/parse/<log_id>")
+def parse_stacktrace_by_id(log_id):
+    """Parse and enhance stack trace for a specific log entry."""
+    try:
+        rows = query(f"SELECT error, error_detail FROM {TABLE} WHERE row_type = 'log' AND id = %s", (log_id,))
+        if not rows:
+            return jsonify({"error": "Log not found"}), 404
+        
+        row = rows[0]
+        parsed = parse_and_enhance_stacktrace(row["error"], row.get("error_detail"), enhance_with_source=False)
+        
+        return jsonify({"log_id": log_id, "stacktrace": parsed})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/stacktrace/filter-frames", methods=["POST"])
+def filter_stack_frames():
+    """Filter stack frames by criteria (hide library frames, show only app code, etc)."""
+    body = request.get_json() or {}
+    frames = body.get("frames", [])
+    filter_type = body.get("filter_type", "app_only")
+    app_paths = body.get("app_paths", ["app/", "src/", "lib/"])
+    
+    if filter_type == "app_only":
+        filtered = [f for f in frames if any(path in f.get("file_path", "") for path in app_paths)]
+    elif filter_type == "no_stdlib":
+        stdlib_patterns = ["site-packages/", "node_modules/", "/usr/lib/", "/usr/local/"]
+        filtered = [f for f in frames if not any(pat in f.get("file_path", "") for pat in stdlib_patterns)]
+    else:
+        filtered = frames
+    
+    return jsonify({"filtered_frames": filtered, "original_count": len(frames), "filtered_count": len(filtered)})
+
+
+@app.route("/api/stacktrace/github-link", methods=["POST"])
+def generate_github_link():
+    """Generate GitHub permalink for a stack frame."""
+    body = request.get_json() or {}
+    repo_url = body.get("repo_url", "").rstrip("/")
+    file_path = body.get("file_path", "")
+    line_number = body.get("line_number")
+    branch = body.get("branch", "main")
+    
+    if not repo_url or not file_path:
+        return jsonify({"error": "repo_url and file_path required"}), 400
+    
+    # Clean file path
+    file_path = file_path.lstrip("/")
+    
+    # Generate GitHub URL
+    if line_number:
+        github_url = f"{repo_url}/blob/{branch}/{file_path}#L{line_number}"
+    else:
+        github_url = f"{repo_url}/blob/{branch}/{file_path}"
+    
+    return jsonify({"github_url": github_url, "file_path": file_path, "line": line_number})
+
+
+@app.route("/api/stacktrace/similar")
+def find_similar_stacktraces():
+    """Find logs with similar stack traces based on file paths and line numbers."""
+    project_name = request.args.get("project_name")
+    error_hash = request.args.get("error_hash")
+    limit = min(50, max(1, int(request.args.get("limit", 10))))
+    
+    if not error_hash:
+        return jsonify({"error": "error_hash parameter required"}), 400
+    
+    try:
+        filters = ["row_type = 'log'", "error_hash = %s", "error_detail IS NOT NULL"]
+        params = [error_hash]
+        
+        if project_name:
+            filters.append("LOWER(project_name) = LOWER(%s)")
+            params.append(project_name)
+        
+        params.append(limit)
+        where_clause = " AND ".join(filters)
+        
+        rows = query(
+            f"SELECT id, project_name, error, error_detail, file_name, timestamp "
+            f"FROM {TABLE} WHERE {where_clause} ORDER BY timestamp DESC LIMIT %s",
+            tuple(params)
+        )
+        
+        return jsonify({"similar_errors": serialize_rows(rows), "count": len(rows)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOG ANNOTATIONS & METADATA
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/logs/<log_id>/tags", methods=["POST"])
+def add_log_tags(log_id):
+    """Add custom tags to a log entry."""
+    body = request.get_json() or {}
+    tags = body.get("tags", [])
+    
+    if not tags:
+        return jsonify({"error": "tags array required"}), 400
+    
+    try:
+        # Store tags as JSON array
+        execute(
+            f"UPDATE {TABLE} SET tags = %s WHERE row_type = 'log' AND id = %s",
+            (json.dumps(tags), log_id)
+        )
+        return jsonify({"log_id": log_id, "tags": tags})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/logs/<log_id>/tags", methods=["GET"])
+def get_log_tags(log_id):
+    """Get tags for a log entry."""
+    try:
+        rows = query(f"SELECT tags FROM {TABLE} WHERE row_type = 'log' AND id = %s", (log_id,))
+        if not rows:
+            return jsonify({"error": "Log not found"}), 404
+        
+        tags = json.loads(rows[0]["tags"]) if rows[0].get("tags") else []
+        return jsonify({"log_id": log_id, "tags": tags})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/logs/<log_id>/comments", methods=["POST"])
+def add_log_comment(log_id):
+    """Add a comment to a log entry."""
+    body = request.get_json() or {}
+    comment_text = body.get("comment", "").strip()
+    user_id = body.get("user_id", "anonymous")
+    
+    if not comment_text:
+        return jsonify({"error": "comment text required"}), 400
+    
+    try:
+        comment_id = str(uuid.uuid4())
+        comment = {
+            "id": comment_id,
+            "log_id": log_id,
+            "user_id": user_id,
+            "comment": comment_text,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Store comment in separate table or as JSON in metadata
+        execute(
+            f"INSERT INTO {TABLE} (id, row_type, log_ref_id, metadata, created_at) VALUES (%s, 'comment', %s, %s, NOW())",
+            (comment_id, log_id, json.dumps(comment))
+        )
+        
+        return jsonify({"comment": comment}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/logs/<log_id>/comments", methods=["GET"])
+def get_log_comments(log_id):
+    """Get all comments for a log entry."""
+    try:
+        rows = query(
+            f"SELECT metadata, created_at FROM {TABLE} WHERE row_type = 'comment' AND log_ref_id = %s ORDER BY created_at DESC",
+            (log_id,)
+        )
+        
+        comments = []
+        for row in rows:
+            if row.get("metadata"):
+                comment = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"]
+                comments.append(comment)
+        
+        return jsonify({"log_id": log_id, "comments": comments, "count": len(comments)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/logs/<log_id>/assign", methods=["POST"])
+def assign_log(log_id):
+    """Assign a log to a team member."""
+    body = request.get_json() or {}
+    assignee = body.get("assignee", "").strip()
+    
+    if not assignee:
+        return jsonify({"error": "assignee required"}), 400
+    
+    try:
+        execute(
+            f"UPDATE {TABLE} SET assigned_to = %s, assigned_at = NOW() WHERE row_type = 'log' AND id = %s",
+            (assignee, log_id)
+        )
+        return jsonify({"log_id": log_id, "assigned_to": assignee})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/logs/<log_id>/priority", methods=["POST"])
+def set_log_priority(log_id):
+    """Set priority flag for a log entry."""
+    body = request.get_json() or {}
+    priority = body.get("priority", "medium")
+    
+    if priority not in ["low", "medium", "high", "critical"]:
+        return jsonify({"error": "priority must be: low, medium, high, critical"}), 400
+    
+    try:
+        execute(
+            f"UPDATE {TABLE} SET priority = %s WHERE row_type = 'log' AND id = %s",
+            (priority, log_id)
+        )
+        return jsonify({"log_id": log_id, "priority": priority})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/logs/by-assignee/<assignee>")
+def get_logs_by_assignee(assignee):
+    """Get all logs assigned to a specific team member."""
+    status = request.args.get("status", "active")
+    limit = min(100, max(1, int(request.args.get("limit", 50))))
+    
+    try:
+        filters = ["row_type = 'log'", "assigned_to = %s"]
+        params = [assignee]
+        
+        if status == "active":
+            filters.append("(error_status IS NULL OR error_status != 'resolved')")
+        elif status == "resolved":
+            filters.append("error_status = 'resolved'")
+        
+        params.append(limit)
+        where_clause = " AND ".join(filters)
+        
+        rows = query(
+            f"SELECT id, project_name, file_name, error, timestamp, priority, error_status "
+            f"FROM {TABLE} WHERE {where_clause} ORDER BY priority DESC, timestamp DESC LIMIT %s",
+            tuple(params)
+        )
+        
+        return jsonify({"assignee": assignee, "logs": serialize_rows(rows), "count": len(rows)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SMART NOTIFICATIONS SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/notifications/webhooks", methods=["POST"])
+def create_webhook():
+    """Create a webhook for notifications (Slack, Teams, Discord, etc)."""
+    body = request.get_json() or {}
+    webhook_url = body.get("webhook_url", "").strip()
+    webhook_type = body.get("type", "slack")
+    project_name = body.get("project_name")
+    trigger = body.get("trigger", "new_error")
+    
+    if not webhook_url:
+        return jsonify({"error": "webhook_url required"}), 400
+    
+    try:
+        webhook_id = str(uuid.uuid4())
+        webhook_data = {
+            "id": webhook_id,
+            "url": webhook_url,
+            "type": webhook_type,
+            "project_name": project_name,
+            "trigger": trigger,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        execute(
+            f"INSERT INTO {TABLE} (id, row_type, metadata) VALUES (%s, 'webhook', %s)",
+            (webhook_id, json.dumps(webhook_data))
+        )
+        
+        return jsonify({"webhook": webhook_data}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/notifications/webhooks", methods=["GET"])
+def list_webhooks():
+    """List all configured webhooks."""
+    try:
+        rows = query(f"SELECT id, metadata FROM {TABLE} WHERE row_type = 'webhook'")
+        webhooks = [json.loads(r["metadata"]) if isinstance(r["metadata"], str) else r["metadata"] for r in rows]
+        return jsonify({"webhooks": webhooks, "count": len(webhooks)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/notifications/webhooks/<webhook_id>", methods=["DELETE"])
+def delete_webhook(webhook_id):
+    """Delete a webhook."""
+    try:
+        execute(f"DELETE FROM {TABLE} WHERE row_type = 'webhook' AND id = %s", (webhook_id,))
+        return jsonify({"deleted": True, "webhook_id": webhook_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/notifications/alert-rules", methods=["POST"])
+def create_alert_rule():
+    """Create an alert rule based on thresholds."""
+    body = request.get_json() or {}
+    rule_name = body.get("name", "").strip()
+    condition = body.get("condition", {})
+    action = body.get("action", {})
+    
+    if not rule_name or not condition:
+        return jsonify({"error": "name and condition required"}), 400
+    
+    try:
+        rule_id = str(uuid.uuid4())
+        rule_data = {
+            "id": rule_id,
+            "name": rule_name,
+            "condition": condition,
+            "action": action,
+            "enabled": True,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        execute(
+            f"INSERT INTO {TABLE} (id, row_type, metadata) VALUES (%s, 'alert_rule', %s)",
+            (rule_id, json.dumps(rule_data))
+        )
+        
+        return jsonify({"rule": rule_data}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/notifications/alert-rules", methods=["GET"])
+def list_alert_rules():
+    """List all alert rules."""
+    try:
+        rows = query(f"SELECT id, metadata FROM {TABLE} WHERE row_type = 'alert_rule'")
+        rules = [json.loads(r["metadata"]) if isinstance(r["metadata"], str) else r["metadata"] for r in rows]
+        return jsonify({"rules": rules, "count": len(rules)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOG RETENTION & MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/logs/retention/archive", methods=["POST"])
+def archive_old_logs():
+    """Archive logs older than specified days."""
+    body = request.get_json() or {}
+    days = body.get("days", 90)
+    project_name = body.get("project_name")
+    
+    try:
+        filters = ["row_type = 'log'", f"timestamp < NOW() - INTERVAL '{days} days'"]
+        params = []
+        
+        if project_name:
+            filters.append("LOWER(project_name) = LOWER(%s)")
+            params.append(project_name)
+        
+        where_clause = " AND ".join(filters)
+        
+        # Mark as archived instead of deleting
+        count = execute(
+            f"UPDATE {TABLE} SET archived = TRUE, archived_at = NOW() WHERE {where_clause}",
+            tuple(params) if params else None
+        )
+        
+        return jsonify({"archived": count, "days": days, "project_name": project_name})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/logs/retention/cleanup", methods=["POST"])
+def cleanup_old_logs():
+    """Permanently delete archived logs older than specified days."""
+    body = request.get_json() or {}
+    days = body.get("days", 365)
+    
+    try:
+        count = execute(
+            f"DELETE FROM {TABLE} WHERE row_type = 'log' AND archived = TRUE AND archived_at < NOW() - INTERVAL '{days} days'"
+        )
+        
+        return jsonify({"deleted": count, "days": days})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/logs/bulk/resolve", methods=["POST"])
+def bulk_resolve_logs():
+    """Bulk resolve multiple logs at once."""
+    body = request.get_json() or {}
+    log_ids = body.get("log_ids", [])
+    
+    if not log_ids:
+        return jsonify({"error": "log_ids array required"}), 400
+    
+    try:
+        placeholders = ",".join(["%s"] * len(log_ids))
+        count = execute(
+            f"UPDATE {TABLE} SET error_status = 'resolved', resolved_at = NOW() "
+            f"WHERE row_type = 'log' AND id IN ({placeholders})",
+            tuple(log_ids)
+        )
+        
+        return jsonify({"resolved": count, "log_ids": log_ids})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/logs/retention/policy", methods=["GET", "POST"])
+def manage_retention_policy():
+    """Get or set retention policy for projects."""
+    if request.method == "GET":
+        try:
+            rows = query(f"SELECT metadata FROM {TABLE} WHERE row_type = 'retention_policy'")
+            policies = [json.loads(r["metadata"]) if isinstance(r["metadata"], str) else r["metadata"] for r in rows]
+            return jsonify({"policies": policies})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    else:
+        body = request.get_json() or {}
+        project_name = body.get("project_name", "*")
+        retention_days = body.get("retention_days", 90)
+        
+        try:
+            policy_id = str(uuid.uuid4())
+            policy_data = {
+                "id": policy_id,
+                "project_name": project_name,
+                "retention_days": retention_days,
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }
+            
+            execute(
+                f"INSERT INTO {TABLE} (id, row_type, metadata) VALUES (%s, 'retention_policy', %s)",
+                (policy_id, json.dumps(policy_data))
+            )
+            
+            return jsonify({"policy": policy_data}), 201
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PERFORMANCE METRICS TRACKING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/metrics/llm-usage")
+def get_llm_usage_metrics():
+    """Get LLM usage statistics and costs."""
+    project_name = request.args.get("project_name")
+    from_date = request.args.get("from")
+    to_date = request.args.get("to")
+    
+    try:
+        filters = ["row_type = 'log'", "llm_usage IS NOT NULL"]
+        params = []
+        
+        if project_name:
+            filters.append("LOWER(project_name) = LOWER(%s)")
+            params.append(project_name)
+        
+        if from_date:
+            filters.append("DATE(timestamp) >= %s")
+            params.append(from_date.split('T')[0] if 'T' in from_date else from_date)
+        
+        if to_date:
+            filters.append("DATE(timestamp) <= %s")
+            params.append(to_date.split('T')[0] if 'T' in to_date else to_date)
+        
+        where_clause = " AND ".join(filters)
+        
+        query_sql = f"""
+            SELECT 
+                COUNT(*) as total_requests,
+                SUM(COALESCE(input_tokens, 0)) as total_input_tokens,
+                SUM(COALESCE(output_tokens, 0)) as total_output_tokens,
+                SUM(COALESCE(calculated_cost, 0)) as total_cost,
+                AVG(COALESCE(input_tokens, 0)) as avg_input_tokens,
+                AVG(COALESCE(output_tokens, 0)) as avg_output_tokens,
+                AVG(COALESCE(calculated_cost, 0)) as avg_cost_per_request,
+                STRING_AGG(DISTINCT llm_usage, ', ') as models_used
+            FROM {TABLE}
+            WHERE {where_clause}
+        """
+        
+        result = query(query_sql, tuple(params) if params else None)
+        metrics = serialize_row(result[0]) if result else {}
+        
+        return jsonify({"metrics": metrics})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/metrics/api-performance")
+def get_api_performance_metrics():
+    """Get API endpoint performance metrics."""
+    # This would track response times if we add middleware to log them
+    return jsonify({
+        "message": "API performance tracking requires middleware setup",
+        "endpoints": []
+    })
+
+
+@app.route("/api/metrics/error-resolution-time")
+def get_error_resolution_metrics():
+    """Calculate average time to resolve errors."""
+    project_name = request.args.get("project_name")
+    
+    try:
+        filters = [
+            "row_type = 'log'",
+            "error_status = 'resolved'",
+            "resolved_at IS NOT NULL"
+        ]
+        params = []
+        
+        if project_name:
+            filters.append("LOWER(project_name) = LOWER(%s)")
+            params.append(project_name)
+        
+        where_clause = " AND ".join(filters)
+        
+        query_sql = f"""
+            SELECT 
+                COUNT(*) as resolved_count,
+                AVG(EXTRACT(EPOCH FROM (resolved_at - timestamp)) / 3600) as avg_hours_to_resolve,
+                MIN(EXTRACT(EPOCH FROM (resolved_at - timestamp)) / 3600) as min_hours_to_resolve,
+                MAX(EXTRACT(EPOCH FROM (resolved_at - timestamp)) / 3600) as max_hours_to_resolve
+            FROM {TABLE}
+            WHERE {where_clause}
+        """
+        
+        result = query(query_sql, tuple(params) if params else None)
+        metrics = serialize_row(result[0]) if result else {}
+        
+        return jsonify({"resolution_metrics": metrics})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONTEXT ENRICHMENT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/logs/<log_id>/context", methods=["POST"])
+def add_log_context(log_id):
+    """Add additional context to a log entry."""
+    body = request.get_json() or {}
+    context_data = {
+        "session_id": body.get("session_id"),
+        "user_id": body.get("user_id"),
+        "request_id": body.get("request_id"),
+        "environment": body.get("environment"),
+        "browser": body.get("browser"),
+        "os": body.get("os"),
+        "app_version": body.get("app_version"),
+        "git_commit": body.get("git_commit"),
+        "deployment_id": body.get("deployment_id"),
+        "custom_data": body.get("custom_data", {})
+    }
+    
+    try:
+        execute(
+            f"UPDATE {TABLE} SET context_data = %s WHERE row_type = 'log' AND id = %s",
+            (json.dumps(context_data), log_id)
+        )
+        
+        return jsonify({"log_id": log_id, "context": context_data})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/logs/<log_id>/context", methods=["GET"])
+def get_log_context(log_id):
+    """Get context data for a log entry."""
+    try:
+        rows = query(f"SELECT context_data FROM {TABLE} WHERE row_type = 'log' AND id = %s", (log_id,))
+        if not rows:
+            return jsonify({"error": "Log not found"}), 404
+        
+        context = json.loads(rows[0]["context_data"]) if rows[0].get("context_data") else {}
+        return jsonify({"log_id": log_id, "context": context})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/logs/by-session/<session_id>")
+def get_logs_by_session(session_id):
+    """Get all logs for a specific user session."""
+    try:
+        rows = query(
+            f"SELECT id, project_name, file_name, error, timestamp FROM {TABLE} "
+            f"WHERE row_type = 'log' AND context_data::jsonb->>'session_id' = %s "
+            f"ORDER BY timestamp ASC",
+            (session_id,)
+        )
+        
+        return jsonify({"session_id": session_id, "logs": serialize_rows(rows), "count": len(rows)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/logs/by-deployment/<deployment_id>")
+def get_logs_by_deployment(deployment_id):
+    """Get all logs for a specific deployment."""
+    try:
+        rows = query(
+            f"SELECT id, project_name, file_name, error, timestamp FROM {TABLE} "
+            f"WHERE row_type = 'log' AND context_data::jsonb->>'deployment_id' = %s "
+            f"ORDER BY timestamp DESC",
+            (deployment_id,)
+        )
+        
+        return jsonify({"deployment_id": deployment_id, "logs": serialize_rows(rows), "count": len(rows)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/visualization/gauge")
+def visualization_gauge():
+    """
+    GET /api/visualization/gauge
+    
+    Get gauge/meter data for dashboard KPI widgets.
+    Shows current value vs targets/thresholds.
+    
+    Query Parameters:
+      - project_name: Filter by project (optional)
+      - metric: error_rate, resolution_rate (default: error_rate)
+      - period: Time period in hours (default: 24)
+    
+    Returns gauge data with thresholds and current value.
+    """
+    project_name = request.args.get("project_name")
+    metric = request.args.get("metric", "error_rate")
+    period = max(1, int(request.args.get("period", 24)))
+    
+    if metric not in ["error_rate", "resolution_rate"]:
+        return jsonify({"error": "metric must be one of: error_rate, resolution_rate"}), 400
+    
+    try:
+        filters = ["row_type = 'log'", f"timestamp >= NOW() - INTERVAL '{period} hours'"]
+        params = []
+        
+        if project_name:
+            filters.append("LOWER(project_name) = LOWER(%s)")
+            params.append(project_name)
+        
+        where_clause = " AND ".join(filters)
+        
+        if metric == "error_rate":
+            query_sql = f"""
+                SELECT 
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) as errors,
+                    ROUND(
+                        100.0 * COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) / NULLIF(COUNT(*), 0),
+                        2
+                    ) as value
+                FROM {TABLE}
+                WHERE {where_clause}
+            """
+        else:  # resolution_rate
+            query_sql = f"""
+                SELECT 
+                    COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END) as total_errors,
+                    COUNT(CASE WHEN error_status = 'resolved' THEN 1 END) as resolved,
+                    ROUND(
+                        100.0 * COUNT(CASE WHEN error_status = 'resolved' THEN 1 END) / 
+                        NULLIF(COUNT(CASE WHEN error IS NOT NULL AND error != '' THEN 1 END), 0),
+                        2
+                    ) as value
+                FROM {TABLE}
+                WHERE {where_clause}
+            """
+        
+        result = query(query_sql, tuple(params))
+        row = result[0] if result else {}
+        
+        value = float(row.get("value", 0))
+        
+        # Define thresholds
+        if metric == "error_rate":
+            # Lower is better for error rate
+            thresholds = {
+                "excellent": 2.0,
+                "good": 5.0,
+                "warning": 10.0,
+                "critical": 20.0,
+            }
+            status = "critical" if value > 20 else "warning" if value > 10 else "good" if value > 5 else "excellent"
+        else:  # resolution_rate
+            # Higher is better for resolution rate
+            thresholds = {
+                "excellent": 80.0,
+                "good": 60.0,
+                "warning": 40.0,
+                "critical": 20.0,
+            }
+            status = "excellent" if value > 80 else "good" if value > 60 else "warning" if value > 40 else "critical"
+        
+        return jsonify({
+            "gaugeData": {
+                "value": value,
+                "min": 0,
+                "max": 100,
+                "unit": "%",
+                "status": status,
+                "thresholds": thresholds,
+            },
+            "metadata": {
+                "metric": metric,
+                "period_hours": period,
+                "project_name": project_name,
+            }
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({"error": str(e), "traceback": _tb.format_exc()}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PROJECTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
 @app.route("/api/projects/<path:name>/logs")
 def project_logs(name):
     project_name = name
@@ -850,11 +3114,16 @@ def project_logs(name):
     limit = min(100, max(1, int(request.args.get("limit", 50))))
     offset = (page - 1) * limit
     
-    # Date filter parameters
+    # Advanced filtering parameters
     from_date = request.args.get("from")
     to_date = request.args.get("to")
+    search = request.args.get("search")  # Full-text search
+    regex_pattern = request.args.get("regex")  # Regex pattern search
+    severity = request.args.get("severity")  # Severity filter
+    file_path = request.args.get("file_path")  # File path filter
+    status_filter = request.args.get("status")  # Status filter: all, errors, resolved, active
     
-    print(f"[DEBUG] Date filter params - from: {from_date}, to: {to_date}")
+    print(f"[DEBUG] Advanced filters - from: {from_date}, to: {to_date}, search: {search}, regex: {regex_pattern}, severity: {severity}, file_path: {file_path}, status: {status_filter}")
     
     try:
         # Check if project exists
@@ -874,97 +3143,120 @@ def project_logs(name):
                 }
             })
 
-        # Build date filter WHERE clause
-        date_filter = ""
+        # Build advanced filter WHERE clause
+        filters = []
         count_params = [project_name]
         query_params = [project_name]
         
+        # Date filters
         if from_date:
-            # Convert ISO string to timestamp for comparison
-            # Remove timezone info if present and convert to date
             from_date_clean = from_date.split('T')[0] if 'T' in from_date else from_date
-            date_filter += " AND DATE(timestamp) >= %s"
+            filters.append(" AND DATE(timestamp) >= %s")
             count_params.append(from_date_clean)
             query_params.append(from_date_clean)
-            print(f"[DEBUG] Adding from_date filter: DATE(timestamp) >= {from_date_clean}")
+        
         if to_date:
-            # Convert ISO string to timestamp for comparison
             to_date_clean = to_date.split('T')[0] if 'T' in to_date else to_date
-            date_filter += " AND DATE(timestamp) <= %s"
+            filters.append(" AND DATE(timestamp) <= %s")
             count_params.append(to_date_clean)
             query_params.append(to_date_clean)
-            print(f"[DEBUG] Adding to_date filter: DATE(timestamp) <= {to_date_clean}")
         
-        print(f"[DEBUG] Final date_filter clause: {date_filter}")
-        print(f"[DEBUG] Count params: {count_params}")
+        # Full-text search (searches in error, error_detail, file_name)
+        if search:
+            filters.append(" AND (LOWER(error) LIKE LOWER(%s) OR LOWER(error_detail) LIKE LOWER(%s) OR LOWER(file_name) LIKE LOWER(%s))")
+            search_pattern = f"%{search}%"
+            count_params.extend([search_pattern, search_pattern, search_pattern])
+            query_params.extend([search_pattern, search_pattern, search_pattern])
+        
+        # Regex pattern search (PostgreSQL ~* for case-insensitive regex)
+        if regex_pattern:
+            try:
+                # Test if regex is valid
+                re.compile(regex_pattern)
+                filters.append(" AND (error ~* %s OR error_detail ~* %s)")
+                count_params.extend([regex_pattern, regex_pattern])
+                query_params.extend([regex_pattern, regex_pattern])
+            except re.error as regex_error:
+                return jsonify({"error": f"Invalid regex pattern: {str(regex_error)}"}), 400
+        
+        # Severity filter (if we add severity column in future)
+        if severity:
+            filters.append(" AND severity = %s")
+            count_params.append(severity)
+            query_params.append(severity)
+        
+        # File path filter
+        if file_path:
+            filters.append(" AND LOWER(file_name) LIKE LOWER(%s)")
+            file_pattern = f"%{file_path}%"
+            count_params.append(file_pattern)
+            query_params.append(file_pattern)
+        
+        # Status filter
+        status_filter_clause = ""
+        if status_filter == "errors":
+            status_filter_clause = " AND error IS NOT NULL AND error != ''"
+        elif status_filter == "resolved":
+            status_filter_clause = " AND error IS NOT NULL AND error != '' AND error_status = 'resolved'"
+        elif status_filter == "active":
+            status_filter_clause = " AND error IS NOT NULL AND error != '' AND (error_status IS NULL OR error_status != 'resolved')"
+        elif status_filter == "success":
+            status_filter_clause = " AND (error IS NULL OR error = '')"
+        
+        combined_filters = "".join(filters) + status_filter_clause
 
-        # Get total count first with date filter
+        # Get total count with all filters
         count_query = (
             f"SELECT COUNT(*) as total FROM {TABLE} "
-            f"WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){date_filter}"
+            f"WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){combined_filters}"
         )
-        print(f"[DEBUG] Count query: {count_query}")
         count_result = query(count_query, tuple(count_params))
         total_records = int(count_result[0].get("total", 0)) if count_result else 0
-        print(f"[DEBUG] Total records after filter: {total_records}")
         total_pages = (total_records + limit - 1) // limit if limit > 0 else 0
 
         # Add limit and offset to query params
         query_params.extend([limit, offset])
 
-        # Fetch paginated logs with date filter
+        # Fetch paginated logs with all filters
         logs_query = (
             f"SELECT file_name, timestamp, success_count, failure_count, error, "
             f"llm_usage, input_tokens, output_tokens, calculated_cost, word_count, file_type, "
-            f"error_status, resolved_at, reopened_at "
-            f"FROM {TABLE} WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){date_filter} "
+            f"error_status, resolved_at, reopened_at, error_detail "
+            f"FROM {TABLE} WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){combined_filters} "
             f"ORDER BY timestamp DESC LIMIT %s OFFSET %s"
         )
-        print(f"[DEBUG] Logs query: {logs_query}")
         logs = query(logs_query, tuple(query_params))
 
-        # Get TOTAL counts across all pages (not just current page)
-        # Success: files with no error or empty error
+        # Get status counts (without pagination)
         success_query = (
             f"SELECT COUNT(*) as total FROM {TABLE} "
-            f"WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){date_filter} "
+            f"WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){''.join(filters)} "
             f"AND (error IS NULL OR error = '')"
         )
         success_result = query(success_query, tuple(count_params))
         success = int(success_result[0].get("total", 0)) if success_result else 0
         
-        # Failure: files with errors that are not resolved
         failure_query = (
             f"SELECT COUNT(*) as total FROM {TABLE} "
-            f"WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){date_filter} "
+            f"WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){''.join(filters)} "
             f"AND error IS NOT NULL AND error != '' AND (error_status IS NULL OR error_status != 'resolved')"
         )
         failure_result = query(failure_query, tuple(count_params))
         failure = int(failure_result[0].get("total", 0)) if failure_result else 0
         
-        # Resolved: files with errors that have been resolved
         resolved_query = (
             f"SELECT COUNT(*) as total FROM {TABLE} "
-            f"WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){date_filter} "
+            f"WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){''.join(filters)} "
             f"AND error IS NOT NULL AND error != '' AND error_status = 'resolved'"
         )
         resolved_result = query(resolved_query, tuple(count_params))
         resolved = int(resolved_result[0].get("total", 0)) if resolved_result else 0
 
-        # Separate logs by status for the current page (for display purposes)
+        # Separate logs by status for the current page
         resolved_logs = [r for r in logs if r.get("error") and r.get("error") != "" and r.get("error_status") == "resolved"]
         active_logs = [r for r in logs if r.get("error") and r.get("error") != "" and r.get("error_status") != "resolved"]
         successful_logs = [r for r in logs if not r.get("error") or r.get("error") == ""]
         
-        print(f"[DEBUG] Project: {project_name}, Page: {page}/{total_pages}")
-        print(f"  - Files processed (total): {total_records}")
-        print(f"  - Success (total): {success}")
-        print(f"  - Active errors (total): {failure}")
-        print(f"  - Resolved errors (total): {resolved}")
-        print(f"  - Success (current page): {len(successful_logs)}")
-        print(f"  - Active errors (current page): {len(active_logs)}")
-        print(f"  - Resolved errors (current page): {len(resolved_logs)}")
-
         raw_cost = sum(float(r.get("calculated_cost") or 0) for r in logs)
         total_cost = f"${raw_cost:.4f}" if raw_cost > 0 else None
         
@@ -982,18 +3274,20 @@ def project_logs(name):
         visible_logs = serialize_rows(visible_logs)
         errors = serialize_rows(errors)
         
-        date_info = f", From: {from_date}" if from_date else ""
-        date_info += f", To: {to_date}" if to_date else ""
-        print(f"[DEBUG] Project: {project_name}, Page: {page}/{total_pages}{date_info}")
-        print(f"  - Total records: {total_records}")
-        print(f"  - Files with active errors (this page): {len(active_logs)}")
-        print(f"  - Files with resolved errors (this page): {len(resolved_logs)}")
-        
         return jsonify({
             "exists": True, "tableName": project_name.replace(" ", "_"),
             "total": total_records, "filesProcessed": total_records,
             "success": success, "failure": failure, "resolved": resolved,
             "totalCost": total_cost, "errors": errors, "logs": visible_logs,
+            "appliedFilters": {
+                "from": from_date,
+                "to": to_date,
+                "search": search,
+                "regex": regex_pattern,
+                "severity": severity,
+                "file_path": file_path,
+                "status": status_filter,
+            },
             "pagination": {
                 "currentPage": page,
                 "totalPages": total_pages,
@@ -1374,6 +3668,13 @@ def ingest_error():
         )
         print(f'[Ingest] ❌ Error row → "{actual_name}" | {error}')
         row = serialize_row(inserted)
+        
+        # ── Broadcast to SSE connections ──────────────────────────────────────
+        try:
+            sse_manager.broadcast_log(row)
+        except Exception as _sse_exc:
+            logger.warning(f"[Ingest] SSE broadcast failed (non-fatal): {_sse_exc}")
+        
         # ── Async-style classification: best-effort, never blocks ingest ──────
         try:
             from ai.error_grouper import classify_error as _classify
@@ -1431,6 +3732,13 @@ def ingest_log():
         if is_error:
             print(f'[Ingest] ❌ error row → "{actual_name}" | {error}')
         row = serialize_row(inserted)
+        
+        # ── Broadcast to SSE connections ──────────────────────────────────────
+        try:
+            sse_manager.broadcast_log(row)
+        except Exception as _sse_exc:
+            logger.warning(f"[Ingest] SSE broadcast failed (non-fatal): {_sse_exc}")
+        
         # ── Classification for error rows — best-effort, never blocks ────────
         if is_error:
             try:
@@ -1469,6 +3777,13 @@ def ingest_success():
             opt["output_tokens"], opt["calculated_cost"], opt["llm_usage"],
         )
         row = serialize_row(inserted)
+        
+        # ── Broadcast to SSE connections ──────────────────────────────────────
+        try:
+            sse_manager.broadcast_log(row)
+        except Exception as _sse_exc:
+            logger.warning(f"[Ingest] SSE broadcast failed (non-fatal): {_sse_exc}")
+        
         return jsonify({"success": True, "type": "success", **row}), 201
     except Exception as e:
         return jsonify({"error": "Internal server error", "detail": str(e)}), 500
