@@ -182,6 +182,31 @@ def _nova_name_group(error_message: str, error_detail: Optional[str] = None) -> 
         context = error_message.strip()
         if error_detail:
             context += f"\n{error_detail.strip()[:300]}"
+
+        # Enrich prompt with similar recent occurrences from the DB so Nova can
+        # derive a more robust group name based on multiple examples.
+        try:
+            from ai.error_matching import build_error_hash_candidates
+            candidates = build_error_hash_candidates(error_message, error_detail)
+            if candidates:
+                # Query recent rows that match any candidate hash (MD5 variants)
+                placeholders = ", ".join(["%s"] * len(candidates))
+                rows = query(
+                    f"SELECT error, error_detail FROM {TABLE} WHERE row_type = 'log' AND (MD5(LOWER(TRIM(error))) IN ({placeholders}) OR error_hash IN ({placeholders})) LIMIT 5",
+                    tuple(candidates + candidates),
+                )
+                if rows:
+                    examples = []
+                    for r in rows:
+                        e = (r.get('error') or '').strip()
+                        d = (r.get('error_detail') or '').strip()
+                        combined = (e + "\n" + d).strip()
+                        if combined:
+                            examples.append(combined[:500])
+                    if examples:
+                        context += "\n\nOther examples:\n" + "\n---\n".join(examples[:5])
+        except Exception as _exc:
+            logger.exception("[ErrorGrouper] Could not enrich Nova prompt from DB: %s", _exc)
         prompt = (
             "Give a short 3-6 word group name for this software error.\n"
             "The name should describe the ROOT CAUSE category, not the specific file or variable.\n"
