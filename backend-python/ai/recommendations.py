@@ -566,14 +566,11 @@ def get_ai_recommendations(
                 "[Recommendations] LLM unavailable — returning solutions without recommendation"
             )
 
-        result = {"recommendation": recommendation, "description": description, "solutions": solutions, "nova_diagnostics": nova_diagnostics}
-        return result
-
-        # Generate error description
+        # Generate error description (compute BEFORE building the result)
         description = None
         if error_message or detail:
-            from ai.llm import generate_error_description
             try:
+                from ai.llm import generate_error_description
                 logger.info(
                     "[Recommendations] Calling generate_error_description — project_name=%r error_message_present=%s detail_length=%d solutions=%d",
                     project_name,
@@ -601,7 +598,8 @@ def get_ai_recommendations(
                     "[Recommendations] Error description generation failed: %s", desc_exc
                 )
 
-        return {"recommendation": recommendation, "description": description, "solutions": solutions}
+        result = {"recommendation": recommendation, "description": description, "solutions": solutions, "nova_diagnostics": nova_diagnostics}
+        return result
 
     except Exception as exc:
         logger.exception(

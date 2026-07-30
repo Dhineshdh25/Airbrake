@@ -117,13 +117,26 @@ def _call_nova(prompt: str, max_tokens: int = 256) -> Optional[str]:
         logger.info("[Nova] Bedrock request about to send — model_id=%s prompt_length=%d max_tokens=%d", model_id, len(prompt), max_tokens)
         body = {
             "messages": [{"role": "user", "content": [{"text": prompt}]}],
-            "maxTokens": max_tokens,
-            "temperature": 0.0,
+            "inferenceConfig": {
+                "maxTokens": max_tokens,
+                "temperature": 0.0,
+            },
         }
         diagnostics["request_payload"] = body
         response = client.invoke_model(modelId=model_id, body=json.dumps(body))
         raw_body = response.get("body")
-        raw_text = raw_body.read().decode("utf-8") if raw_body is not None else ""
+        if raw_body is None:
+            raw_bytes = b""
+        elif isinstance(raw_body, (bytes, bytearray)):
+            raw_bytes = bytes(raw_body)
+        elif hasattr(raw_body, "read"):
+            raw_bytes = raw_body.read()
+        else:
+            raw_bytes = str(raw_body).encode("utf-8")
+        try:
+            raw_text = raw_bytes.decode("utf-8") if raw_bytes is not None else ""
+        except Exception:
+            raw_text = str(raw_bytes)
         payload = json.loads(raw_text or "{}")
         diagnostics["raw_payload"] = payload
         logger.info("[Nova] Bedrock raw response payload=%s", json.dumps(payload, default=str)[:4000])
