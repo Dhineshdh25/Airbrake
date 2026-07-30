@@ -662,9 +662,14 @@ def debug_nova_direct():
             "Do not rely on exact string matching, error hashes, or HTTP status codes. The goal is to test whether you can understand the underlying meaning of different error messages and derive meaningful generalized categories."
         )
         body = {
-            "messages": [{"role": "user", "content": [{"text": prompt}]}],
-            "maxTokens": 512,
-            "temperature": 0.0,
+            "messages": [{
+                "role": "user",
+                "content": [{"text": prompt}],
+            }],
+            "inferenceConfig": {
+                "maxTokens": 512,
+                "temperature": 0.0,
+            },
         }
         events.append({"stage": "request_constructed", "request_payload": body})
 
