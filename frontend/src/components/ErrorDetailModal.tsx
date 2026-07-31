@@ -17,6 +17,7 @@ interface Occurrence {
   file_name: string | null;
   timestamp: string | null;
   failure_count: number;
+  occurrence_number?: number | null;
 }
 
 interface SolutionData {
@@ -911,6 +912,27 @@ export function ErrorDetailModal({
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* ── 2. Occurrences list ────────────────────────────────────────── */}
+        {data?.occurrences && data.occurrences.length > 0 && (
+          <div>
+            <div style={sectionLabel}>Occurrences</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {data.occurrences.map((o, i) => (
+                <div key={i} style={{ padding: 10, borderRadius: 8, background: 'var(--surface)', border: '1px solid var(--card-border)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700 }}>
+                      {o.occurrence_number != null ? `#${o.occurrence_number}` : `#${i + 1}`}
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{fmt(o.timestamp)}</div>
+                  </div>
+                  {o.file_name && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>{o.file_name}</div>}
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>Failures: {o.failure_count}</div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 

@@ -4100,8 +4100,9 @@ def get_break_detail(error_hash):
         print(f"[req:{request_id}] [Breaks:detail] Parameters tuple: {tuple(params)}")
         print(f"[req:{request_id}] [Breaks:detail] Param count: {len(params)}")
 
+        # Include `id` so we can assign stable occurrence numbers per raw row
         sql = (
-            "SELECT project_name, error AS error_message, error_detail, error_hash, "
+            "SELECT id, project_name, error AS error_message, error_detail, error_hash, "
             "failure_count, timestamp, error_status, reopened_at, file_name "
             f"FROM {TABLE} "
             f"WHERE {where_clause} "
@@ -4158,7 +4159,8 @@ def get_break_detail(error_hash):
             return jsonify(response_body), 404
 
         first = error_rows[0]
-        occurrence_count = sum(r.get("failure_count", 1) for r in error_rows)
+        # Total occurrences across all matching rows
+        occurrence_count = sum(int(r.get("failure_count", 1) or 0) for r in error_rows)
         timestamps = [r.get("timestamp") for r in error_rows if r.get("timestamp") is not None]
         first_seen = min(timestamps) if timestamps else None
         reopened_ts = [r.get("reopened_at") for r in error_rows if r.get("reopened_at") is not None]
@@ -4174,11 +4176,37 @@ def get_break_detail(error_hash):
         else:
             status = "existing"
 
-        occurrences = [
-            {"file_name": r.get("file_name"), "timestamp": r["timestamp"],
-             "failure_count": r.get("failure_count", 1)}
-            for r in error_rows
-        ]
+        # Assign stable occurrence_number to each raw row based on chronological order
+        # Chronological = oldest first. Compute cumulative counts so rows keep their
+        # original sequential occurrence numbers even if paginated later.
+        try:
+            # Sort ascending by timestamp for numbering
+            asc = sorted(error_rows, key=lambda x: x.get("timestamp") or "")
+            cumulative = 0
+            occurrence_map = {}
+            for row in asc:
+                fc = int(row.get("failure_count", 1) or 0)
+                occurrence_map[row.get("id")] = cumulative + 1
+                cumulative += fc
+
+            # Build returned occurrences in the original (DESC) order, attaching occurrence_number
+            occurrences = []
+            for r in error_rows:
+                occurrences.append({
+                    "id": r.get("id"),
+                    "file_name": r.get("file_name"),
+                    "timestamp": r.get("timestamp"),
+                    "failure_count": int(r.get("failure_count", 1) or 0),
+                    "occurrence_number": occurrence_map.get(r.get("id")),
+                })
+        except Exception as _num_exc:
+            print(f"[req:{request_id}] [Breaks:detail] occurrence numbering failed: {_num_exc}")
+            # Fallback: no numbering
+            occurrences = [
+                {"id": r.get("id"), "file_name": r.get("file_name"), "timestamp": r.get("timestamp"),
+                 "failure_count": r.get("failure_count", 1), "occurrence_number": None}
+                for r in error_rows
+            ]
 
         # ── Solution card — semantic-first, three-tier lookup ─────────────────
         # Retrieval is project-scoped at every tier. The frontend receives the

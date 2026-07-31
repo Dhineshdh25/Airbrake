@@ -11,6 +11,7 @@ interface BreakRow {
   error_group_id: string;
   error_group_name: string | null;
   representative_id: string | null;   // most recent open/reopened log row id
+  representative_occurrence_number?: number | null;
   occurrence_count: number;
   first_seen: string | null;
   last_seen: string | null;
@@ -430,9 +431,20 @@ export function BreaksList() {
 
                     {/* Occurrences */}
                     <td style={{ padding: '11px 16px', textAlign: 'center' }}>
-                      <span style={{ fontWeight: 700, fontSize: 13, color: b.occurrence_count > 1 ? '#fbbf24' : '#818cf8' }}>
-                        {b.occurrence_count}
-                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                        <span style={{ fontWeight: 700, fontSize: 13, color: b.occurrence_count > 1 ? '#fbbf24' : '#818cf8' }}>
+                          {b.occurrence_count}
+                        </span>
+                        {b.representative_occurrence_number != null && (
+                          <span style={{
+                            fontSize: 11, fontWeight: 700, color: 'var(--text)',
+                            background: 'rgba(99,102,241,0.12)', padding: '4px 8px', borderRadius: 999,
+                            border: '1px solid rgba(99,102,241,0.18)'
+                          }}>
+                            #{b.representative_occurrence_number}
+                          </span>
+                        )}
+                      </div>
                     </td>
 
                     {/* First seen */}
