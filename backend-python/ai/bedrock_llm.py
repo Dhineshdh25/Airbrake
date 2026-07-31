@@ -272,11 +272,12 @@ def generate_error_description(
     prompt = "\n".join(parts)
 
     full_prompt = (
-        "Explain what this error means in 40-80 words. "
-        "Cover: 1) what the error indicates, 2) the likely cause, 3) the impact. "
-        "Be developer-friendly and concise. "
-        "Do not repeat the error message word-for-word. "
-        "Do not invent information not in the error context. "
+        "Explain the root cause of this error in 40-80 words. "
+        "Focus on why it happened and what likely triggered it. "
+        "Cover: 1) the likely root cause, 2) why the error occurred, 3) the practical impact. "
+        "Use the raw error message and any available details as evidence. "
+        "Do not repeat the raw exception text verbatim. "
+        "Do not invent facts that are not supported by the message or context. "
         "Return only the explanation.\n\n"
         + prompt
     )

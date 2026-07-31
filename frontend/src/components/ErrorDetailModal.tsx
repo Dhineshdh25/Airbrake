@@ -105,9 +105,32 @@ function fmt(ts: string | null | undefined) {
 }
 
 export function getTraceDisplayText(
-  errorDetail: string | null | undefined,
-  _solutionText: string | null | undefined,
+  _errorDetail: string | null | undefined,
+  solutionText: string | null | undefined,
 ) {
+  return solutionText?.trim() || null;
+}
+
+export function getStackTraceDisplayText(
+  errorDetail: string | null | undefined,
+  parsedStacktrace?: ParsedStackTrace | null,
+  aiDescription?: string | null,
+  aiRecommendation?: string | null,
+) {
+  if (parsedStacktrace && parsedStacktrace.frames && parsedStacktrace.frames.length > 0) {
+    return null;
+  }
+
+  const generatedCause = aiDescription?.trim() || aiRecommendation?.trim();
+  if (generatedCause) {
+    return generatedCause;
+  }
+
+  const rawTrace = parsedStacktrace?.raw_trace?.trim();
+  if (rawTrace) {
+    return rawTrace;
+  }
+
   return errorDetail?.trim() || null;
 }
 
@@ -747,7 +770,7 @@ export function ErrorDetailModal({
         )}
 
         {/* ── 2. Stack Trace ────────────────────────────────────────────────── */}
-        {data?.error_detail && (
+        {(data?.error_detail || data?.parsed_stacktrace?.raw_trace || aiRec?.description || aiRecommendationText) && (
           <div>
             <div style={sectionLabel}>📋 Stack Trace</div>
             {data?.parsed_stacktrace && data.parsed_stacktrace.frames && data.parsed_stacktrace.frames.length > 0 ? (
@@ -860,7 +883,12 @@ export function ErrorDetailModal({
                 borderRadius: 8, padding: '18px 20px',
                 whiteSpace: 'pre-wrap', wordBreak: 'break-word', minHeight: 140,
               }}>
-                {data.error_detail}
+                {getStackTraceDisplayText(
+                  data?.error_detail ?? null,
+                  data?.parsed_stacktrace ?? null,
+                  aiRec?.description ?? null,
+                  aiRecommendationText,
+                ) || 'No stack trace available'}
               </pre>
             )}
           </div>
