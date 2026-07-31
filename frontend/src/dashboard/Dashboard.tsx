@@ -12,6 +12,52 @@ interface TopProject {
   total: number;
 }
 
+interface SemanticGroupSummary {
+  name: string;
+  value: number;
+}
+
+export function normalizeSemanticGroupName(
+  row: { error?: string | null; error_group_name?: string | null; error_group_id?: string | null },
+): string {
+  const explicit = (row.error_group_name ?? '').trim();
+  if (explicit) return explicit;
+
+  const error = (row.error ?? '').trim();
+  if (!error) return 'Uncategorized';
+
+  const patterns: Array<{ regex: RegExp; label: string }> = [
+    { regex: /(LLM output was not valid JSON|JSONDecodeError|json\.loads|invalid JSON|malformed JSON|JSON parse|valid JSON)/i, label: 'JSON format error' },
+    { regex: /(np\.int|has no attribute ['"]int['"]|deprecated alias for the builtin `int`|numpy.*int)/i, label: 'Deprecated attribute usage.' },
+    { regex: /(No such file or directory|file not found|No such file)/i, label: 'File not found' },
+    { regex: /(has no attribute|object has no attribute|Attribute not found)/i, label: 'Attribute not found.' },
+    { regex: /(is not defined|Undefined variable)/i, label: 'Undefined variable error' },
+    { regex: /(Buffer size limit|buffer.*limit|too large)/i, label: 'Buffer size limit.' },
+    { regex: /(Access denied|permission denied)/i, label: 'Access denied error' },
+    { regex: /(Credentials not found|missing.*credentials|No credentials)/i, label: 'Credentials not found' },
+  ];
+
+  const match = patterns.find((p) => p.regex.test(error));
+  if (match) return match.label;
+
+  return error.length > 90 ? `${error.slice(0, 87)}…` : error;
+}
+
+export function summarizeSemanticGroupsForToday(
+  rows: Array<{ error?: string | null; error_group_name?: string | null; error_group_id?: string | null }>,
+): SemanticGroupSummary[] {
+  const counts = new Map<string, number>();
+
+  rows.forEach((row) => {
+    const name = normalizeSemanticGroupName(row);
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  });
+
+  return Array.from(counts.entries())
+    .map(([name, value]) => ({ name, value }))
+    .sort((a, b) => b.value - a.value || a.name.localeCompare(b.name));
+}
+
 const card: React.CSSProperties = {
   background: 'var(--card-bg)',
   border: '1px solid var(--card-border)',
@@ -282,6 +328,11 @@ export function Dashboard() {
       }));
   }, [topProjects, topErrorProjects]);
 
+  const semanticGroupData = useMemo(
+    () => summarizeSemanticGroupsForToday(todayErrors),
+    [todayErrors],
+  );
+
   return (
     <div>
       <div style={{ marginBottom: 24 }}>
@@ -443,6 +494,69 @@ export function Dashboard() {
               {visibleSeries.errorProducing && (
                 <Bar dataKey="errorProducing" fill="#f97316" radius={[4, 4, 0, 0]} maxBarSize={32} />
               )}
+            </BarChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+
+      <div style={{ ...card, marginBottom: 24 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
+          <h3 style={{ ...cardTitle, margin: 0 }}>Today's Errors by Semantic Group</h3>
+          {todayDate && (
+            <span style={{
+              fontSize: 12, fontWeight: 600, padding: '3px 10px', borderRadius: 99,
+              background: 'rgba(56,189,248,0.12)', color: '#7dd3fc',
+              border: '1px solid rgba(56,189,248,0.25)',
+            }}>
+              {todayDate} · {semanticGroupData.reduce((sum, item) => sum + item.value, 0)} grouped
+            </span>
+          )}
+        </div>
+
+        {todayLoading ? (
+          <div style={{ textAlign: 'center', padding: '30px 0', color: 'var(--text-muted)', fontSize: 13 }}>Loading semantic group totals…</div>
+        ) : todayError ? (
+          <div style={{
+            padding: '18px 20px', borderRadius: 8, fontSize: 13,
+            background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)',
+            color: '#f87171',
+          }}>
+            ⚠ {todayError}
+          </div>
+        ) : semanticGroupData.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '36px 0', color: 'var(--text-muted)', fontSize: 13 }}>No semantic group data for today.</div>
+        ) : (
+          <ResponsiveContainer width="100%" height={280}>
+            <BarChart data={semanticGroupData} layout="vertical" margin={{ top: 8, right: 18, left: 4, bottom: 8 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" horizontal={false} />
+              <XAxis type="number" tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 10 }} tickLine={false} axisLine={{ stroke: 'rgba(255,255,255,0.08)' }} />
+              <YAxis
+                type="category"
+                dataKey="name"
+                width={150}
+                tick={{ fill: 'rgba(255,255,255,0.55)', fontSize: 10 }}
+                tickLine={false}
+                axisLine={{ stroke: 'rgba(255,255,255,0.08)' }}
+              />
+              <Tooltip
+                cursor={{ fill: 'rgba(255,255,255,0.04)' }}
+                content={({ active, payload }: any) => {
+                  if (!active || !payload?.length) return null;
+                  const item = payload[0].payload;
+                  return (
+                    <div style={{
+                      background: '#1e293b', border: '1px solid rgba(255,255,255,0.1)',
+                      borderRadius: 8, padding: '10px 14px', fontSize: 13,
+                    }}>
+                      <div style={{ color: '#e2e8f0', fontWeight: 700, marginBottom: 6 }}>{item.name}</div>
+                      <div style={{ color: '#94a3b8' }}>
+                        Errors: <span style={{ color: '#fff', fontWeight: 700 }}>{item.value}</span>
+                      </div>
+                    </div>
+                  );
+                }}
+              />
+              <Bar dataKey="value" fill="#38bdf8" radius={[0, 4, 4, 0]} maxBarSize={32} />
             </BarChart>
           </ResponsiveContainer>
         )}

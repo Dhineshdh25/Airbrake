@@ -3855,7 +3855,9 @@ def dashboard_today_errors():
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         rows = query(
             f"SELECT project_name AS project, file_name, error, "
-            f"error_detail, error_hash, timestamp "
+            f"error_detail, error_hash, timestamp, "
+            f"NULLIF(error_group_name, '') AS error_group_name, "
+            f"NULLIF(error_group_id, '') AS error_group_id "
             f"FROM {TABLE} "
             f"WHERE row_type = 'log' AND error IS NOT NULL AND error <> '' "
             f"AND ("
@@ -3892,7 +3894,9 @@ def dashboard_errors():
         where = " AND ".join(conditions)
         rows = query(
             f"SELECT project_name AS project, file_name, error, "
-            f"error_detail, error_hash, timestamp "
+            f"error_detail, error_hash, timestamp, "
+            f"NULLIF(error_group_name, '') AS error_group_name, "
+            f"NULLIF(error_group_id, '') AS error_group_id "
             f"FROM {TABLE} WHERE {where} "
             f"ORDER BY timestamp DESC LIMIT 2000",
             params if params else None,

@@ -76,7 +76,7 @@ async function getProjectTables(pool: Pool): Promise<string[]> {
  */
 function buildErrorUnion(tables: string[], extraWhere = ''): string {
   const parts = tables.map(
-    (t) => `SELECT REPLACE(project_name, '_', ' ') AS project_name, file_name, error, error_detail, error_hash, timestamp, reopened_at FROM "${t}" WHERE error IS NOT NULL AND error <> '' AND error_status IN ('open', 'reopened')${extraWhere}`,
+    (t) => `SELECT REPLACE(project_name, '_', ' ') AS project_name, file_name, error, error_detail, error_hash, timestamp, reopened_at, COALESCE(error_group_name, '') AS error_group_name, COALESCE(error_group_id, '') AS error_group_id FROM "${t}" WHERE error IS NOT NULL AND error <> '' AND error_status IN ('open', 'reopened')${extraWhere}`,
   );
   return parts.join('\n UNION ALL\n');
 }
@@ -238,7 +238,9 @@ export function createProjectDashboardRouter(pool: Pool) {
       const union = buildErrorUnion(tables, todayWhere);
 
       const { rows } = await pool.query(`
-        SELECT project_name AS project, file_name, error, error_detail, error_hash, timestamp AS timestamp
+        SELECT project_name AS project, file_name, error, error_detail, error_hash, timestamp AS timestamp,
+               NULLIF(error_group_name, '') AS error_group_name,
+               NULLIF(error_group_id, '') AS error_group_id
         FROM (${union}) AS combined
         ORDER BY timestamp DESC
       `);
@@ -276,7 +278,9 @@ export function createProjectDashboardRouter(pool: Pool) {
       const union = buildErrorUnion(tables, extraWhere);
 
       const { rows } = await pool.query(`
-        SELECT project_name AS project, file_name, error, error_detail, error_hash, timestamp
+        SELECT project_name AS project, file_name, error, error_detail, error_hash, timestamp,
+               NULLIF(error_group_name, '') AS error_group_name,
+               NULLIF(error_group_id, '') AS error_group_id
         FROM (${union}) AS combined
         ORDER BY timestamp DESC
         LIMIT 2000
