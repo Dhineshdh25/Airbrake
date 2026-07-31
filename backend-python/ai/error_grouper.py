@@ -149,30 +149,170 @@ def _pinecone_query_errors(embedding: List[float], top_k: int = PINECONE_MATCH_L
         return []
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Nova Lite helpers
-# ─────────────────────────────────────────────────────────────────────────────
+def _extract_group_candidates(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Reduce Pinecone matches to unique group candidates by best score."""
+    groups: dict[str, Dict[str, Any]] = {}
+    for m in matches:
+        score = float(m.get("score") or 0.0)
+        meta = m.get("metadata") or {}
+        if not isinstance(meta, dict):
+            continue
+        gid = meta.get("group_id")
+        if not gid:
+            continue
+        entry = groups.get(gid)
+        if entry is None or score > entry["score"]:
+            groups[gid] = {
+                "group_id": gid,
+                "score": score,
+                "group_name": meta.get("group_name") or None,
+                "example_error": (meta.get("error_message") or "")[:300],
+            }
+    candidates = sorted(groups.values(), key=lambda item: item["score"], reverse=True)
+    return candidates
 
-def _nova_confirm_same_group(error_a: str, error_b: str) -> bool:
-    """Ask Nova whether two errors represent the same root cause. Defaults False on failure."""
+
+def _enrich_group_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Add group_name and occurrence count for each candidate group."""
+    if not candidates:
+        return candidates
+
+    group_ids = [c["group_id"] for c in candidates]
+    placeholders = ", ".join(["%s"] * len(group_ids))
+    rows = query(
+        f"SELECT error_group_id, MAX(error_group_name) AS error_group_name, COUNT(*) AS group_count "
+        f"FROM {TABLE} "
+        f"WHERE row_type = 'log' AND error_group_id IN ({placeholders}) "
+        f"GROUP BY error_group_id",
+        tuple(group_ids),
+    )
+    counts: dict[str, Dict[str, Any]] = {
+        row["error_group_id"]: row for row in rows if row.get("error_group_id")
+    }
+
+    for candidate in candidates:
+        group_id = candidate["group_id"]
+        info = counts.get(group_id)
+        candidate["group_name"] = candidate["group_name"] or (info.get("error_group_name") if info else None)
+        candidate["group_count"] = int(info.get("group_count", 0)) if info else 0
+    return candidates
+
+
+def _build_nova_group_decision_prompt(error_message: str, candidates: List[Dict[str, Any]]) -> str:
+    """Ask Nova whether the incoming error belongs to one of the existing groups."""
+    group_lines = []
+    for i, candidate in enumerate(candidates[:6]):
+        group_name = candidate.get("group_name") or "Unknown Group"
+        example = candidate.get("example_error") or ""
+        group_lines.append(
+            f'{i + 1}. GROUP_ID={candidate["group_id"]} | GROUP_NAME={group_name} | COUNT={candidate.get("group_count", 0)}\n'
+            f'   EXAMPLE: {example}'
+        )
+
+    return (
+        "You are a software error classification assistant.\n\n"
+        "INCOMING ERROR:\n"
+        f"{error_message}\n\n"
+        "EXISTING SEMANTIC GROUP CANDIDATES:\n"
+        f"{chr(10).join(group_lines)}\n\n"
+        "TASK:\n"
+        "Decide whether the INCOMING ERROR belongs to one of the EXISTING SEMANTIC GROUPS above. "
+        "Focus only on the root cause, not file names, paths, line numbers, UUIDs, timestamps, or variable values.\n\n"
+        "If the error clearly belongs to one of the existing groups, reply with ONLY the exact GROUP_ID of the best matching group.\n"
+        "If it does not belong to any existing group, reply with EXACTLY NO_MATCH.\n"
+        "Do not add any extra explanation or text.\n\n"
+        "YOUR ANSWER:" 
+    )
+
+
+def _build_nova_same_group_prompt(error_message: str, error_detail: Optional[str], candidate: Dict[str, Any]) -> str:
+    """Ask Nova whether the incoming error belongs to the candidate's semantic group."""
+    context = error_message.strip()
+    if error_detail:
+        context += f"\n\nDetail:\n{error_detail.strip()[:300]}"
+
+    candidate_name = candidate.get("group_name") or "Unknown Group"
+    candidate_example = candidate.get("example_error") or ""
+    candidate_count = candidate.get("group_count", 0)
+
+    return (
+        "You are a software error classification assistant.\n\n"
+        "Decide whether the INCOMING ERROR below belongs to the SAME SEMANTIC GROUP as the CANDIDATE example. "
+        "Ignore differences in file paths, line numbers, UUIDs, timestamps, and variable names. "
+        "Focus only on the root cause and error type.\n\n"
+        "INCOMING ERROR:\n"
+        f"{context[:500]}\n\n"
+        f"CANDIDATE GROUP NAME: {candidate_name}\n"
+        f"CANDIDATE GROUP COUNT: {candidate_count}\n\n"
+        "CANDIDATE EXAMPLE ERROR:\n"
+        f"{candidate_example[:500]}\n\n"
+        "Answer with EXACTLY one word: YES or NO.\n"
+        "If the errors are the same root cause, answer YES. Otherwise answer NO."
+    )
+
+
+def _nova_confirm_same_group(error_message: str, error_detail: Optional[str], candidate: Dict[str, Any]) -> bool:
+    """Ask Nova whether the incoming error belongs to the candidate's semantic group."""
+    if not candidate or not candidate.get("group_id"):
+        return False
     try:
         from ai.bedrock_llm import _call_nova
-        prompt = (
-            "Do these two software errors represent the same underlying root cause?\n"
-            "Ignore differences in file paths, variable names, timestamps, and IDs.\n"
-            "Focus only on the error type and cause.\n\n"
-            f"Error A: {error_a[:300]}\n\n"
-            f"Error B: {error_b[:300]}\n\n"
-            "Answer with exactly one word: YES or NO"
-        )
-        raw = _call_nova(prompt, max_tokens=10)
+        prompt = _build_nova_same_group_prompt(error_message, error_detail, candidate)
+        raw = _call_nova(prompt, max_tokens=40)
         answer = (raw or "").strip().upper()
         result = answer.startswith("YES")
-        logger.info("[ErrorGrouper] Nova confirm_same_group: %r -> %s", answer, result)
+        logger.info(
+            "[ErrorGrouper] Nova confirm_same_group answer=%r group_id=%r score=%.4f",
+            answer, candidate["group_id"], float(candidate.get("score", 0.0)),
+        )
         return result
     except Exception as exc:
-        logger.exception("[ErrorGrouper] Nova confirmation failed — defaulting to False: %s", exc)
+        logger.exception("[ErrorGrouper] Nova confirm_same_group failed: %s", exc)
         return False
+
+
+def _nova_choose_existing_group(error_message: str, candidates: List[Dict[str, Any]]) -> Optional[str]:
+    """Ask Nova to choose the best existing group or return NO_MATCH."""
+    if not candidates:
+        return None
+    try:
+        from ai.bedrock_llm import _call_nova
+        prompt = _build_nova_group_decision_prompt(error_message, candidates)
+        raw = _call_nova(prompt, max_tokens=80)
+        if not raw:
+            return None
+        answer = raw.strip()
+        if "NO_MATCH" in answer.upper():
+            return None
+        md5_match = re.search(r"\b([0-9a-f]{32})\b", answer.lower())
+        if md5_match:
+            selected = md5_match.group(1)
+            valid_ids = {candidate["group_id"] for candidate in candidates}
+            if selected in valid_ids:
+                logger.info("[ErrorGrouper] Nova selected existing group_id=%r", selected)
+                return selected
+            logger.warning(
+                "[ErrorGrouper] Nova returned unknown group_id=%r — treating as NO_MATCH",
+                selected,
+            )
+        logger.warning("[ErrorGrouper] Nova returned unexpected response=%r", answer[:200])
+    except Exception as exc:
+        logger.exception("[ErrorGrouper] Nova choose existing group failed: %s", exc)
+    return None
+
+
+def _build_new_group_name_prompt(error_message: str, error_detail: Optional[str]) -> str:
+    context = error_message.strip()
+    if error_detail:
+        context += f"\n{error_detail.strip()[:300]}"
+    return (
+        "Give a short 2-4 word group name for this software error.\n"
+        "The name should describe the ROOT CAUSE category only, not the specific file, function, or variable.\n"
+        "Keep the label concise and generic, for example: 'File not found', 'Permission denied', 'JSON validation error'.\n"
+        "Output ONLY the group name, nothing else.\n\n"
+        f"Error:\n{context[:500]}\n\n"
+        "YOUR GROUP NAME:" 
+    )
 
 
 def _nova_name_group(error_message: str, error_detail: Optional[str] = None) -> str:
@@ -283,6 +423,7 @@ def classify_error(
     error_message: str,
     project_name: str,
     error_detail: Optional[str] = None,
+    dry_run: bool = False,
 ) -> Dict[str, Any]:
     """Classify one log row into a semantic error group.
 
@@ -332,7 +473,8 @@ def classify_error(
         normalized = normalize_error_for_lookup(error_message)
         group_id   = hashlib.md5(normalized.encode()).hexdigest() if normalized else str(uuid.uuid4())
         group_name = error_message.strip()[:60]
-        _write_group_to_row(log_id, group_id, group_name)
+        if not dry_run:
+            _write_group_to_row(log_id, group_id, group_name)
         logger.info("[ErrorGrouper] RESULT no-embedding fallback group_id=%r", group_id)
         return {"group_id": group_id, "group_name": group_name, "reason": "new_group", "similarity": None}
 
@@ -340,90 +482,113 @@ def classify_error(
 
     # ── STEP 2: Pinecone approximate nearest-neighbour ────────────────────────
     matches = _pinecone_query_errors(embedding)
-
-    best_score: float = 0.0
-    best_group_id: Optional[str] = None
-    best_group_name: Optional[str] = None
-    best_match_error: Optional[str] = None
-
-    for m in matches:
-        score = float(m.get("score") or 0.0)
-        meta  = m.get("metadata") or {}
-        gid   = meta.get("group_id") if isinstance(meta, dict) else None
-        if not gid:
-            continue
-        logger.info(
-            "[ErrorGrouper] Pinecone match score=%.4f group_id=%r error=%r",
-            score, gid, (meta.get("error_message") or "")[:80],
-        )
-        if score > best_score:
-            best_score      = score
-            best_group_id   = gid
-            best_group_name = meta.get("group_name") if isinstance(meta, dict) else None
-            best_match_error = meta.get("error_message", "") if isinstance(meta, dict) else ""
+    candidates = _extract_group_candidates(matches)
+    candidates = _enrich_group_candidates(candidates)
 
     logger.info(
-        "[ErrorGrouper] Best Pinecone score=%.4f group_id=%r",
-        best_score, best_group_id,
+        "[ErrorGrouper] Pinecone candidate groups=%d",
+        len(candidates),
     )
-
-    # ── STEP 3: decision tree ─────────────────────────────────────────────────
-
-    # 3a — High-confidence automatic match
-    if best_group_id and best_score >= PINECONE_AUTO_THRESHOLD:
-        group_name = best_group_name or _get_group_name_for_id(best_group_id) or error_message[:60]
-        _write_group_to_row(log_id, best_group_id, group_name)
-        _pinecone_upsert_error(log_id, embedding, best_group_id, error_message, project_name)
+    for candidate in candidates[:6]:
         logger.info(
-            "[ErrorGrouper] RESULT pinecone_auto group_id=%r name=%r similarity=%.4f",
-            best_group_id, group_name, best_score,
+            "[ErrorGrouper] Candidate score=%.4f group_id=%r group_count=%d name=%r example=%r",
+            candidate["score"], candidate["group_id"], candidate.get("group_count", 0),
+            candidate.get("group_name"), candidate.get("example_error")[:80],
         )
+
+    diagnostics: Dict[str, Any] = {
+        "pinecone_matches": [
+            {
+                "group_id":      c["group_id"],
+                "group_name":    c.get("group_name"),
+                "group_count":   c.get("group_count"),
+                "score":         c["score"],
+                "example_error": c.get("example_error"),
+            }
+            for c in candidates[:8]
+        ],
+        "chosen_group_id": None,
+        "chosen_group_name": None,
+        "nova_decision": None,
+        "provisional": False,
+    }
+
+    chosen_group_id: Optional[str] = None
+    chosen_group_name: Optional[str] = None
+    reason = "new_group"
+    similarity = candidates[0]["score"] if candidates else None
+
+    if candidates:
+        best_candidate = candidates[0]
+        if best_candidate["score"] >= PINECONE_AUTO_THRESHOLD:
+            chosen_group_id = best_candidate["group_id"]
+            chosen_group_name = best_candidate["group_name"] or _get_group_name_for_id(chosen_group_id) or error_message[:60]
+            reason = "pinecone_auto"
+            logger.info(
+                "[ErrorGrouper] RESULT pinecone_auto group_id=%r name=%r similarity=%.4f",
+                chosen_group_id, chosen_group_name, best_candidate["score"],
+            )
+        elif best_candidate["score"] >= PINECONE_FUZZY_LOW:
+            logger.info(
+                "[ErrorGrouper] Fuzzy Pinecone score %.4f: asking Nova to confirm same group",
+                best_candidate["score"],
+            )
+            confirmed = _nova_confirm_same_group(error_message, error_detail, best_candidate)
+            diagnostics["nova_decision"] = "confirmed" if confirmed else "rejected"
+            if confirmed:
+                chosen_group_id = best_candidate["group_id"]
+                chosen_group_name = best_candidate["group_name"] or _get_group_name_for_id(chosen_group_id) or error_message[:60]
+                reason = "nova_confirmed"
+                logger.info(
+                    "[ErrorGrouper] RESULT nova_confirmed group_id=%r name=%r similarity=%.4f",
+                    chosen_group_id, chosen_group_name, best_candidate["score"],
+                )
+            else:
+                logger.info(
+                    "[ErrorGrouper] Nova rejected same-group match — creating new provisional group"
+                )
+        else:
+            logger.info(
+                "[ErrorGrouper] Best Pinecone score %.4f below fuzzy threshold; creating new group without Nova",
+                best_candidate["score"],
+            )
+
+    if chosen_group_id:
+        if not dry_run:
+            _write_group_to_row(log_id, chosen_group_id, chosen_group_name or error_message[:60])
+            _pinecone_upsert_error(log_id, embedding, chosen_group_id, error_message, project_name)
+        diagnostics["chosen_group_id"] = chosen_group_id
+        diagnostics["chosen_group_name"] = chosen_group_name
+        diagnostics["provisional"] = False
         return {
-            "group_id":   best_group_id,
-            "group_name": group_name,
-            "reason":     "pinecone_auto",
-            "similarity": best_score,
+            "group_id":   chosen_group_id,
+            "group_name": chosen_group_name,
+            "reason":     reason,
+            "similarity": similarity,
+            "diagnostics": diagnostics,
         }
 
-    # 3b — Fuzzy band: ask Nova to confirm
-    if best_group_id and best_score >= PINECONE_FUZZY_LOW:
-        logger.info(
-            "[ErrorGrouper] Fuzzy band — asking Nova to confirm score=%.4f", best_score
-        )
-        confirmed = _nova_confirm_same_group(error_message, best_match_error or "")
-        if confirmed:
-            group_name = best_group_name or _get_group_name_for_id(best_group_id) or error_message[:60]
-            _write_group_to_row(log_id, best_group_id, group_name)
-            _pinecone_upsert_error(log_id, embedding, best_group_id, error_message, project_name)
-            logger.info(
-                "[ErrorGrouper] RESULT nova_confirmed group_id=%r name=%r similarity=%.4f",
-                best_group_id, group_name, best_score,
-            )
-            return {
-                "group_id":   best_group_id,
-                "group_name": group_name,
-                "reason":     "nova_confirmed",
-                "similarity": best_score,
-            }
-        logger.info("[ErrorGrouper] Nova said NOT same group — creating new group")
-
-    # 3c — No match: create a new group
-    new_group_id   = str(uuid.uuid4())
+    # 3c — No existing semantic group was selected. Create a provisional new group.
+    new_group_id = str(uuid.uuid4())
     new_group_name = _nova_name_group(error_message, error_detail)
-    _write_group_to_row(log_id, new_group_id, new_group_name)
-    # Store the group name in the Pinecone metadata too so future lookups can read it
-    _pinecone_upsert_error_with_group_name(
-        log_id, embedding, new_group_id, new_group_name, error_message, project_name
-    )
+    if not dry_run:
+        _write_group_to_row(log_id, new_group_id, new_group_name)
+        _pinecone_upsert_error_with_group_name(
+            log_id, embedding, new_group_id, new_group_name, error_message, project_name
+        )
     logger.info(
-        "[ErrorGrouper] RESULT new_group group_id=%r name=%r",
+        "[ErrorGrouper] RESULT provisional_new_group group_id=%r name=%r",
         new_group_id, new_group_name,
     )
+    diagnostics["chosen_group_id"] = new_group_id
+    diagnostics["chosen_group_name"] = new_group_name
+    diagnostics["provisional"] = True
     return {
         "group_id":   new_group_id,
         "group_name": new_group_name,
-        "reason":     "new_group",
-        "similarity": best_score if best_score > 0 else None,
+        "reason":     "provisional_new_group",
+        "similarity": similarity,
+        "diagnostics": diagnostics,
     }
 
 
@@ -463,6 +628,7 @@ def backfill_unclassified(
     batch_size: int = BACKFILL_BATCH,
     max_batches: int = 20,
     project_name: Optional[str] = None,
+    dry_run: bool = False,
 ) -> Dict[str, Any]:
     """Classify all existing log rows that have error_group_id IS NULL.
 
@@ -511,20 +677,21 @@ def backfill_unclassified(
         for row in rows:
             processed += 1
             try:
-                classify_error(
-                    log_id       = row["id"],
-                    error_message= row["error"],
-                    project_name = row["project_name"],
-                    error_detail = row.get("error_detail"),
+                log_id = row.get("id")
+                err = row.get("error") or ""
+                detail = row.get("error_detail") or None
+                result = classify_error(
+                    log_id=log_id,
+                    error_message=err,
+                    project_name=row.get("project_name"),
+                    error_detail=detail,
+                    dry_run=dry_run,
                 )
-                classified += 1
-            except Exception as exc:
+                if result and result.get("reason") != "skipped":
+                    classified += 1
+            except Exception as _exc:
                 errors_hit += 1
-                logger.exception(
-                    "[ErrorGrouper] Backfill classify failed log_id=%r: %s",
-                    row.get("id"), exc,
-                )
-
+                logger.exception("[ErrorGrouper] backfill classify failed for %r: %s", row.get("id"), _exc)
     summary = {
         "processed":    processed,
         "classified":   classified,
