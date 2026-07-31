@@ -10,6 +10,8 @@ export interface ErrorRow {
   error_hash?: string | null;
   error_detail?: string | null;
   timestamp: string | null;
+  error_group_name?: string | null;
+  error_group_id?: string | null;
   representative_id?: string | null;  // specific log row id — used for single-row resolve/reopen
 }
 

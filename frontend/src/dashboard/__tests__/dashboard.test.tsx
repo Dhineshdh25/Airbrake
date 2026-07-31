@@ -11,6 +11,7 @@ import { ErrorRateTrendWidget } from '../ErrorRateTrendWidget';
 import { SeverityBreakdownWidget } from '../SeverityBreakdownWidget';
 import { TimeSeriesWidget } from '../TimeSeriesWidget';
 import { TopServicesWidget } from '../TopServicesWidget';
+import { summarizeSemanticGroupsForToday, normalizeSemanticGroupName } from '../Dashboard';
 
 describe('BreakCountWidget', () => {
   it('renders 24h and 7d counts', () => {
@@ -93,5 +94,21 @@ describe('SeverityBreakdownWidget', () => {
   it('shows empty state when no data', () => {
     render(<SeverityBreakdownWidget breakdown={[]} />);
     expect(screen.getByTestId('severity-empty')).toBeInTheDocument();
+  });
+});
+
+describe('summarizeSemanticGroupsForToday', () => {
+  it('prefers semantic group names and falls back for JSON-format errors', () => {
+    const rows = [
+      { error: 'LLM output was not valid JSON', error_group_name: 'JSON format error' },
+      { error: 'LLM output was not valid JSON' },
+      { error: 'File not found: uploads/missing.txt' },
+    ];
+
+    expect(normalizeSemanticGroupName(rows[1])).toBe('JSON format error');
+    expect(summarizeSemanticGroupsForToday(rows)).toEqual([
+      { name: 'JSON format error', value: 2 },
+      { name: 'File not found', value: 1 },
+    ]);
   });
 });
