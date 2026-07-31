@@ -36,6 +36,7 @@ def _load(rel_path, name):
 kb  = _load('ai/knowledge_base.py',   'kb')
 rec = _load('ai/recommendations.py',  'rec')
 app_module = _load('app.py',          'airbrake_app')
+grouper = _load('ai/error_grouper.py', 'error_grouper')
 
 # ── Shared fixtures ────────────────────────────────────────────────────────────
 
@@ -391,6 +392,67 @@ class SemanticDuplicateDetectionTests(unittest.TestCase):
         self.assertTrue(len(calls) > 0)
         self.assertIsNone(calls[0].get('error_hash'),
             "Pinecone must be called without error_hash to enable cross-hash detection")
+
+
+class ErrorGrouperClassificationTests(unittest.TestCase):
+
+    def test_pinecone_auto_threshold_skips_nova(self):
+        with mock.patch.object(grouper, '_get_embedding', return_value=FAKE_EMBEDDING), \
+        mock.patch.object(grouper, '_pinecone_query_errors', return_value=[{
+            'id': 'match-1', 'score': 0.94,
+            'metadata': {'group_id': 'group-1', 'group_name': 'Existing Group'}
+        }]), \
+        mock.patch.object(grouper, '_write_group_to_row') as fake_write, \
+        mock.patch.object(grouper, '_pinecone_upsert_error') as fake_upsert, \
+        mock.patch('ai.bedrock_llm._call_nova') as fake_nova:
+            result = grouper.classify_error(
+                'log-001', 'Database timeout error', 'ProjectX', 'Stack trace here'
+            )
+        self.assertEqual(result['reason'], 'pinecone_auto')
+        self.assertEqual(result['group_id'], 'group-1')
+        self.assertEqual(result['group_name'], 'Existing Group')
+        self.assertFalse(fake_nova.called, 'Nova must not be called for auto threshold matches')
+        fake_write.assert_called_once()
+        fake_upsert.assert_called_once()
+
+    def test_fuzzy_score_uses_nova_confirm_same_group(self):
+        with mock.patch.object(grouper, '_get_embedding', return_value=FAKE_EMBEDDING), \
+        mock.patch.object(grouper, '_pinecone_query_errors', return_value=[{
+            'id': 'match-2', 'score': 0.85,
+            'metadata': {'group_id': 'group-2', 'group_name': 'Fuzzy Group'}
+        }]), \
+        mock.patch.object(grouper, '_write_group_to_row') as fake_write, \
+        mock.patch.object(grouper, '_pinecone_upsert_error') as fake_upsert, \
+        mock.patch('ai.bedrock_llm._call_nova', return_value='YES') as fake_nova:
+            result = grouper.classify_error(
+                'log-002', 'User login failed', 'ProjectX', 'Auth module failure'
+            )
+        self.assertEqual(result['reason'], 'nova_confirmed')
+        self.assertEqual(result['group_id'], 'group-2')
+        self.assertEqual(result['group_name'], 'Fuzzy Group')
+        self.assertTrue(fake_nova.called, 'Nova confirm_same_group must be called in fuzzy band')
+        fake_write.assert_called_once()
+        fake_upsert.assert_called_once()
+
+    def test_below_fuzzy_threshold_creates_new_group_without_confirmation(self):
+        with mock.patch.object(grouper, '_get_embedding', return_value=FAKE_EMBEDDING), \
+        mock.patch.object(grouper, '_pinecone_query_errors', return_value=[{
+            'id': 'match-3', 'score': 0.80,
+            'metadata': {'group_id': 'group-3', 'group_name': 'Weak Group'}
+        }]), \
+        mock.patch.object(grouper, '_write_group_to_row') as fake_write, \
+        mock.patch.object(grouper, '_pinecone_upsert_error_with_group_name') as fake_upsert, \
+        mock.patch.object(grouper, '_nova_confirm_same_group') as fake_confirm, \
+        mock.patch.object(grouper, '_nova_name_group', return_value='New Semantic Group'):
+            result = grouper.classify_error(
+                'log-003', 'Cache miss error', 'ProjectX', 'Redis key missing'
+            )
+        self.assertEqual(result['reason'], 'provisional_new_group')
+        self.assertEqual(result['group_name'], 'New Semantic Group')
+        self.assertFalse(fake_confirm.called,
+            'Nova confirmation must not be called below the fuzzy threshold')
+        fake_write.assert_called_once()
+        fake_upsert.assert_called_once()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

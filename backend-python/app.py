@@ -3940,22 +3940,64 @@ def breaks_grouped():
 
         where = " AND ".join(conditions)
 
-        row_sql = (
-            f"SELECT id AS representative_id, "
-            f"project_name, "
-            f"error AS error_message, "
-            f"COALESCE(error_hash, MD5(LOWER(TRIM(error)))) AS error_hash, "
-            f"COALESCE(error_group_id, '') AS error_group_id, "
-            f"error_group_name, "
-            f"failure_count::int AS occurrence_count, "
-            f"timestamp AS first_seen, "
-            f"GREATEST(COALESCE(reopened_at, timestamp), timestamp) AS last_seen, "
-            f"CASE "
-            f"  WHEN error_status = 'reopened' THEN 'regression' "
-            f"  WHEN failure_count = 1 THEN 'new' "
-            f"  ELSE 'existing' "
-            f"END AS status "
+        # ── One row per raw log record, with stable sequential occurrence numbers ──
+        #
+        # occurrence_number: the permanent sequence number for this log row within
+        #   its error identity (project + error_hash), ordered oldest-first.
+        #   e.g.  10:00 → #1,  10:05 → #2,  10:10 → #3
+        #   This number never changes regardless of pagination or new rows.
+        #
+        # total_for_error: total count of rows sharing this error identity.
+        #   Drives the badge: 1 → New, >1 → Existing, any reopened → Regression.
+        #
+        # Both use window functions which Aurora DSQL supports.
+        # Error identity key: project_name + COALESCE(error_hash, MD5(LOWER(TRIM(error))))
+        inner_sql = (
+            f"SELECT "
+            f"  id AS representative_id, "
+            f"  project_name, "
+            f"  error AS error_message, "
+            f"  COALESCE(error_hash, MD5(LOWER(TRIM(error)))) AS error_hash, "
+            f"  COALESCE(error_group_id, '') AS error_group_id, "
+            f"  error_group_name, "
+            f"  error_status, "
+            f"  timestamp AS first_seen, "
+            f"  GREATEST(COALESCE(reopened_at, timestamp), timestamp) AS last_seen, "
+            # Stable occurrence number within the error identity, oldest first
+            f"  ROW_NUMBER() OVER ("
+            f"    PARTITION BY project_name, COALESCE(error_hash, MD5(LOWER(TRIM(error)))) "
+            f"    ORDER BY timestamp ASC"
+            f"  ) AS occurrence_number, "
+            # Total occurrences for the same error identity (drives badge)
+            f"  COUNT(*) OVER ("
+            f"    PARTITION BY project_name, COALESCE(error_hash, MD5(LOWER(TRIM(error)))) "
+            f"  ) AS total_for_error, "
+            # Any reopened row in this partition → regression badge for all rows
+            f"  BOOL_OR(error_status = 'reopened') OVER ("
+            f"    PARTITION BY project_name, COALESCE(error_hash, MD5(LOWER(TRIM(error)))) "
+            f"  ) AS has_reopened "
             f"FROM {TABLE} WHERE {where}"
+        )
+
+        # Outer query computes the badge from window-function results and
+        # exposes occurrence_number as occurrence_count for frontend compat.
+        row_sql = (
+            f"SELECT "
+            f"  representative_id, "
+            f"  project_name, "
+            f"  error_message, "
+            f"  error_hash, "
+            f"  error_group_id, "
+            f"  error_group_name, "
+            f"  occurrence_number AS occurrence_count, "
+            f"  first_seen, "
+            f"  last_seen, "
+            f"  CASE "
+            f"    WHEN has_reopened THEN 'regression' "
+            f"    WHEN total_for_error = 1 THEN 'new' "
+            f"    ELSE 'existing' "
+            f"  END AS status "
+            f"FROM ({inner_sql}) AS inner_rows"
         )
 
         if status_f:
@@ -5372,10 +5414,12 @@ def backfill_error_groups():
 
     try:
         from ai.error_grouper import backfill_unclassified
+        dry_run = bool(body.get("dry_run", False))
         summary = backfill_unclassified(
             batch_size   = batch_size,
             max_batches  = max_batches,
             project_name = project_name,
+            dry_run      = dry_run,
         )
         return jsonify(summary)
     except Exception as e:
