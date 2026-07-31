@@ -5399,28 +5399,45 @@ def backfill_error_groups():
       {
         "batch_size":   50,
         "max_batches":  20,
-        "project_name": "my_project"   // scope to one project
+        "project_name": "my_project",
+        "reclassify":   false,   // set true to MERGE existing groups (not just classify NULL rows)
+        "dry_run":      false    // set true to preview without writing
       }
 
-    Classifies existing log rows that have error_group_id IS NULL.
-    Safe to call repeatedly — already-classified rows are skipped.
-    Returns a summary so the caller knows how many were processed and
-    whether more rows remain (call again if done=false).
+    Default (reclassify=false):
+      Classifies rows where error_group_id IS NULL.
+      Safe to call repeatedly — already-classified rows are skipped.
+
+    With reclassify=true:
+      Re-runs AI classification on ALL existing groups.
+      Merges groups that refer to the same semantic root cause.
+      Use this when you see too many fragmented groups that should be one.
+      Converges automatically — stops when no merges happen in a batch.
     """
     body         = request.get_json() or {}
     batch_size   = int(body.get("batch_size",  50))
     max_batches  = int(body.get("max_batches", 20))
     project_name = body.get("project_name", "").strip() or None
+    dry_run      = bool(body.get("dry_run", False))
+    reclassify   = bool(body.get("reclassify", False))
 
     try:
-        from ai.error_grouper import backfill_unclassified
-        dry_run = bool(body.get("dry_run", False))
-        summary = backfill_unclassified(
-            batch_size   = batch_size,
-            max_batches  = max_batches,
-            project_name = project_name,
-            dry_run      = dry_run,
-        )
+        if reclassify:
+            from ai.error_grouper import reclassify_all
+            summary = reclassify_all(
+                batch_size   = batch_size,
+                max_batches  = max_batches,
+                project_name = project_name,
+                dry_run      = dry_run,
+            )
+        else:
+            from ai.error_grouper import backfill_unclassified
+            summary = backfill_unclassified(
+                batch_size   = batch_size,
+                max_batches  = max_batches,
+                project_name = project_name,
+                dry_run      = dry_run,
+            )
         return jsonify(summary)
     except Exception as e:
         logger.exception("[ErrorGroups] backfill failed: %s", e)
