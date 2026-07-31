@@ -14,7 +14,7 @@ interface BreakRow {
   occurrence_count: number;
   first_seen: string | null;
   last_seen: string | null;
-  status: 'new' | 'existing' | 'regression';
+  status: 'new' | 'existing' | 'regression' | 'resolved';
 }
 
 interface BreaksPage {
@@ -63,11 +63,12 @@ const inputStyle: React.CSSProperties = {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-function StatusBadge({ status }: { status: 'new' | 'existing' | 'regression' }) {
+function StatusBadge({ status }: { status: 'new' | 'existing' | 'regression' | 'resolved' }) {
   const styles: Record<string, { bg: string; color: string; border: string; label: string }> = {
     new:        { bg: 'rgba(99,102,241,0.15)',  color: '#818cf8', border: 'rgba(99,102,241,0.3)',  label: '● New' },
     existing:   { bg: 'rgba(245,158,11,0.15)',  color: '#fbbf24', border: 'rgba(245,158,11,0.3)',  label: '◎ Existing' },
     regression: { bg: 'rgba(239,68,68,0.15)',   color: '#f87171', border: 'rgba(239,68,68,0.3)',   label: '⚠ Regression' },
+    resolved:   { bg: 'rgba(52,211,153,0.15)',  color: '#34d399', border: 'rgba(52,211,153,0.3)',  label: '✓ Resolved' },
   };
   const s = styles[status] ?? styles.new;
   return (
@@ -237,6 +238,7 @@ export function BreaksList() {
           <option value="new">New</option>
           <option value="existing">Existing</option>
           <option value="regression">Regression</option>
+          <option value="resolved">Resolved</option>
         </select>
 
         {/* Semantic group toggle */}
