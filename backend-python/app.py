@@ -3989,10 +3989,12 @@ def breaks_grouped():
             f"  error_hash, "
             f"  error_group_id, "
             f"  error_group_name, "
+            f"  error_status, "
             f"  occurrence_number AS occurrence_count, "
             f"  first_seen, "
             f"  last_seen, "
             f"  CASE "
+            f"    WHEN error_status = 'resolved' THEN 'resolved' "
             f"    WHEN has_reopened THEN 'regression' "
             f"    WHEN total_for_error = 1 THEN 'new' "
             f"    ELSE 'existing' "
@@ -4210,8 +4212,11 @@ def get_break_detail(error_hash):
         last_seen = max(all_ts) if all_ts else None
         file_name = next((r.get("file_name") for r in error_rows if r.get("file_name")), first.get("file_name"))
 
+        has_resolved = any(r.get("error_status") == "resolved" for r in error_rows)
         has_reopened = any(r.get("error_status") == "reopened" for r in error_rows)
-        if has_reopened:
+        if has_resolved:
+            status = "resolved"
+        elif has_reopened:
             status = "regression"
         elif occurrence_count == 1:
             status = "new"
