@@ -624,6 +624,217 @@ def _pinecone_upsert_error_with_group_name(
 # Backfill
 # ─────────────────────────────────────────────────────────────────────────────
 
+def reclassify_all(
+    batch_size: int = 30,
+    max_batches: int = 20,
+    project_name: Optional[str] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Merge existing semantic groups by re-running AI classification on group representatives.
+
+    Algorithm
+    ─────────
+    1. Load all distinct existing groups (each with a representative error text).
+    2. For each group, embed the representative error and query Pinecone for similar groups.
+    3. If a high-similarity candidate group is found:
+       a. Auto-merge at >= PINECONE_AUTO_THRESHOLD
+       b. Ask Nova to confirm at >= PINECONE_FUZZY_LOW
+    4. When two groups merge, update ALL rows pointing to the old group_id to
+       use the canonical group_id and group_name.
+    5. Repeat until no more merges happen in a batch (convergence).
+
+    This is a group-level operation, not row-level — one LLM call per group
+    comparison, not one per row.  Much cheaper and much faster.
+
+    Returns a summary dict.
+    """
+    processed  = 0   # groups considered
+    merged     = 0   # groups collapsed into another
+    rows_updated = 0
+    errors_hit = 0
+    batches_done = 0
+
+    logger.info(
+        "[ErrorGrouper] reclassify_all START batch_size=%d max_batches=%d project=%r dry_run=%s",
+        batch_size, max_batches, project_name, dry_run,
+    )
+
+    for batch_num in range(max_batches):
+        # Load distinct groups ordered by size DESC so large groups act as
+        # canonical targets and small fragmentary groups collapse into them.
+        conditions = [
+            "row_type = 'log'",
+            "error_group_id IS NOT NULL",
+            "error IS NOT NULL",
+            "error <> ''",
+        ]
+        params: List[Any] = []
+        if project_name:
+            conditions.append("LOWER(project_name) = LOWER(%s)")
+            params.append(project_name)
+
+        group_rows = query(
+            f"SELECT error_group_id, MAX(error_group_name) AS error_group_name, "
+            f"  COUNT(*) AS group_count, "
+            f"  MAX(error) AS representative_error, "
+            f"  MAX(error_detail) AS representative_detail "
+            f"FROM {TABLE} "
+            f"WHERE {' AND '.join(conditions)} "
+            f"GROUP BY error_group_id "
+            f"ORDER BY group_count DESC "
+            f"LIMIT %s",
+            tuple(params + [batch_size]),
+        )
+
+        if not group_rows:
+            logger.info("[ErrorGrouper] reclassify_all: no groups found")
+            break
+
+        batches_done += 1
+        batch_merged = 0
+
+        logger.info(
+            "[ErrorGrouper] reclassify_all batch=%d groups=%d",
+            batch_num + 1, len(group_rows),
+        )
+
+        # Build a set of canonical group ids in this batch (largest first).
+        # Once a group is used as canonical it won't be merged away.
+        canonical_ids: set = {group_rows[0]["error_group_id"]} if group_rows else set()
+
+        for group_row in group_rows:
+            source_group_id   = group_row.get("error_group_id")
+            source_group_name = group_row.get("error_group_name") or ""
+            rep_error         = (group_row.get("representative_error") or "").strip()
+            rep_detail        = group_row.get("representative_detail") or None
+            group_count       = int(group_row.get("group_count") or 0)
+
+            if not source_group_id or not rep_error:
+                continue
+
+            processed += 1
+
+            # Don't try to merge the largest group into itself
+            if source_group_id in canonical_ids and group_count == (group_rows[0].get("group_count") or 0):
+                continue
+
+            # Generate embedding for the representative error
+            query_text = _build_query_text(rep_error, rep_detail)
+            embedding  = _get_embedding(query_text)
+
+            if embedding is None:
+                logger.warning(
+                    "[ErrorGrouper] reclassify_all: no embedding for group_id=%r — skipping",
+                    source_group_id,
+                )
+                continue
+
+            # Query Pinecone for similar error vectors
+            matches   = _pinecone_query_errors(embedding)
+            candidates = _extract_group_candidates(matches)
+            candidates = _enrich_group_candidates(candidates)
+
+            # Filter out the source group itself
+            candidates = [c for c in candidates if c["group_id"] != source_group_id]
+
+            if not candidates:
+                logger.info(
+                    "[ErrorGrouper] reclassify_all: no candidates for group_id=%r",
+                    source_group_id,
+                )
+                continue
+
+            best = candidates[0]
+            logger.info(
+                "[ErrorGrouper] reclassify_all group=%r (%d rows) vs candidate=%r score=%.4f",
+                source_group_name, group_count, best.get("group_name"), best["score"],
+            )
+
+            target_group_id   = None
+            target_group_name = None
+            merge_reason      = None
+
+            if best["score"] >= PINECONE_AUTO_THRESHOLD:
+                target_group_id   = best["group_id"]
+                target_group_name = best.get("group_name") or _get_group_name_for_id(best["group_id"]) or source_group_name
+                merge_reason      = "pinecone_auto"
+            elif best["score"] >= PINECONE_FUZZY_LOW:
+                confirmed = _nova_confirm_same_group(rep_error, rep_detail, best)
+                if confirmed:
+                    target_group_id   = best["group_id"]
+                    target_group_name = best.get("group_name") or _get_group_name_for_id(best["group_id"]) or source_group_name
+                    merge_reason      = "nova_confirmed"
+                else:
+                    logger.info(
+                        "[ErrorGrouper] reclassify_all Nova rejected merge for group_id=%r",
+                        source_group_id,
+                    )
+
+            if not target_group_id:
+                # No merge — keep this group as a canonical anchor
+                canonical_ids.add(source_group_id)
+                continue
+
+            # Perform the merge: update all rows in source group to target group
+            logger.info(
+                "[ErrorGrouper] reclassify_all MERGE source=%r (%r) → target=%r (%r) reason=%s score=%.4f",
+                source_group_id, source_group_name,
+                target_group_id, target_group_name,
+                merge_reason, best["score"],
+            )
+
+            try:
+                if not dry_run:
+                    update_conditions = ["row_type = 'log'", "error_group_id = %s",
+                                         "(manual_group_override IS NULL OR manual_group_override = FALSE)"]
+                    update_params = [target_group_id, target_group_name, source_group_id]
+                    if project_name:
+                        update_conditions.append("LOWER(project_name) = LOWER(%s)")
+                        update_params.append(project_name)
+
+                    count = execute(
+                        f"UPDATE {TABLE} "
+                        f"SET error_group_id = %s, error_group_name = %s "
+                        f"WHERE {' AND '.join(update_conditions)}",
+                        tuple(update_params),
+                    )
+                    rows_updated += (count or group_count)
+                else:
+                    rows_updated += group_count
+
+                merged += 1
+                batch_merged += 1
+                canonical_ids.add(target_group_id)
+                logger.info(
+                    "[ErrorGrouper] reclassify_all merged %d rows from %r → %r",
+                    group_count, source_group_id, target_group_id,
+                )
+
+            except Exception as exc:
+                errors_hit += 1
+                logger.exception(
+                    "[ErrorGrouper] reclassify_all merge failed source=%r: %s",
+                    source_group_id, exc,
+                )
+
+        # If no merges happened in this batch, we've converged — stop early
+        if batch_merged == 0:
+            logger.info("[ErrorGrouper] reclassify_all: no merges in batch %d — converged", batch_num + 1)
+            break
+
+    summary = {
+        "processed":    processed,
+        "merged":       merged,
+        "rows_updated": rows_updated,
+        "errors":       errors_hit,
+        "batches_done": batches_done,
+        "done":         True,
+        "dry_run":      dry_run,
+    }
+    logger.info("[ErrorGrouper] reclassify_all summary: %s", summary)
+    return summary
+
+
 def backfill_unclassified(
     batch_size: int = BACKFILL_BATCH,
     max_batches: int = 20,
@@ -635,6 +846,8 @@ def backfill_unclassified(
     Safe to call repeatedly — rows already classified are skipped.
     Processes at most  batch_size * max_batches  rows per call to avoid
     Lambda timeouts.  Call again to continue.
+
+    To RECLASSIFY and MERGE already-classified rows use reclassify_all() instead.
 
     Returns a summary dict suitable for a JSON API response.
     """
