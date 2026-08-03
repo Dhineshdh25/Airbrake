@@ -3860,14 +3860,9 @@ def dashboard_today_errors():
             f"NULLIF(error_group_id, '') AS error_group_id "
             f"FROM {TABLE} "
             f"WHERE row_type = 'log' AND error IS NOT NULL AND error <> '' "
-            f"AND ("
-            f"  (timestamp AT TIME ZONE 'UTC' >= CURRENT_DATE "
-            f"   AND timestamp AT TIME ZONE 'UTC' < CURRENT_DATE + INTERVAL '1 day')"
-            f"  OR"
-            f"  (reopened_at IS NOT NULL "
-            f"   AND reopened_at AT TIME ZONE 'UTC' >= CURRENT_DATE "
-            f"   AND reopened_at AT TIME ZONE 'UTC' < CURRENT_DATE + INTERVAL '1 day')"
-            f") ORDER BY timestamp DESC"
+            f"AND timestamp AT TIME ZONE 'UTC' >= CURRENT_DATE "
+            f"AND timestamp AT TIME ZONE 'UTC' < CURRENT_DATE + INTERVAL '1 day' "
+            f"ORDER BY timestamp DESC"
         )
         return jsonify({"date": date_str, "errors": serialize_rows(rows)})
     except Exception as e:
@@ -3966,7 +3961,7 @@ def breaks_grouped():
             f"  error_group_name, "
             f"  error_status, "
             f"  timestamp AS first_seen, "
-            f"  GREATEST(COALESCE(reopened_at, timestamp), timestamp) AS last_seen, "
+            f"  timestamp AS last_seen, "
             # Stable occurrence number within the error identity, oldest first
             f"  ROW_NUMBER() OVER ("
             f"    PARTITION BY project_name, COALESCE(error_hash, MD5(LOWER(TRIM(error)))) "
@@ -4213,9 +4208,11 @@ def get_break_detail(error_hash):
         occurrence_count = sum(int(r.get("failure_count", 1) or 0) for r in error_rows)
         timestamps = [r.get("timestamp") for r in error_rows if r.get("timestamp") is not None]
         first_seen = min(timestamps) if timestamps else None
-        reopened_ts = [r.get("reopened_at") for r in error_rows if r.get("reopened_at") is not None]
-        all_ts = timestamps + reopened_ts
-        last_seen = max(all_ts) if all_ts else None
+        # last_seen is the most recent ACTUAL OCCURRENCE timestamp.
+        # reopened_at is a lifecycle field (when someone clicked Reopen) and
+        # must never influence last_seen — doing so would move old errors to
+        # the top of the timeline as if a new occurrence had happened.
+        last_seen = max(timestamps) if timestamps else None
         file_name = next((r.get("file_name") for r in error_rows if r.get("file_name")), first.get("file_name"))
 
         # ── Status: use the SPECIFIC row when log_id supplied, not group aggregate ──
