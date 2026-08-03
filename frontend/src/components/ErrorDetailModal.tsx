@@ -42,6 +42,7 @@ interface KbSolution {
   usage_count: number | null;
   version: number | null;
   log_ref_id?: string | null;
+  match_source?: string | null;  // "exact_match" | "same_group:<name>" | "semantic_similarity"
 }
 
 interface AiRecommendation {
@@ -82,6 +83,7 @@ interface ErrorDetailData {
   error_detail: string | null;
   parsed_stacktrace?: ParsedStackTrace | null;
   error_hash: string;
+  error_group_name?: string | null;
   occurrence_count: number;
   first_seen: string | null;
   last_seen: string | null;
@@ -346,7 +348,14 @@ export function ErrorDetailModal({
   function loadDetail() {
     if (!effectiveErrorHash) return;
     setLoading(true);
-    const qs = projectNameProp ? `?project_name=${encodeURIComponent(projectNameProp)}` : '';
+    // Build query string — always include project_name when available,
+    // and log_id (the specific row id) so the backend returns the status
+    // of this exact occurrence rather than the aggregate across all rows
+    // sharing the same error_hash.
+    const qsParams = new URLSearchParams();
+    if (projectNameProp) qsParams.set('project_name', projectNameProp);
+    if (targetLogId)     qsParams.set('log_id', targetLogId);
+    const qs = qsParams.toString() ? `?${qsParams.toString()}` : '';
     apiFetch(`/api/breaks/detail/${encodeURIComponent(effectiveErrorHash)}${qs}`)
       .then(r => { if (!r.ok) throw r; return r.json(); })
       .then((d: ErrorDetailData) => {
@@ -388,6 +397,8 @@ export function ErrorDetailModal({
       // error_hash kept as fallback for the backend's legacy path
       ...(errorData.error_hash ? { error_hash: errorData.error_hash } : {}),
       ...(errorData.project_name ? { project_name: errorData.project_name } : {}),
+      // Semantic group fallback tier — enables cross-hash retrieval within the same category
+      ...(errorData.error_group_name ? { error_group_name: errorData.error_group_name } : {}),
     });
     apiFetch(`/api/knowledge_base/top?${qs}`)
       .then(r => r.json())
@@ -640,6 +651,22 @@ export function ErrorDetailModal({
         <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
           {sol.solution}
         </div>
+        {sol.match_source && sol.match_source !== 'exact_match' && (
+          <div style={{ marginTop: 6 }}>
+            <span style={{
+              fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 99,
+              background: sol.match_source.startsWith('same_group')
+                ? 'rgba(56,189,248,0.12)' : 'rgba(99,102,241,0.12)',
+              color: sol.match_source.startsWith('same_group') ? '#38bdf8' : '#818cf8',
+              border: `1px solid ${sol.match_source.startsWith('same_group') ? 'rgba(56,189,248,0.3)' : 'rgba(99,102,241,0.3)'}`,
+              letterSpacing: '0.04em',
+            }}>
+              {sol.match_source.startsWith('same_group')
+                ? `✓ Same Group${sol.match_source.includes(':') ? ': ' + sol.match_source.split(':')[1] : ''}`
+                : '✓ Similar Error'}
+            </span>
+          </div>
+        )}
         <SolutionMeta sol={sol} />
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
           <button
