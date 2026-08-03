@@ -341,7 +341,7 @@ export function ErrorDetailModal({
 
   const aiTextIsDuplicate = !!(aiText && aiTopSolution && aiText.trim() === aiTopSolution.solution?.trim());
   const aiRecommendationText = aiText && !aiTextIsDuplicate ? aiText : null;
-  const hasAiContent = !!(aiRec?.description || aiRecommendationText || aiTopSolution);
+  const hasAiContent = !!(aiRecommendationText || aiTopSolution);
 
   // ── Data fetching ─────────────────────────────────────────────────────────
 
@@ -354,7 +354,7 @@ export function ErrorDetailModal({
     // sharing the same error_hash.
     const qsParams = new URLSearchParams();
     if (projectNameProp) qsParams.set('project_name', projectNameProp);
-    if (targetLogId)     qsParams.set('log_id', targetLogId);
+    if (targetLogId) qsParams.set('log_id', targetLogId);
     const qs = qsParams.toString() ? `?${qsParams.toString()}` : '';
     apiFetch(`/api/breaks/detail/${encodeURIComponent(effectiveErrorHash)}${qs}`)
       .then(r => { if (!r.ok) throw r; return r.json(); })
@@ -732,6 +732,21 @@ export function ErrorDetailModal({
           )}
         </div>
 
+        {/* Raw Error Message */}
+        {errorMessage && (
+          <div style={{
+            padding: 16,
+            borderRadius: 10,
+            background: 'rgba(239,68,68,0.06)',
+            border: '1px solid rgba(239,68,68,0.18)',
+          }}>
+            <div style={{ ...sectionLabel, color: '#f87171', marginBottom: 8 }}>Raw Error Message</div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#fca5a5', lineHeight: 1.5, wordBreak: 'break-word' }}>
+              {errorMessage}
+            </div>
+          </div>
+        )}
+
         {/* Solution used */}
         {resolvedSolution ? (
           <div style={{
@@ -793,6 +808,20 @@ export function ErrorDetailModal({
               {data?.resolved_at && <span>Resolved {fmt(data.resolved_at)}</span>}
             </div>
             {/* Read-only — no buttons */}
+          </div>
+        )}
+
+        {errorMessage && (
+          <div style={{
+            padding: 16,
+            borderRadius: 10,
+            background: 'rgba(239,68,68,0.06)',
+            border: '1px solid rgba(239,68,68,0.18)',
+          }}>
+            <div style={{ ...sectionLabel, color: '#f87171', marginBottom: 8 }}>Raw Error Message</div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#fca5a5', lineHeight: 1.5, wordBreak: 'break-word' }}>
+              {errorMessage}
+            </div>
           </div>
         )}
 
@@ -931,15 +960,6 @@ export function ErrorDetailModal({
               <span>🤖</span>
               <span style={{ ...sectionLabel, color: '#38bdf8', marginBottom: 0 }}>AI Recommended Solution</span>
             </div>
-
-            {/* Error Description from AI */}
-            {aiRec?.description && (
-              <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', marginBottom: 14, padding: '10px 0', borderBottom: '1px solid rgba(56,189,248,0.15)', paddingBottom: 14 }}>
-                <div style={{ fontSize: 12, lineHeight: 1.6, color: 'var(--text)' }}>
-                  {aiRec.description}
-                </div>
-              </div>
-            )}
 
             {aiRecommendationText && (
               <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text)', marginBottom: 14 }}>
@@ -1134,11 +1154,6 @@ export function ErrorDetailModal({
               </span>
             )}
           </div>
-          {errorMessage && (
-            <div style={{ fontSize: 17, fontWeight: 700, color: '#f87171', lineHeight: 1.4, marginBottom: 12, wordBreak: 'break-word' }}>
-              {errorMessage}
-            </div>
-          )}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
             <div>
               <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2 }}>Project</div>
