@@ -7,6 +7,153 @@ import {
 import { apiFetch, ApiError } from '../lib/api';
 import { ErrorDetailModal, ErrorRow } from '../components/ErrorDetailModal';
 
+// Project Drill-Down Modal Component
+interface ProjectDrillDownProps {
+  projectName: string;
+  comparisonPeriod: 'daily' | 'weekly' | 'custom';
+  customFrom: string;
+  customTo: string;
+  onClose: () => void;
+}
+
+function ProjectDrillDownModal({ projectName, comparisonPeriod, customFrom, customTo, onClose }: ProjectDrillDownProps) {
+  const [logs, setLogs] = useState<ErrorRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [stats, setStats] = useState({ total: 0, errors: 0, success: 0 });
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const { from, to } = periodToRange(comparisonPeriod, customFrom, customTo);
+    setLoading(true);
+
+    const params = new URLSearchParams();
+    if (from) params.set('from', from);
+    if (to) params.set('to', to);
+    params.set('limit', '100');
+    const qs = params.toString();
+
+    apiFetch(`/api/projects/${encodeURIComponent(projectName)}/logs${qs ? `?${qs}` : ''}`)
+      .then(r => r.json())
+      .then((data: any) => {
+        const rawLogs = data.logs || [];
+        setStats({
+          total: data.total || 0,
+          errors: data.failure || 0,
+          success: data.success || 0,
+        });
+
+        // Convert to ErrorRow format
+        const errorRows: ErrorRow[] = rawLogs.map((log: any) => ({
+          project: projectName,
+          file_name: log.file_name,
+          error: log.error || '',
+          error_detail: log.error_detail,
+          timestamp: log.timestamp,
+        }));
+
+        setLogs(errorRows);
+      })
+      .catch((e) => {
+        console.error('[DrillDown] failed:', e);
+      })
+      .finally(() => setLoading(false));
+  }, [projectName, comparisonPeriod, customFrom, customTo]);
+
+  return (
+    <div
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
+        padding: 20,
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          background: 'var(--card-bg)', borderRadius: 12, padding: 24,
+          maxWidth: 1200, width: '100%', maxHeight: '90vh', overflow: 'auto',
+          border: '1px solid var(--card-border)',
+        }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
+          <div>
+            <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>
+              {projectName}
+            </h2>
+            <div style={{ display: 'flex', gap: 16, fontSize: 13, color: 'var(--text-muted)' }}>
+              <span>Total: <strong style={{ color: 'var(--text)' }}>{stats.total}</strong></span>
+              <span>Errors: <strong style={{ color: '#f87171' }}>{stats.errors}</strong></span>
+              <span>Success: <strong style={{ color: '#4ade80' }}>{stats.success}</strong></span>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              background: 'transparent', border: 'none', fontSize: 24,
+              color: 'var(--text-muted)', cursor: 'pointer', padding: 8,
+            }}
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Actions */}
+        <div style={{ display: 'flex', gap: 12, marginBottom: 20 }}>
+          <button
+            onClick={() => navigate(`/logs?project=${encodeURIComponent(projectName)}`)}
+            style={{
+              padding: '8px 16px', borderRadius: 6, fontSize: 13, fontWeight: 600,
+              background: '#6366f1', color: '#fff', border: 'none', cursor: 'pointer',
+            }}
+          >
+            View Full Logs
+          </button>
+          <button
+            onClick={() => navigate(`/logs?project=${encodeURIComponent(projectName)}&status=errors`)}
+            style={{
+              padding: '8px 16px', borderRadius: 6, fontSize: 13, fontWeight: 600,
+              background: 'rgba(239,68,68,0.15)', color: '#f87171',
+              border: '1px solid rgba(239,68,68,0.3)', cursor: 'pointer',
+            }}
+          >
+            View Errors Only
+          </button>
+        </div>
+
+        {/* Content */}
+        {loading ? (
+          <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text-muted)' }}>
+            Loading...
+          </div>
+        ) : (
+          <ErrorTable
+            rows={logs}
+            emptyMsg={`No logs found for ${projectName} in the selected time period.`}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function periodToRange(period: 'daily' | 'weekly' | 'custom', customFrom: string, customTo: string): { from: string; to: string } {
+  const now = new Date();
+  if (period === 'daily') {
+    const start = new Date(now); start.setHours(0, 0, 0, 0);
+    return { from: start.toISOString(), to: now.toISOString() };
+  }
+  if (period === 'weekly') {
+    const start = new Date(now); start.setDate(start.getDate() - 7); start.setHours(0, 0, 0, 0);
+    return { from: start.toISOString(), to: now.toISOString() };
+  }
+  // custom
+  const from = customFrom ? `${customFrom}T00:00:00+00:00` : '';
+  const to = customTo ? `${customTo}T23:59:59+00:00` : '';
+  return { from, to };
+}
+
 interface TopProject {
   project_name: string;
   total: number;
@@ -179,23 +326,10 @@ function ErrorTable({ rows, emptyMsg }: { rows: ErrorRow[]; emptyMsg: string }) 
 type ComparisonPeriod = 'daily' | 'weekly' | 'custom';
 type ComparisonSeries = 'mostUsed' | 'errorProducing';
 
-function periodToRange(period: ComparisonPeriod, customFrom: string, customTo: string): { from: string; to: string } {
-  const now = new Date();
-  if (period === 'daily') {
-    const start = new Date(now); start.setHours(0, 0, 0, 0);
-    return { from: start.toISOString(), to: now.toISOString() };
-  }
-  if (period === 'weekly') {
-    const start = new Date(now); start.setDate(start.getDate() - 7); start.setHours(0, 0, 0, 0);
-    return { from: start.toISOString(), to: now.toISOString() };
-  }
-  // custom
-  const from = customFrom ? `${customFrom}T00:00:00+00:00` : '';
-  const to = customTo ? `${customTo}T23:59:59+00:00` : '';
-  return { from, to };
-}
-
 export function Dashboard() {
+  // ── Project drill-down modal state ─────────────────────────────────────────
+  const [drillDownProject, setDrillDownProject] = useState<string | null>(null);
+
   // ── Project Comparison period toggle ──
   const [comparisonPeriod, setComparisonPeriod] = useState<ComparisonPeriod>('daily');
   const [customFrom, setCustomFrom] = useState('');
@@ -208,6 +342,11 @@ export function Dashboard() {
     mostUsed: true,
     errorProducing: true,
   });
+
+  // ── Drill-down state for selected project ──
+  const [selectedProject, setSelectedProject] = useState<string | null>(null);
+  const [projectErrors, setProjectErrors] = useState<ErrorRow[]>([]);
+  const [projectErrorsLoading, setProjectErrorsLoading] = useState(false);
 
   function toggleSeries(series: ComparisonSeries) {
     setVisibleSeries((prev) => {
@@ -333,6 +472,44 @@ export function Dashboard() {
     [todayErrors],
   );
 
+  // ── Semantic groups for selected project (drill-down) ──
+  const projectSemanticGroupData = useMemo(
+    () => selectedProject ? summarizeSemanticGroupsForToday(projectErrors) : [],
+    [selectedProject, projectErrors],
+  );
+
+  // ── Fetch errors for selected project ──
+  useEffect(() => {
+    if (!selectedProject) {
+      setProjectErrors([]);
+      return;
+    }
+
+    const { from, to } = periodToRange(comparisonPeriod, customFrom, customTo);
+    const params = new URLSearchParams();
+    params.set('project', selectedProject);
+    if (from) params.set('from', from);
+    if (to) params.set('to', to);
+
+    setProjectErrorsLoading(true);
+    apiFetch(`/api/dashboard/project-errors?${params.toString()}`)
+      .then(r => r.json())
+      .then((d: any) => setProjectErrors(d.errors ?? []))
+      .catch((e) => {
+        console.error('[Dashboard] project-errors failed:', e);
+        setProjectErrors([]);
+      })
+      .finally(() => setProjectErrorsLoading(false));
+  }, [selectedProject, comparisonPeriod, customFrom, customTo, customApplyTick]);
+
+  // ── Handle bar click to drill down into project ──
+  const handleBarClick = useCallback((data: any) => {
+    if (data && data.activePayload && data.activePayload.length > 0) {
+      const projectName = data.activePayload[0].payload.name;
+      setSelectedProject(prev => prev === projectName ? null : projectName);
+    }
+  }, []);
+
   return (
     <div>
       <div style={{ marginBottom: 24 }}>
@@ -449,6 +626,7 @@ export function Dashboard() {
               margin={{ top: 16, right: 16, left: 0, bottom: 60 }}
               barCategoryGap="30%"
               barGap={3}
+              onClick={handleBarClick}
             >
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
               <XAxis
@@ -471,6 +649,7 @@ export function Dashboard() {
                 content={({ active, payload, label }: any) => {
                   if (!active || !payload?.length) return null;
                   const full = comparisonData.find((d) => d.shortName === label)?.name ?? label;
+                  const isSelected = full === selectedProject;
                   return (
                     <div style={{
                       background: '#1e293b', border: '1px solid rgba(255,255,255,0.1)',
@@ -484,20 +663,139 @@ export function Dashboard() {
                           <span style={{ color: '#fff', fontWeight: 700 }}>{p.value}</span>
                         </div>
                       ))}
+                      <div style={{
+                        marginTop: 8,
+                        paddingTop: 8,
+                        borderTop: '1px solid rgba(255,255,255,0.1)',
+                        fontSize: 11,
+                        color: '#94a3b8',
+                        fontStyle: 'italic'
+                      }}>
+                        {isSelected ? '🔍 Click to collapse' : '🔍 Click to drill down'}
+                      </div>
                     </div>
                   );
                 }}
               />
               {visibleSeries.mostUsed && (
-                <Bar dataKey="mostUsed" fill="#7c6ff7" radius={[4, 4, 0, 0]} maxBarSize={32} />
+                <Bar
+                  dataKey="mostUsed"
+                  fill="#7c6ff7"
+                  radius={[4, 4, 0, 0]}
+                  maxBarSize={32}
+                  cursor="pointer"
+                  opacity={(entry: any) => entry.name === selectedProject ? 0.7 : 1}
+                />
               )}
               {visibleSeries.errorProducing && (
-                <Bar dataKey="errorProducing" fill="#f97316" radius={[4, 4, 0, 0]} maxBarSize={32} />
+                <Bar
+                  dataKey="errorProducing"
+                  fill="#f97316"
+                  radius={[4, 4, 0, 0]}
+                  maxBarSize={32}
+                  cursor="pointer"
+                  opacity={(entry: any) => entry.name === selectedProject ? 0.7 : 1}
+                />
               )}
             </BarChart>
           </ResponsiveContainer>
         )}
       </div>
+
+      {/* ── Drill-down: Selected Project's Errors by Semantic Group ── */}
+      {selectedProject && (
+        <div style={{ ...card, marginBottom: 24, border: '2px solid #6366f1' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <h3 style={{ ...cardTitle, margin: 0 }}>
+                🔍 Errors by Semantic Group
+              </h3>
+              <span style={{
+                fontSize: 12, fontWeight: 600, padding: '4px 12px', borderRadius: 6,
+                background: '#6366f1', color: '#fff',
+              }}>
+                {selectedProject}
+              </span>
+            </div>
+            <button
+              onClick={() => setSelectedProject(null)}
+              style={{
+                padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+                background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)',
+                color: '#f87171', cursor: 'pointer',
+              }}
+            >
+              ✕ Close
+            </button>
+          </div>
+
+          {projectErrorsLoading ? (
+            <div style={{ textAlign: 'center', padding: '30px 0', color: 'var(--text-muted)', fontSize: 13 }}>
+              Loading semantic groups for {selectedProject}…
+            </div>
+          ) : projectSemanticGroupData.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '36px 0', color: 'var(--text-muted)', fontSize: 13 }}>
+              No semantic group data available for this project in the selected time range.
+            </div>
+          ) : (
+            <>
+              <div style={{
+                marginBottom: 12,
+                fontSize: 12,
+                color: 'var(--text-muted)',
+                padding: '8px 12px',
+                background: 'rgba(99,102,241,0.05)',
+                borderRadius: 6,
+                border: '1px solid rgba(99,102,241,0.15)'
+              }}>
+                📊 {projectSemanticGroupData.reduce((sum, item) => sum + item.value, 0)} total errors grouped into {projectSemanticGroupData.length} categories
+              </div>
+              <ResponsiveContainer width="100%" height={Math.max(200, projectSemanticGroupData.length * 35)}>
+                <BarChart
+                  data={projectSemanticGroupData}
+                  layout="vertical"
+                  margin={{ top: 8, right: 18, left: 4, bottom: 8 }}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" horizontal={false} />
+                  <XAxis
+                    type="number"
+                    tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 10 }}
+                    tickLine={false}
+                    axisLine={{ stroke: 'rgba(255,255,255,0.08)' }}
+                  />
+                  <YAxis
+                    type="category"
+                    dataKey="name"
+                    width={150}
+                    tick={{ fill: 'rgba(255,255,255,0.55)', fontSize: 10 }}
+                    tickLine={false}
+                    axisLine={{ stroke: 'rgba(255,255,255,0.08)' }}
+                  />
+                  <Tooltip
+                    cursor={{ fill: 'rgba(255,255,255,0.04)' }}
+                    content={({ active, payload }: any) => {
+                      if (!active || !payload?.length) return null;
+                      const item = payload[0].payload;
+                      return (
+                        <div style={{
+                          background: '#1e293b', border: '1px solid rgba(255,255,255,0.1)',
+                          borderRadius: 8, padding: '10px 14px', fontSize: 13,
+                        }}>
+                          <div style={{ color: '#e2e8f0', fontWeight: 700, marginBottom: 6 }}>{item.name}</div>
+                          <div style={{ color: '#94a3b8' }}>
+                            Errors: <span style={{ color: '#fff', fontWeight: 700 }}>{item.value}</span>
+                          </div>
+                        </div>
+                      );
+                    }}
+                  />
+                  <Bar dataKey="value" fill="#6366f1" radius={[0, 4, 4, 0]} maxBarSize={28} />
+                </BarChart>
+              </ResponsiveContainer>
+            </>
+          )}
+        </div>
+      )}
 
       <div style={{ ...card, marginBottom: 24 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
