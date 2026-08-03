@@ -108,10 +108,10 @@ export function createGetErrorDetailHandler(pool: Pool) {
       const tables = await getProjectTables(pool);
       const filteredTables = projectName
         ? tables.filter((table) => {
-            const normalizedProject = projectName.toLowerCase();
-            const normalizedTable = table.toLowerCase();
-            return normalizedTable === normalizedProject.replace(/ /g, '_') || normalizedTable.replace(/_/g, ' ') === normalizedProject;
-          })
+          const normalizedProject = projectName.toLowerCase();
+          const normalizedTable = table.toLowerCase();
+          return normalizedTable === normalizedProject.replace(/ /g, '_') || normalizedTable.replace(/_/g, ' ') === normalizedProject;
+        })
         : tables;
 
       if (filteredTables.length === 0) {
@@ -293,6 +293,55 @@ export function createProjectDashboardRouter(pool: Pool) {
     }
   });
 
+  // GET /project-errors?project=NAME&from=ISO&to=ISO — errors for a specific project in date range
+  router.get('/project-errors', async (req: any, res: any) => {
+    try {
+      const { project, from, to } = req.query as Record<string, string | undefined>;
+
+      if (!project) {
+        return res.status(400).json({ error: 'project query parameter is required' });
+      }
+
+      const tables = await getProjectTables(pool);
+      if (tables.length === 0) return res.json({ errors: [] });
+
+      // Filter to only the tables matching this project
+      const projectTableName = project.toLowerCase().replace(/ /g, '_');
+      const matchingTables = tables.filter(t =>
+        t.toLowerCase() === projectTableName ||
+        t.toLowerCase().replace(/_/g, ' ') === project.toLowerCase()
+      );
+
+      if (matchingTables.length === 0) {
+        return res.json({ errors: [] });
+      }
+
+      let extraWhere = '';
+      if (from) {
+        extraWhere += ` AND timestamp >= '${from.replace(/'/g, "''")}'`;
+      }
+      if (to) {
+        extraWhere += ` AND timestamp <= '${to.replace(/'/g, "''")}'`;
+      }
+
+      const union = buildErrorUnion(matchingTables, extraWhere);
+
+      const { rows } = await pool.query(`
+        SELECT project_name AS project, file_name, error, error_detail, error_hash, timestamp,
+               NULLIF(error_group_name, '') AS error_group_name,
+               NULLIF(error_group_id, '') AS error_group_id
+        FROM (${union}) AS combined
+        ORDER BY timestamp DESC
+        LIMIT 2000
+      `);
+
+      res.json({ errors: rows });
+    } catch (err) {
+      console.error('[Dashboard] project-errors error:', (err as any).message ?? err);
+      res.status(500).json({ error: 'Internal server error', detail: (err as any).message });
+    }
+  });
+
   // GET /grouped?page=1&limit=20&status=&from=ISO&to=ISO
   // Groups errors by (project_name, error_hash) across all project tables.
   // Supports optional date range and status filter (new / existing / regression).
@@ -301,23 +350,23 @@ export function createProjectDashboardRouter(pool: Pool) {
       const tables = await getProjectTables(pool);
       if (tables.length === 0) return res.json({ data: [], total: 0, page: 1, limit: 20 });
 
-      const page  = Math.max(1, parseInt(req.query.page  ?? '1',  10) || 1);
+      const page = Math.max(1, parseInt(req.query.page ?? '1', 10) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(req.query.limit ?? '20', 10) || 20));
-      const statusFilter: string  = req.query.status  ?? '';
+      const statusFilter: string = req.query.status ?? '';
       const projectFilter: string = req.query.project ?? '';
       const from: string = req.query.from ?? '';
-      const to:   string = req.query.to   ?? '';
+      const to: string = req.query.to ?? '';
 
       // Build date-range clause (safe — values are ISO strings, not user SQL)
       let dateWhere = '';
       if (from) dateWhere += ` AND timestamp >= '${from.replace(/'/g, "''")}'`;
-      if (to)   dateWhere += ` AND timestamp <= '${to.replace(/'/g, "''")}'`;
+      if (to) dateWhere += ` AND timestamp <= '${to.replace(/'/g, "''")}'`;
 
       // Include resolved cases in the grouped list as well so the UI can show
       // a proper resolved badge after a user marks an error as fixed.
       const filteredTables = projectFilter
         ? tables.filter(t => t.toLowerCase() === projectFilter.toLowerCase().replace(/ /g, '_') ||
-                             t.toLowerCase().replace(/_/g, ' ') === projectFilter.toLowerCase())
+          t.toLowerCase().replace(/_/g, ' ') === projectFilter.toLowerCase())
         : tables;
 
       if (filteredTables.length === 0) return res.json({ data: [], total: 0, page, limit });
@@ -350,7 +399,7 @@ export function createProjectDashboardRouter(pool: Pool) {
 
       // Apply optional status and project filters
       const conditions: string[] = [];
-      if (statusFilter)  conditions.push(`status = '${statusFilter.replace(/'/g, "''")}'`);
+      if (statusFilter) conditions.push(`status = '${statusFilter.replace(/'/g, "''")}'`);
       if (projectFilter) conditions.push(`project_name = '${projectFilter.replace(/'/g, "''")}'`);
       const statusWhere = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
       const countRes = await pool.query(`SELECT COUNT(*) FROM (${grouped}) AS g ${statusWhere}`);
@@ -395,12 +444,12 @@ export function createProjectErrorUpsertRouter(pool: Pool) {
 
   function fireTeamsAlert(projectName: string, shortError: string, errorDetail: string | undefined): void {
     sendTeamsAlert({
-      ruleName:    'Error Upsert',
-      alertType:   'New Error',
+      ruleName: 'Error Upsert',
+      alertType: 'New Error',
       projectName,
-      errorMsg:    shortError,
+      errorMsg: shortError,
       errorDetail,
-    }).catch(() => {});
+    }).catch(() => { });
   }
 
   router.post('/:name/errors', async (req: any, res: any) => {
@@ -544,13 +593,13 @@ export function createProjectLiveRouter(pool: Pool) {
     label = '',
   ): void {
     sendTeamsAlert({
-      ruleName:    label || 'Direct Alert',
-      alertType:   'New Error',
+      ruleName: label || 'Direct Alert',
+      alertType: 'New Error',
       projectName,
-      errorMsg:    shortError,
+      errorMsg: shortError,
       errorDetail,
       label,
-    }).catch(() => {});
+    }).catch(() => { });
   }
 
   // ── GET /api/projects/live — list live projects ───────────────────────────
@@ -666,7 +715,7 @@ export function createProjectLiveRouter(pool: Pool) {
       const sample = SAMPLE_ERRORS[sampleIndex];
 
       const errorDetail: string = (body.error_detail ?? sample.error_detail).trim();
-      const fileName: string    = body.file_name ?? sample.file_name;
+      const fileName: string = body.file_name ?? sample.file_name;
 
       // Derive short error from last line of detail
       const lines = errorDetail.split('\n').map((l) => l.trim()).filter(Boolean);
@@ -697,8 +746,8 @@ export function createProjectLiveRouter(pool: Pool) {
 
       if (updateResult.rowCount && updateResult.rowCount > 0) {
         const r = updateResult.rows[0];
-        action       = r.error_status === 'reopened' ? 'reopened' : 'updated';
-        errorStatus  = r.error_status;
+        action = r.error_status === 'reopened' ? 'reopened' : 'updated';
+        errorStatus = r.error_status;
         failureCount = r.failure_count;
       } else {
         const insertResult = await pool.query(
@@ -709,20 +758,20 @@ export function createProjectLiveRouter(pool: Pool) {
            RETURNING id, error_status, failure_count`,
           [projectName, fileName, shortError, errorDetail, errorHash, require('crypto').randomUUID()],
         );
-        const r  = insertResult.rows[0];
-        action       = 'inserted';
-        errorStatus  = r.error_status;
+        const r = insertResult.rows[0];
+        action = 'inserted';
+        errorStatus = r.error_status;
         failureCount = r.failure_count;
       }
 
       // Always fire Teams alert for test errors (so you can verify the channel)
       await sendTeamsAlert({
-        ruleName:    'Sample Error',
-        alertType:   'New Error',
+        ruleName: 'Sample Error',
+        alertType: 'New Error',
         projectName,
-        errorMsg:    shortError,
+        errorMsg: shortError,
         errorDetail,
-        label:       'Sample Error',
+        label: 'Sample Error',
       });
 
       console.log(`[TestError] injected into "${projectName}": ${shortError}`);
