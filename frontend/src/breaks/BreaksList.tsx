@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { apiFetch } from '../lib/api';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -111,6 +111,7 @@ function fmt(ts: string | null) {
 
 export function BreaksList() {
   const navigate = useNavigate();
+  const location = useLocation();
 
   // ── Filter state ─────────────────────────────────────────────────────────
   const [page, setPage]               = useState(1);
@@ -155,6 +156,14 @@ export function BreaksList() {
       .catch(e => console.error('[Breaks] failed to load semantic groups:', e))
       .finally(() => setGroupsLoading(false));
   }, [showGroupPanel, projectFilter]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const projectFromUrl = params.get('project') ?? '';
+    const groupFromUrl = params.get('semantic_group') ?? '';
+    if (projectFromUrl) setProjectFilter(projectFromUrl);
+    if (groupFromUrl) setGroupFilter(groupFromUrl);
+  }, [location.search]);
 
   // ── Fetch breaks ──────────────────────────────────────────────────────────
   useEffect(() => {

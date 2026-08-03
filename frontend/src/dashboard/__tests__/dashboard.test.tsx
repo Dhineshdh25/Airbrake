@@ -111,4 +111,28 @@ describe('summarizeSemanticGroupsForToday', () => {
       { name: 'File not found', value: 1 },
     ]);
   });
+
+  it('keeps the semantic group id when present', () => {
+    const rows = [
+      { project: 'fm_structuring', error: 'Syntax & Parsing error', error_group_name: 'Syntax & Parsing', error_group_id: 'group-123' },
+      { project: 'fm_structuring', error: 'Syntax & Parsing error', error_group_name: 'Syntax & Parsing', error_group_id: 'group-123' },
+    ];
+
+    expect(summarizeSemanticGroupsForToday(rows, 'fm_structuring')).toEqual([
+      { id: 'group-123', name: 'Syntax & Parsing', value: 2 },
+    ]);
+  });
+
+  it('filters the summary to the selected project', () => {
+    const rows = [
+      { project: 'Alpha', error: 'LLM output was not valid JSON' },
+      { project: 'Alpha', error: 'File not found: uploads/missing.txt' },
+      { project: 'Beta', error: 'LLM output was not valid JSON' },
+    ];
+
+    expect(summarizeSemanticGroupsForToday(rows, 'Alpha')).toEqual([
+      { name: 'File not found', value: 1 },
+      { name: 'JSON format error', value: 1 },
+    ]);
+  });
 });
