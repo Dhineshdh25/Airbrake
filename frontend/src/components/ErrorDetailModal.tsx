@@ -831,105 +831,102 @@ export function ErrorDetailModal({
             <div style={sectionLabel}>📋 Stack Trace</div>
             {data?.parsed_stacktrace && data.parsed_stacktrace.frames && data.parsed_stacktrace.frames.length > 0 ? (
               <div>
-                {/* Top Frame - Exact Error Location */}
-                <div style={{
-                  padding: '18px 20px', borderRadius: 12,
-                  background: 'rgba(239,68,68,0.08)', border: '3px solid rgba(239,68,68,0.3)',
-                  boxShadow: '0 4px 12px rgba(239,68,68,0.15)',
-                  marginBottom: 16,
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-                    <span style={{ fontSize: 20 }}>💥</span>
-                    <div>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: '#f87171', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                        Code Line That Caused the Error
-                      </div>
-                      <div style={{ fontSize: 11, color: 'rgba(248,113,113,0.7)', marginTop: 2 }}>
-                        The exact line where the error originated
-                      </div>
-                    </div>
-                  </div>
+                {(() => {
+                  const topFrame = data.parsed_stacktrace.frames[0];
+                  // Check if this is a real source file or just a placeholder
+                  const isRealFile = topFrame.file_path &&
+                    !['<unknown>', '<string>', '<stdin>', 'unknown'].includes(topFrame.file_path.toLowerCase());
 
-                  {(() => {
-                    const topFrame = data.parsed_stacktrace.frames[0];
-                    return (
-                      <>
-                        {/* File location header */}
-                        <div style={{
-                          padding: '12px 16px',
-                          background: 'rgba(239,68,68,0.15)',
-                          borderRadius: 8,
-                          border: '1px solid rgba(239,68,68,0.25)',
-                          marginBottom: 12,
-                        }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12 }}>
-                            <span style={{ fontSize: 16 }}>📂</span>
-                            <span style={{ color: '#fca5a5', fontWeight: 700, fontFamily: 'ui-monospace, monospace' }}>
-                              {topFrame.file_path}
-                            </span>
-                            <span style={{ color: 'rgba(252,165,165,0.5)' }}>:</span>
-                            <span style={{
-                              color: '#fbbf24',
-                              fontWeight: 700,
-                              background: 'rgba(251,191,36,0.2)',
-                              padding: '3px 10px',
-                              borderRadius: 5,
-                              border: '1px solid rgba(251,191,36,0.3)',
-                            }}>
-                              line {topFrame.line_number}
-                            </span>
-                            {topFrame.function_name && (
-                              <>
-                                <span style={{ color: 'rgba(252,165,165,0.5)' }}>in</span>
-                                <span style={{
-                                  color: '#818cf8',
-                                  fontWeight: 700,
-                                  background: 'rgba(129,140,248,0.15)',
-                                  padding: '3px 10px',
-                                  borderRadius: 5,
-                                  border: '1px solid rgba(129,140,248,0.3)',
-                                }}>
-                                  {topFrame.function_name}()
-                                </span>
-                              </>
-                            )}
+                  // Only show the "Code Line That Caused the Error" section if we have a real file
+                  // or if we have actual code content to show
+                  if (!isRealFile && !topFrame.code_line) {
+                    return null; // Skip this entire section
+                  }
+
+                  return (
+                    <div style={{
+                      padding: '18px 20px', borderRadius: 12,
+                      background: 'rgba(239,68,68,0.08)', border: '3px solid rgba(239,68,68,0.3)',
+                      boxShadow: '0 4px 12px rgba(239,68,68,0.15)',
+                      marginBottom: 16,
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+                        <span style={{ fontSize: 20 }}>💥</span>
+                        <div>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: '#f87171', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                            Code Line That Caused the Error
+                          </div>
+                          <div style={{ fontSize: 11, color: 'rgba(248,113,113,0.7)', marginTop: 2 }}>
+                            The exact line where the error originated
                           </div>
                         </div>
+                      </div>
 
-                        {/* The problematic code line */}
-                        {topFrame.code_line ? (
-                          <div style={{
-                            background: 'rgba(0,0,0,0.5)',
-                            borderRadius: 8,
-                            padding: '14px',
-                            border: '2px solid rgba(239,68,68,0.3)',
+                      {/* File location header */}
+                      <div style={{
+                        padding: '12px 16px',
+                        background: 'rgba(239,68,68,0.15)',
+                        borderRadius: 8,
+                        border: '1px solid rgba(239,68,68,0.25)',
+                        marginBottom: 12,
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12 }}>
+                          <span style={{ fontSize: 16 }}>📂</span>
+                          <span style={{ color: '#fca5a5', fontWeight: 700, fontFamily: 'ui-monospace, monospace' }}>
+                            {topFrame.file_path}
+                          </span>
+                          <span style={{ color: 'rgba(252,165,165,0.5)' }}>:</span>
+                          <span style={{
+                            color: '#fbbf24',
+                            fontWeight: 700,
+                            background: 'rgba(251,191,36,0.2)',
+                            padding: '3px 10px',
+                            borderRadius: 5,
+                            border: '1px solid rgba(251,191,36,0.3)',
                           }}>
-                            <div style={{
-                              fontFamily: 'ui-monospace, Cascadia Code, Consolas, monospace',
-                              fontSize: 13,
-                              lineHeight: 1.6,
-                              color: '#fef3c7',
-                              whiteSpace: 'pre',
-                              overflowX: 'auto',
-                            }}>
-                              {topFrame.code_line}
-                            </div>
-                          </div>
-                        ) : (
+                            line {topFrame.line_number}
+                          </span>
+                          {topFrame.function_name && (
+                            <>
+                              <span style={{ color: 'rgba(252,165,165,0.5)' }}>in</span>
+                              <span style={{
+                                color: '#818cf8',
+                                fontWeight: 700,
+                                background: 'rgba(129,140,248,0.15)',
+                                padding: '3px 10px',
+                                borderRadius: 5,
+                                border: '1px solid rgba(129,140,248,0.3)',
+                              }}>
+                                {topFrame.function_name}()
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* The problematic code line */}
+                      {topFrame.code_line && (
+                        <div style={{
+                          background: 'rgba(0,0,0,0.5)',
+                          borderRadius: 8,
+                          padding: '14px',
+                          border: '2px solid rgba(239,68,68,0.3)',
+                        }}>
                           <div style={{
-                            padding: '12px',
-                            background: 'rgba(0,0,0,0.3)',
-                            borderRadius: 8,
-                            fontSize: 12,
-                            color: 'rgba(252,165,165,0.7)',
+                            fontFamily: 'ui-monospace, Cascadia Code, Consolas, monospace',
+                            fontSize: 13,
+                            lineHeight: 1.6,
+                            color: '#fef3c7',
+                            whiteSpace: 'pre',
+                            overflowX: 'auto',
                           }}>
-                            Code line not available
+                            {topFrame.code_line}
                           </div>
-                        )}
-                      </>
-                    );
-                  })()}
-                </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             ) : (
               <pre style={{
