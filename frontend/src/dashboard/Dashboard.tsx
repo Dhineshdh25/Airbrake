@@ -160,6 +160,7 @@ interface TopProject {
 }
 
 interface SemanticGroupSummary {
+  id?: string;
   name: string;
   value: number;
 }
@@ -191,23 +192,32 @@ export function normalizeSemanticGroupName(
 }
 
 export function summarizeSemanticGroupsForToday(
-  rows: Array<{ error?: string | null; error_group_name?: string | null; error_group_id?: string | null }>,
+  rows: Array<{ project?: string | null; error?: string | null; error_group_name?: string | null; error_group_id?: string | null }>,
+  selectedProject?: string | null,
 ): SemanticGroupSummary[] {
-  const counts = new Map<string, number>();
+  const counts = new Map<string, { id?: string; name: string; value: number }>();
 
   rows.forEach((row) => {
+    const projectName = row.project ?? '';
+    if (selectedProject && projectName && projectName !== selectedProject) {
+      return;
+    }
+
     const name = normalizeSemanticGroupName(row);
-    counts.set(name, (counts.get(name) ?? 0) + 1);
+    const existing = counts.get(name) ?? { id: row.error_group_id || undefined, name, value: 0 };
+    existing.value += 1;
+    if (!existing.id && row.error_group_id) existing.id = row.error_group_id;
+    counts.set(name, existing);
   });
 
-  return Array.from(counts.entries())
-    .map(([name, value]) => ({ name, value }))
+  return Array.from(counts.values())
+    .map(({ id, name, value }) => ({ id, name, value }))
     .sort((a, b) => b.value - a.value || a.name.localeCompare(b.name));
 }
 
 const card: React.CSSProperties = {
   background: 'var(--card-bg)',
-  border: '1px solid var(--card-border)',
+  border: 'none',
   borderRadius: 10,
   padding: 20,
 };
@@ -327,6 +337,8 @@ type ComparisonPeriod = 'daily' | 'weekly' | 'custom';
 type ComparisonSeries = 'mostUsed' | 'errorProducing';
 
 export function Dashboard() {
+  const navigate = useNavigate();
+
   // ── Project drill-down modal state ─────────────────────────────────────────
   const [drillDownProject, setDrillDownProject] = useState<string | null>(null);
 
@@ -468,13 +480,13 @@ export function Dashboard() {
   }, [topProjects, topErrorProjects]);
 
   const semanticGroupData = useMemo(
-    () => summarizeSemanticGroupsForToday(todayErrors),
-    [todayErrors],
+    () => summarizeSemanticGroupsForToday(todayErrors, selectedProject),
+    [todayErrors, selectedProject],
   );
 
   // ── Semantic groups for selected project (drill-down) ──
   const projectSemanticGroupData = useMemo(
-    () => selectedProject ? summarizeSemanticGroupsForToday(projectErrors) : [],
+    () => selectedProject ? summarizeSemanticGroupsForToday(projectErrors, selectedProject) : [],
     [selectedProject, projectErrors],
   );
 
@@ -502,13 +514,30 @@ export function Dashboard() {
       .finally(() => setProjectErrorsLoading(false));
   }, [selectedProject, comparisonPeriod, customFrom, customTo, customApplyTick]);
 
-  // ── Handle bar click to drill down into project ──
+  // ── When both series are visible, drill into the project summary; when only the
+  //    error-producing series is filtered, send the user to the breaks list scoped to that project.
   const handleBarClick = useCallback((data: any) => {
-    if (data && data.activePayload && data.activePayload.length > 0) {
-      const projectName = data.activePayload[0].payload.name;
-      setSelectedProject(prev => prev === projectName ? null : projectName);
+    const payload = data?.activePayload?.[0]?.payload ?? data?.payload ?? data;
+    const projectName = payload?.name;
+    if (!projectName) return;
+
+    if (visibleSeries.errorProducing && !visibleSeries.mostUsed) {
+      navigate(`/breaks?project=${encodeURIComponent(projectName)}`);
+      return;
     }
-  }, []);
+
+    setSelectedProject(prev => prev === projectName ? null : projectName);
+  }, [navigate, visibleSeries]);
+
+  const handleSemanticGroupClick = useCallback((item: { name?: string; id?: string } | null | undefined) => {
+    if (!item?.name) return;
+    const project = selectedProject || '';
+    const params = new URLSearchParams();
+    if (project) params.set('project', project);
+    if (item.id) params.set('semantic_group', item.id);
+    const qs = params.toString();
+    navigate(`/breaks${qs ? `?${qs}` : ''}`);
+  }, [navigate, selectedProject]);
 
   return (
     <div>
@@ -627,6 +656,7 @@ export function Dashboard() {
               barCategoryGap="30%"
               barGap={3}
               onClick={handleBarClick}
+              style={{ outline: 'none' }}
             >
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
               <XAxis
@@ -684,7 +714,10 @@ export function Dashboard() {
                   radius={[4, 4, 0, 0]}
                   maxBarSize={32}
                   cursor="pointer"
-                  opacity={(entry: any) => entry.name === selectedProject ? 0.7 : 1}
+                  fillOpacity={selectedProject ? 0.7 : 1}
+                  stroke="none"
+                  strokeWidth={0}
+                  onClick={handleBarClick}
                 />
               )}
               {visibleSeries.errorProducing && (
@@ -694,7 +727,10 @@ export function Dashboard() {
                   radius={[4, 4, 0, 0]}
                   maxBarSize={32}
                   cursor="pointer"
-                  opacity={(entry: any) => entry.name === selectedProject ? 0.7 : 1}
+                  fillOpacity={selectedProject ? 0.7 : 1}
+                  stroke="none"
+                  strokeWidth={0}
+                  onClick={handleBarClick}
                 />
               )}
             </BarChart>
@@ -702,104 +738,11 @@ export function Dashboard() {
         )}
       </div>
 
-      {/* ── Drill-down: Selected Project's Errors by Semantic Group ── */}
-      {selectedProject && (
-        <div style={{ ...card, marginBottom: 24, border: '2px solid #6366f1' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <h3 style={{ ...cardTitle, margin: 0 }}>
-                🔍 Errors by Semantic Group
-              </h3>
-              <span style={{
-                fontSize: 12, fontWeight: 600, padding: '4px 12px', borderRadius: 6,
-                background: '#6366f1', color: '#fff',
-              }}>
-                {selectedProject}
-              </span>
-            </div>
-            <button
-              onClick={() => setSelectedProject(null)}
-              style={{
-                padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-                background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)',
-                color: '#f87171', cursor: 'pointer',
-              }}
-            >
-              ✕ Close
-            </button>
-          </div>
-
-          {projectErrorsLoading ? (
-            <div style={{ textAlign: 'center', padding: '30px 0', color: 'var(--text-muted)', fontSize: 13 }}>
-              Loading semantic groups for {selectedProject}…
-            </div>
-          ) : projectSemanticGroupData.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '36px 0', color: 'var(--text-muted)', fontSize: 13 }}>
-              No semantic group data available for this project in the selected time range.
-            </div>
-          ) : (
-            <>
-              <div style={{
-                marginBottom: 12,
-                fontSize: 12,
-                color: 'var(--text-muted)',
-                padding: '8px 12px',
-                background: 'rgba(99,102,241,0.05)',
-                borderRadius: 6,
-                border: '1px solid rgba(99,102,241,0.15)'
-              }}>
-                📊 {projectSemanticGroupData.reduce((sum, item) => sum + item.value, 0)} total errors grouped into {projectSemanticGroupData.length} categories
-              </div>
-              <ResponsiveContainer width="100%" height={Math.max(200, projectSemanticGroupData.length * 35)}>
-                <BarChart
-                  data={projectSemanticGroupData}
-                  layout="vertical"
-                  margin={{ top: 8, right: 18, left: 4, bottom: 8 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" horizontal={false} />
-                  <XAxis
-                    type="number"
-                    tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 10 }}
-                    tickLine={false}
-                    axisLine={{ stroke: 'rgba(255,255,255,0.08)' }}
-                  />
-                  <YAxis
-                    type="category"
-                    dataKey="name"
-                    width={150}
-                    tick={{ fill: 'rgba(255,255,255,0.55)', fontSize: 10 }}
-                    tickLine={false}
-                    axisLine={{ stroke: 'rgba(255,255,255,0.08)' }}
-                  />
-                  <Tooltip
-                    cursor={{ fill: 'rgba(255,255,255,0.04)' }}
-                    content={({ active, payload }: any) => {
-                      if (!active || !payload?.length) return null;
-                      const item = payload[0].payload;
-                      return (
-                        <div style={{
-                          background: '#1e293b', border: '1px solid rgba(255,255,255,0.1)',
-                          borderRadius: 8, padding: '10px 14px', fontSize: 13,
-                        }}>
-                          <div style={{ color: '#e2e8f0', fontWeight: 700, marginBottom: 6 }}>{item.name}</div>
-                          <div style={{ color: '#94a3b8' }}>
-                            Errors: <span style={{ color: '#fff', fontWeight: 700 }}>{item.value}</span>
-                          </div>
-                        </div>
-                      );
-                    }}
-                  />
-                  <Bar dataKey="value" fill="#6366f1" radius={[0, 4, 4, 0]} maxBarSize={28} />
-                </BarChart>
-              </ResponsiveContainer>
-            </>
-          )}
-        </div>
-      )}
-
       <div style={{ ...card, marginBottom: 24 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
-          <h3 style={{ ...cardTitle, margin: 0 }}>Today's Errors by Semantic Group</h3>
+          <h3 style={{ ...cardTitle, margin: 0 }}>
+            {selectedProject ? `Today's Errors by Semantic Group for ${selectedProject}` : "Today's Errors by Semantic Group"}
+          </h3>
           {todayDate && (
             <span style={{
               fontSize: 12, fontWeight: 600, padding: '3px 10px', borderRadius: 99,
@@ -825,16 +768,24 @@ export function Dashboard() {
           <div style={{ textAlign: 'center', padding: '36px 0', color: 'var(--text-muted)', fontSize: 13 }}>No semantic group data for today.</div>
         ) : (
           <ResponsiveContainer width="100%" height={280}>
-            <BarChart data={semanticGroupData} layout="vertical" margin={{ top: 8, right: 18, left: 4, bottom: 8 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" horizontal={false} />
-              <XAxis type="number" tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 10 }} tickLine={false} axisLine={{ stroke: 'rgba(255,255,255,0.08)' }} />
-              <YAxis
+            <BarChart data={semanticGroupData} margin={{ top: 8, right: 18, left: 8, bottom: 40 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
+              <XAxis
                 type="category"
                 dataKey="name"
-                width={150}
                 tick={{ fill: 'rgba(255,255,255,0.55)', fontSize: 10 }}
                 tickLine={false}
                 axisLine={{ stroke: 'rgba(255,255,255,0.08)' }}
+                angle={-20}
+                textAnchor="end"
+                interval={0}
+              />
+              <YAxis
+                type="number"
+                tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 10 }}
+                tickLine={false}
+                axisLine={{ stroke: 'rgba(255,255,255,0.08)' }}
+                width={32}
               />
               <Tooltip
                 cursor={{ fill: 'rgba(255,255,255,0.04)' }}
@@ -854,7 +805,17 @@ export function Dashboard() {
                   );
                 }}
               />
-              <Bar dataKey="value" fill="#38bdf8" radius={[0, 4, 4, 0]} maxBarSize={32} />
+              <Bar
+                dataKey="value"
+                fill="#38bdf8"
+                radius={[4, 4, 0, 0]}
+                maxBarSize={32}
+                cursor="pointer"
+                onClick={(data: any) => {
+                  const payload = data?.activePayload?.[0]?.payload ?? data?.payload ?? data;
+                  handleSemanticGroupClick(payload);
+                }}
+              />
             </BarChart>
           </ResponsiveContainer>
         )}
