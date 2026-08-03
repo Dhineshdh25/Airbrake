@@ -103,8 +103,121 @@ def classify_duplicate_solution(
     return     {"is_duplicate": False, "decision": "new",       "severity": "low",    "confidence": float(similarity)}
 
 
+import hashlib
+
+
+# ── Solution text normalization & fingerprinting ──────────────────────────────
+
 def _normalize_solution_text(value: Optional[str]) -> str:
-    return re.sub(r"\s+", " ", (value or "").strip()).lower()
+    """Full normalization for duplicate detection.
+
+    Two solutions that represent the same fix must produce the same output
+    regardless of:
+    - capitalization
+    - whitespace / line endings
+    - repeated / trailing punctuation
+    - markdown formatting (**, __, #, >, -, `)
+    - HTML tags
+    - emojis and non-ASCII symbols
+    - unicode variants
+    - repeated symbols
+    """
+    import unicodedata
+
+    if not value:
+        return ""
+
+    s = value
+
+    # Normalize unicode to NFC (composed form), then strip non-ASCII control chars
+    s = unicodedata.normalize("NFC", s)
+
+    # Remove HTML tags
+    s = re.sub(r"<[^>]+>", " ", s)
+
+    # Remove markdown formatting characters (bold, italic, headers, code, blockquote, lists)
+    s = re.sub(r"[*_~`#>]", " ", s)
+
+    # Remove emojis and other symbol/pictograph unicode blocks
+    # (matches most emoji ranges without external libraries)
+    s = re.sub(
+        r"[\U0001F300-\U0001F9FF"   # Misc symbols, dingbats, emoticons, transport
+        r"\U00002600-\U000027BF"   # Misc symbols
+        r"\U0001FA00-\U0001FA9F"   # Chess, hand, misc symbols
+        r"\U0000200B-\U0000200F"   # Zero-width spaces
+        r"\U0000FE00-\U0000FE0F"   # Variation selectors
+        r"]+",
+        " ", s, flags=re.UNICODE,
+    )
+
+    # Collapse sequences of the same punctuation char (e.g. "......." → ".")
+    # Handles: . , ! ? - _ = + ~ ^ | / \\ : ; @ % & * ( ) [ ] { } < >
+    s = re.sub(r"([.!?,;:@%&\-_=+~^|/\\*()\[\]{}<>])\1+", r"\1", s)
+
+    # Strip all remaining punctuation that doesn't change meaning
+    # Keep alphanumeric, spaces, and single meaningful punctuation
+    s = re.sub(r"[^\w\s]", " ", s)
+
+    # Collapse whitespace (including newlines, tabs)
+    s = re.sub(r"\s+", " ", s)
+
+    # Lowercase and strip
+    s = s.strip().lower()
+
+    return s
+
+
+def _solution_fingerprint(solution_text: str) -> str:
+    """Return a stable MD5 fingerprint of the normalized solution text.
+
+    Two solutions with the same fingerprint are considered identical regardless
+    of formatting, punctuation, or whitespace differences.
+    """
+    normalized = _normalize_solution_text(solution_text)
+    if not normalized:
+        return ""
+    return hashlib.md5(normalized.encode("utf-8")).hexdigest()
+
+
+def _nova_same_fix_check(
+    candidate_text: str,
+    existing_text: str,
+    error_context: Optional[str] = None,
+) -> Optional[str]:
+    """Ask Nova whether two solutions represent the same underlying fix.
+
+    Returns 'SAME_FIX', 'DIFFERENT_FIX', or None if Nova is unavailable.
+    Nova is the FINAL authority — it ignores formatting and evaluates only
+    whether the technical resolution is the same.
+    """
+    try:
+        from ai.bedrock_llm import _call_nova
+        error_ctx = f"\n\nError context: {error_context.strip()[:300]}" if error_context else ""
+        prompt = (
+            "You are a technical solution validator.\n\n"
+            "Compare these two solutions and determine if they describe the SAME underlying technical fix.\n"
+            "Ignore: punctuation, capitalization, whitespace, formatting, markdown, wording differences.\n"
+            "Evaluate ONLY whether the technical resolution is identical.\n"
+            f"{error_ctx}\n\n"
+            f"EXISTING SOLUTION:\n{existing_text.strip()[:500]}\n\n"
+            f"CANDIDATE SOLUTION:\n{candidate_text.strip()[:500]}\n\n"
+            "Reply with ONLY one of:\n"
+            "SAME_FIX\n"
+            "DIFFERENT_FIX"
+        )
+        raw = _call_nova(prompt, max_tokens=20)
+        answer = (raw or "").strip().upper()
+        if "SAME_FIX" in answer:
+            logger.info("[KnowledgeBase] Nova final verdict: SAME_FIX")
+            return "SAME_FIX"
+        if "DIFFERENT_FIX" in answer:
+            logger.info("[KnowledgeBase] Nova final verdict: DIFFERENT_FIX")
+            return "DIFFERENT_FIX"
+        logger.warning("[KnowledgeBase] Nova returned unexpected answer=%r — treating as DIFFERENT_FIX", answer[:80])
+        return "DIFFERENT_FIX"
+    except Exception as exc:
+        logger.exception("[KnowledgeBase] Nova same-fix check failed: %s", exc)
+        return None
 
 
 # ── Group-key helpers ─────────────────────────────────────────────────────────
@@ -133,14 +246,21 @@ def _find_duplicate_solution(
     solution_text: str,
     project_name: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Exact-text duplicate search within the solution group — zero Bedrock cost.
+    """Fingerprint-based duplicate search within the solution group — zero Bedrock cost.
 
-    Scans all solution rows that share the same group_key (project + normalized
-    error message) and returns one whose normalized text matches solution_text.
+    Computes the normalized fingerprint of solution_text, then scans all
+    solution rows in the group and returns one whose fingerprint matches.
+    This catches "User uploaded an incorrect file." vs
+    "User uploaded an incorrect file................." as identical.
     """
-    normalized = _normalize_solution_text(solution_text)
-    if not normalized:
+    candidate_fp = _solution_fingerprint(solution_text)
+    if not candidate_fp:
         return None
+
+    logger.info(
+        "[KnowledgeBase] Fingerprint search — candidate_fp=%r group_key=%r",
+        candidate_fp, group_key,
+    )
 
     conditions, params = _group_key_conditions(group_key, project_name)
     try:
@@ -153,14 +273,14 @@ def _find_duplicate_solution(
             tuple(params),
         )
         for row in rows:
-            if _normalize_solution_text(row.get("solution")) == normalized:
+            if _solution_fingerprint(row.get("solution")) == candidate_fp:
                 logger.info(
-                    "[KnowledgeBase] Exact duplicate found in group — solution_id=%s",
+                    "[KnowledgeBase] Fingerprint duplicate found — solution_id=%s",
                     row.get("id"),
                 )
                 return row
     except Exception as exc:
-        logger.exception("[KnowledgeBase] Exact duplicate query failed: %s", exc)
+        logger.exception("[KnowledgeBase] Fingerprint duplicate query failed: %s", exc)
 
     return None
 
@@ -172,57 +292,72 @@ def detect_duplicate_solution(
     group_key: str,
     project_name: Optional[str] = None,
     limit: int = 5,
+    error_context: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Project-scoped semantic duplicate detection.
+    """Four-stage semantic duplicate detection.
 
-    Only called after exact-text (Tier 1) found nothing.
-    Pinecone is queried with project_name filter only (no error_hash/group_key)
-    so semantically equivalent solutions are caught across the whole project.
+    Stage 1 (fingerprint)  — already handled by _find_duplicate_solution().
+                             Caller passes solution_text ONLY when fingerprint
+                             check found nothing.
 
-    Thresholds:
-      >= 0.95  → duplicate, no LLM needed
-      0.90–0.95 → warn, ask Nova Lite for confirmation
-      < 0.90   → new
+    Stage 2 (embedding)    — embed the NORMALIZED solution text and query
+                             Pinecone for similar vectors.
+
+    Stage 3 (thresholds)   — >= 0.97 → automatic duplicate, no Nova needed.
+                             0.90–0.97 → ask Nova for SAME_FIX / DIFFERENT_FIX.
+                             < 0.90 → new solution.
+
+    Stage 4 (Nova)         — final authority on ambiguous cases.
 
     Fails open: any exception returns is_duplicate=False so saves are never
     silently blocked.
     """
+    # Embed the NORMALIZED text so trivial formatting differences (dots, spaces,
+    # markdown) don't push the vector far from the canonical solution vector.
+    normalized_text = _normalize_solution_text(solution_text)
+    if not normalized_text:
+        logger.warning("[KnowledgeBase] Normalized solution text is empty — skipping semantic search")
+        return {"is_duplicate": False, "decision": "new", "reason": "empty_normalized", "duplicate_prompt": False}
+
     try:
-        logger.info("[KnowledgeBase] Duplicate detection started — project_name=%r group_key=%r", project_name, group_key)
+        logger.info(
+            "[KnowledgeBase] Semantic duplicate detection — project=%r group_key=%r",
+            project_name, group_key,
+        )
         from ai.embeddings import create_embedding
 
-        embedding = create_embedding(solution_text)
+        embedding = create_embedding(normalized_text)
         if embedding is None:
             logger.warning("[KnowledgeBase] Duplicate detection skipped — embedding unavailable")
             return {"is_duplicate": False, "decision": "new",
                     "reason": "embedding_unavailable", "duplicate_prompt": False}
 
-        logger.info("[KnowledgeBase] Titan embedding generated — length=%d", len(embedding))
+        logger.info("[KnowledgeBase] Embedding generated — length=%d", len(embedding))
         matches = query_similar(None, embedding, project_name, limit=limit, error_hash=None)
-        logger.info("[KnowledgeBase] Pinecone similarity search executed — matches=%d", len(matches))
+        logger.info("[KnowledgeBase] Pinecone returned %d matches", len(matches))
+
         for idx, match in enumerate(matches[:5], start=1):
             metadata = match.get("metadata") or {}
-            solution_id = metadata.get("solution_id") or match.get("id")
             score = max(float(match.get("score") or 0.0), 0.0)
             logger.info(
-                "[KnowledgeBase] Top %d semantic match: solution_id=%s score=%.4f metadata=%s",
-                idx, solution_id, score, metadata,
+                "[KnowledgeBase] Match %d: solution_id=%s score=%.4f",
+                idx, metadata.get("solution_id") or match.get("id"), score,
             )
+
         if not matches:
             return {"is_duplicate": False, "decision": "new",
                     "reason": "no_matches", "duplicate_prompt": False}
 
-        candidate       = None
+        # Find best candidate
+        candidate = None
         best_similarity = 0.0
         for match in matches:
-            metadata   = match.get("metadata") or {}
+            metadata = match.get("metadata") or {}
             if not metadata.get("solution_id"):
                 continue
-            similarity = max(float(match.get("score") or 0.0), 0.0)
-            logger.info("[KnowledgeBase] Similarity score for solution_id=%s: %.4f",
-                        metadata.get("solution_id"), similarity)
-            if similarity > best_similarity:
-                best_similarity = similarity
+            sim = max(float(match.get("score") or 0.0), 0.0)
+            if sim > best_similarity:
+                best_similarity = sim
                 candidate = match
 
         if not candidate:
@@ -242,40 +377,20 @@ def detect_duplicate_solution(
                 "usage_count":      meta.get("usage_count"),
             }
 
-        classification = classify_duplicate_solution(best_similarity)
+        logger.info(
+            "[KnowledgeBase] Best candidate: solution_id=%r similarity=%.4f",
+            candidate.get("id"), best_similarity,
+        )
 
-        # Tier 3: LLM confirmation at the 0.90–0.95 boundary
-        if classification["decision"] == "warn":
-            try:
-                logger.info("[KnowledgeBase] LLM confirmation triggered at boundary")
-                from ai.llm import generate_ai_response
-                nova_prompt = (
-                    "Are these two solutions functionally the same? "
-                    "Ignore wording differences. Answer only YES or NO.\n\n"
-                    f"Solution A: {solution_text}\n\n"
-                    f"Solution B: {existing_solution.get('solution') if existing_solution else ''}"
-                )
-                logger.info("[KnowledgeBase] Nova confirmation prompt sent")
-                nova_reply = (generate_ai_response(nova_prompt, max_tokens=64) or "").strip().lower()
-                logger.info("[KnowledgeBase] Nova confirmation reply: %r", nova_reply)
-                if "yes" in nova_reply:
-                    classification = {
-                        "is_duplicate": True, "decision": "duplicate",
-                        "severity": "high", "confidence": float(best_similarity),
-                    }
-            except Exception as exc:
-                logger.exception("[KnowledgeBase] Nova Lite confirmation failed: %s", exc)
+        # ── Stage 3: similarity thresholds ───────────────────────────────────
 
-        if classification["is_duplicate"]:
-            logger.info(
-                "[KnowledgeBase] Chosen duplicate solution_id=%s similarity=%.4f",
-                candidate.get("id"), best_similarity,
-            )
-            logger.info("[KnowledgeBase] Decision: MERGE WITH EXISTING")
+        # Auto-duplicate at >= 0.97 (tighter than before — eliminates near-identical vectors)
+        if best_similarity >= 0.97:
+            logger.info("[KnowledgeBase] Decision: AUTO_DUPLICATE (sim=%.4f >= 0.97)", best_similarity)
             return {
                 "is_duplicate":      True,
-                "decision":          classification["decision"],
-                "reason":            "similarity",
+                "decision":          "duplicate",
+                "reason":            "high_similarity",
                 "similarity":        best_similarity,
                 "solution_id":       candidate.get("id"),
                 "metadata":          candidate.get("metadata") or {},
@@ -283,24 +398,53 @@ def detect_duplicate_solution(
                 "duplicate_prompt":  True,
             }
 
+        # ── Stage 4: Nova final validation at 0.90–0.97 ──────────────────────
         if best_similarity >= 0.90:
             logger.info(
-                "[KnowledgeBase] Potential duplicate solution_id=%s similarity=%.4f",
-                candidate.get("id"), best_similarity,
+                "[KnowledgeBase] Ambiguous zone (%.4f) — asking Nova for SAME_FIX / DIFFERENT_FIX",
+                best_similarity,
             )
-            logger.info("[KnowledgeBase] Decision: CREATE NEW (warn boundary)")
-            return {
-                "is_duplicate":      False,
-                "decision":          "warn",
-                "reason":            "similarity",
-                "similarity":        best_similarity,
-                "solution_id":       candidate.get("id"),
-                "metadata":          candidate.get("metadata") or {},
-                "existing_solution": existing_solution,
-                "duplicate_prompt":  True,
-            }
-        logger.info("[KnowledgeBase] Decision: CREATE NEW")
+            existing_text = (existing_solution or {}).get("solution") or ""
+            nova_verdict = _nova_same_fix_check(
+                candidate_text  = solution_text,
+                existing_text   = existing_text,
+                error_context   = error_context,
+            )
 
+            if nova_verdict == "SAME_FIX":
+                logger.info("[KnowledgeBase] Nova: SAME_FIX → duplicate")
+                return {
+                    "is_duplicate":      True,
+                    "decision":          "duplicate",
+                    "reason":            "nova_same_fix",
+                    "similarity":        best_similarity,
+                    "solution_id":       candidate.get("id"),
+                    "metadata":          candidate.get("metadata") or {},
+                    "existing_solution": existing_solution,
+                    "duplicate_prompt":  True,
+                }
+            elif nova_verdict is None:
+                # Nova unavailable — surface as a warning prompt for the developer
+                logger.warning(
+                    "[KnowledgeBase] Nova unavailable — surfacing duplicate_prompt for developer decision"
+                )
+                return {
+                    "is_duplicate":      False,
+                    "decision":          "warn",
+                    "reason":            "nova_unavailable",
+                    "similarity":        best_similarity,
+                    "solution_id":       candidate.get("id"),
+                    "metadata":          candidate.get("metadata") or {},
+                    "existing_solution": existing_solution,
+                    "duplicate_prompt":  True,
+                }
+            else:
+                # DIFFERENT_FIX — new solution allowed
+                logger.info("[KnowledgeBase] Nova: DIFFERENT_FIX → new solution")
+
+        logger.info(
+            "[KnowledgeBase] Decision: NEW (similarity=%.4f below all thresholds)", best_similarity
+        )
         return {
             "is_duplicate":  False,
             "decision":      "new",
@@ -485,8 +629,13 @@ def insert_solution(
             logger.info("[Duplicate] Exact duplicate found — solution_id=%s", exact_duplicate.get("id"))
             return payload
 
-        # Tier 2: semantic (Bedrock + Pinecone) ───────────────────────────────
-        duplicate_check = detect_duplicate_solution(solution, group_key, canonical_project)
+        # Tier 2: semantic + Nova four-stage pipeline ────────────────────────
+        duplicate_check = detect_duplicate_solution(
+            solution,
+            group_key,
+            canonical_project,
+            error_context=raw_error_text or None,
+        )
         if duplicate_check.get("duplicate_prompt"):
             es = duplicate_check.get("existing_solution") or {}
             payload = {
