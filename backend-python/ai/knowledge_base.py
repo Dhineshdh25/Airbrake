@@ -728,28 +728,50 @@ def get_top_solutions(
     project_name: Optional[str] = None,
     limit: int = 5,
     offset: int = 0,
-    # Legacy param accepted but ignored — kept for call-site compatibility
     error_hash: Optional[str] = None,
+    error_group_name: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
-    """Return paginated solutions for a project + error message group.
+    """Return paginated solutions using three retrieval tiers.
 
-    Returns ONE card per solution family (identified by log_ref_id).  The
-    representative version shown is the "best" one in the family, chosen by:
-      1. Highest usage_count
-      2. Highest confidence_score (tiebreak)
-      3. Newest created_at (tiebreak)
+    TIER 1 — Exact group match
+        Resolves the solution group_key from the error message (AI semantic →
+        normalized text → legacy hash) and returns the best version per family.
+        match_source = "exact_match"
 
-    This means Improve never adds a second top-level card — the new version
-    appears only inside the Versions panel, unless it becomes the best version.
+    TIER 2 — Semantic group fallback (only when TIER 1 returns nothing)
+        Finds all solution group_keys that were ever written for log rows sharing
+        the same taxonomy group (error_group_name).  Returns the top solutions
+        from those groups, ranked by confidence DESC / usage DESC.
+        match_source = "same_semantic_group"
 
-    Group key resolution order (first match wins):
-      1. AI semantic match — find_matching_solution_group() asks Nova Lite.
-      2. Normalized text key — derive_solution_group_key(error_message).
-      3. Legacy fallback — error_hash treated as the group key directly.
+    TIER 3 — Cross-project Pinecone similarity (only when TIER 2 also returns nothing)
+        Embeds the error message and queries Pinecone for similar solution vectors,
+        project-scoped.  Falls back to an Aurora cosine scan when Pinecone is
+        unavailable.
+        match_source = "semantic_similarity"
+
+    Every returned row carries a `match_source` field so the frontend can display
+    "✓ Exact Match", "✓ Same Group (Programming Errors)", or "✓ Similar Error".
+
+    Returns ONE card per solution family (best version per log_ref_id).
     """
+
+    def _best_per_family(rows: List[Dict[str, Any]], source: str) -> List[Dict[str, Any]]:
+        """Deduplicate to one best row per solution family and stamp match_source."""
+        seen: set = set()
+        result: List[Dict[str, Any]] = []
+        for r in rows:
+            fid = r.get("log_ref_id") or r.get("id")
+            if fid not in seen:
+                seen.add(fid)
+                stamped = dict(r)
+                stamped["match_source"] = source
+                result.append(stamped)
+        return result
+
+    # ── TIER 1: exact group match ─────────────────────────────────────────────
     group_key: Optional[str] = None
 
-    # ── Step 1: AI semantic match ─────────────────────────────────────────────
     if error_message and error_message.strip() and project_name:
         try:
             from ai.semantic_group_matcher import find_matching_solution_group
@@ -757,73 +779,218 @@ def get_top_solutions(
             if ai_key:
                 group_key = ai_key
                 logger.info(
-                    "[KnowledgeBase] get_top_solutions resolved via AI match: "
+                    "[KnowledgeBase] get_top_solutions TIER1 AI match: "
                     "group_key=%r project=%r", group_key, project_name,
                 )
         except Exception as exc:
             logger.exception(
-                "[KnowledgeBase] get_top_solutions AI match failed — falling back: %s", exc
+                "[KnowledgeBase] get_top_solutions AI match failed: %s", exc
             )
 
-    # ── Step 2: normalized text key ───────────────────────────────────────────
     if not group_key and error_message and error_message.strip():
         group_key = derive_solution_group_key(error_message)
 
-    # ── Step 3: legacy hash fallback ──────────────────────────────────────────
     if not group_key and error_hash:
         group_key = error_hash
         logger.warning(
-            "[KnowledgeBase] get_top_solutions: no error_message supplied, "
+            "[KnowledgeBase] get_top_solutions TIER1: no error_message, "
             "falling back to error_hash=%r", error_hash
         )
 
-    if not group_key:
-        return [], 0
+    tier1_rows: List[Dict[str, Any]] = []
+    if group_key:
+        conditions, params = _group_key_conditions(group_key, project_name)
+        where = " AND ".join(conditions)
+        raw = query(
+            f"SELECT id, solution, created_by, created_at, usage_count, "
+            f"confidence_score, version, log_ref_id "
+            f"FROM {TABLE} WHERE {where} "
+            f"ORDER BY usage_count DESC NULLS LAST, "
+            f"         confidence_score DESC NULLS LAST, "
+            f"         created_at DESC NULLS LAST",
+            tuple(params),
+        )
+        tier1_rows = _best_per_family(raw, "exact_match")
 
-    conditions, params = _group_key_conditions(group_key, project_name)
-    where = " AND ".join(conditions)
+    if tier1_rows:
+        total = len(tier1_rows)
+        paginated = tier1_rows[offset: offset + limit]
+        logger.info(
+            "[KnowledgeBase] get_top_solutions TIER1 returning %d/%d families",
+            len(paginated), total,
+        )
+        return paginated, total
 
-    # Count distinct families (not rows) so pagination is family-accurate.
-    total_rows = query(
-        f"SELECT COUNT(DISTINCT log_ref_id) AS total FROM {TABLE} WHERE {where}",
-        tuple(params),
-    )
-    total = int(total_rows[0]["total"]) if total_rows else 0
+    # ── TIER 2: same taxonomy group ───────────────────────────────────────────
+    # When no exact group_key match exists, search for solutions that were saved
+    # for any error in the same taxonomy category (error_group_name).
+    tier2_rows: List[Dict[str, Any]] = []
+    if error_group_name and project_name:
+        try:
+            # Find all solution group_keys that belong to log rows in this
+            # taxonomy category.  Solutions are stored with
+            # error_hash = group_key — which is the MD5 of the normalized error
+            # text, not the taxonomy category.  We find group_keys indirectly:
+            # look at log rows in the same category, get their distinct
+            # error_hash values (= the group_keys the solutions were saved under).
+            group_key_rows = query(
+                f"SELECT DISTINCT error_hash AS gk "
+                f"FROM {TABLE} "
+                f"WHERE row_type = 'log' "
+                f"  AND error_group_name = %s "
+                f"  AND error_hash IS NOT NULL "
+                f"  AND LOWER(project_name) = LOWER(%s) "
+                f"LIMIT 50",
+                (error_group_name, project_name),
+            )
+            candidate_keys = [r["gk"] for r in group_key_rows if r.get("gk")]
 
-    # Return the best representative version per family.
-    # "Best" = highest usage_count, then confidence_score, then newest created_at.
-    #
-    # We fetch all rows for the group, then pick the best per family in Python.
-    # This avoids DISTINCT ON (PostgreSQL-only) and window functions that may
-    # not be available on Aurora DSQL.  The total row count for a single error
-    # group is expected to be small (typically < 50), so the in-process grouping
-    # adds no meaningful overhead.
-    all_rows = query(
-        f"SELECT id, solution, created_by, created_at, usage_count, "
-        f"confidence_score, version, log_ref_id "
-        f"FROM {TABLE} WHERE {where} "
-        f"ORDER BY usage_count DESC NULLS LAST, "
-        f"         confidence_score DESC NULLS LAST, "
-        f"         created_at DESC NULLS LAST",
-        tuple(params),
-    )
+            if candidate_keys:
+                placeholders = ", ".join(["%s"] * len(candidate_keys))
+                t2_raw = query(
+                    f"SELECT id, solution, created_by, created_at, usage_count, "
+                    f"confidence_score, version, log_ref_id "
+                    f"FROM {TABLE} "
+                    f"WHERE row_type = 'solution' "
+                    f"  AND error_hash IN ({placeholders}) "
+                    f"  AND LOWER(project_name) = LOWER(%s) "
+                    f"ORDER BY confidence_score DESC NULLS LAST, "
+                    f"         usage_count DESC NULLS LAST, "
+                    f"         created_at DESC NULLS LAST",
+                    tuple(candidate_keys + [project_name]),
+                )
+                group_label = error_group_name
+                tier2_rows = _best_per_family(
+                    t2_raw, f"same_group:{group_label}"
+                )
+                logger.info(
+                    "[KnowledgeBase] get_top_solutions TIER2 group=%r "
+                    "candidate_keys=%d families=%d",
+                    error_group_name, len(candidate_keys), len(tier2_rows),
+                )
+        except Exception as exc:
+            logger.exception(
+                "[KnowledgeBase] get_top_solutions TIER2 failed: %s", exc
+            )
 
-    # Group by family (log_ref_id) and keep only the first (best) row per family.
-    seen_families: set = set()
-    best_per_family: List[Dict[str, Any]] = []
-    for r in all_rows:
-        fid = r.get("log_ref_id") or r.get("id")
-        if fid not in seen_families:
-            seen_families.add(fid)
-            best_per_family.append(r)
+    if tier2_rows:
+        total = len(tier2_rows)
+        paginated = tier2_rows[offset: offset + limit]
+        logger.info(
+            "[KnowledgeBase] get_top_solutions TIER2 returning %d/%d families",
+            len(paginated), total,
+        )
+        return paginated, total
 
-    # Apply offset/limit to the deduplicated list
-    paginated = best_per_family[offset: offset + limit]
+    # ── TIER 3: Pinecone semantic similarity ──────────────────────────────────
+    # Last resort: embed the error message and find similar solutions via Pinecone
+    # or Aurora cosine scan.  Project-scoped.
+    tier3_rows: List[Dict[str, Any]] = []
+    if error_message and error_message.strip() and project_name:
+        try:
+            from ai.embeddings import create_embedding, cosine_similarity as _cos
+            from ai.embeddings import EMBEDDING_DIM
+            query_vec = create_embedding(error_message.strip())
+            if query_vec:
+                # Try Pinecone first
+                try:
+                    from ai.pinecone_service import query_similar
+                    matches = query_similar(
+                        solution_id=None,
+                        embedding=query_vec,
+                        project_name=project_name,
+                        limit=20,
+                        error_hash=None,
+                    )
+                    if matches:
+                        sol_ids = [m.get("id") for m in matches if m.get("id")]
+                        if sol_ids:
+                            ph = ", ".join(["%s"] * len(sol_ids))
+                            t3_raw = query(
+                                f"SELECT id, solution, created_by, created_at, usage_count, "
+                                f"confidence_score, version, log_ref_id "
+                                f"FROM {TABLE} "
+                                f"WHERE row_type = 'solution' "
+                                f"  AND id IN ({ph}) "
+                                f"  AND LOWER(project_name) = LOWER(%s)",
+                                tuple(sol_ids + [project_name]),
+                            )
+                            # Attach similarity scores then sort
+                            score_map = {
+                                m.get("id"): float(m.get("score") or 0.0)
+                                for m in matches if m.get("id")
+                            }
+                            t3_raw_sorted = sorted(
+                                t3_raw,
+                                key=lambda r: score_map.get(r.get("id"), 0.0),
+                                reverse=True,
+                            )
+                            for r in t3_raw_sorted:
+                                r["_similarity"] = score_map.get(r.get("id"), 0.0)
+                            tier3_rows = _best_per_family(t3_raw_sorted, "semantic_similarity")
+                            logger.info(
+                                "[KnowledgeBase] get_top_solutions TIER3 Pinecone: %d families",
+                                len(tier3_rows),
+                            )
+                except Exception as _pexc:
+                    logger.warning(
+                        "[KnowledgeBase] get_top_solutions TIER3 Pinecone failed — "
+                        "trying Aurora scan: %s", _pexc,
+                    )
 
+                # Aurora cosine scan fallback when Pinecone returned nothing
+                if not tier3_rows:
+                    try:
+                        scan_rows = query(
+                            f"SELECT id, solution, created_by, created_at, usage_count, "
+                            f"confidence_score, version, log_ref_id, embedding "
+                            f"FROM {TABLE} "
+                            f"WHERE row_type = 'solution' "
+                            f"  AND embedding IS NOT NULL "
+                            f"  AND LOWER(project_name) = LOWER(%s) "
+                            f"ORDER BY confidence_score DESC NULLS LAST "
+                            f"LIMIT 200",
+                            (project_name,),
+                        )
+                        import json as _json
+                        scored = []
+                        for r in scan_rows:
+                            raw_emb = r.get("embedding")
+                            emb = None
+                            if isinstance(raw_emb, str):
+                                try:
+                                    emb = _json.loads(raw_emb)
+                                except Exception:
+                                    pass
+                            elif isinstance(raw_emb, list):
+                                emb = raw_emb
+                            if emb and len(emb) == EMBEDDING_DIM:
+                                sim = _cos(query_vec, emb)
+                                if sim >= 0.30:
+                                    scored.append((sim, r))
+                        scored.sort(key=lambda x: x[0], reverse=True)
+                        t3_aurora = [r for _, r in scored[:limit * 3]]
+                        for i, (sim, r) in enumerate(scored[:limit * 3]):
+                            t3_aurora[i]["_similarity"] = sim
+                        tier3_rows = _best_per_family(t3_aurora, "semantic_similarity")
+                        logger.info(
+                            "[KnowledgeBase] get_top_solutions TIER3 Aurora: %d families",
+                            len(tier3_rows),
+                        )
+                    except Exception as _aexc:
+                        logger.exception(
+                            "[KnowledgeBase] get_top_solutions TIER3 Aurora failed: %s", _aexc,
+                        )
+        except Exception as exc:
+            logger.exception(
+                "[KnowledgeBase] get_top_solutions TIER3 failed: %s", exc
+            )
+
+    total = len(tier3_rows)
+    paginated = tier3_rows[offset: offset + limit]
     logger.info(
-        "[KnowledgeBase] get_top_solutions group_key=%r project=%r "
-        "families=%d shown=%d (best version per family)",
-        group_key, project_name, total, len(paginated),
+        "[KnowledgeBase] get_top_solutions TIER3 returning %d/%d (or 0 if no results)",
+        len(paginated), total,
     )
     return paginated, total
 

@@ -4148,10 +4148,12 @@ def get_break_detail(error_hash):
         print(f"[req:{request_id}] [Breaks:detail] Parameters tuple: {tuple(params)}")
         print(f"[req:{request_id}] [Breaks:detail] Param count: {len(params)}")
 
-        # Include `id` so we can assign stable occurrence numbers per raw row
+        # Include `id` and `error_group_name` so we can assign stable occurrence numbers
+        # and pass the taxonomy group to solution retrieval for semantic fallback.
         sql = (
             "SELECT id, project_name, error AS error_message, error_detail, error_hash, "
-            "failure_count, timestamp, error_status, reopened_at, file_name "
+            "failure_count, timestamp, error_status, reopened_at, file_name, "
+            "error_group_name "
             f"FROM {TABLE} "
             f"WHERE {where_clause} "
             "ORDER BY timestamp DESC"
@@ -4216,16 +4218,41 @@ def get_break_detail(error_hash):
         last_seen = max(all_ts) if all_ts else None
         file_name = next((r.get("file_name") for r in error_rows if r.get("file_name")), first.get("file_name"))
 
-        has_resolved = any(r.get("error_status") == "resolved" for r in error_rows)
-        has_reopened = any(r.get("error_status") == "reopened" for r in error_rows)
-        if has_resolved:
-            status = "resolved"
-        elif has_reopened:
-            status = "regression"
-        elif occurrence_count == 1:
-            status = "new"
+        # ── Status: use the SPECIFIC row when log_id supplied, not group aggregate ──
+        # This is the critical fix: when the user opens a specific occurrence,
+        # its error_status must come from that row alone.  Aggregating with
+        # any(... == "resolved") causes one resolved row to make the entire
+        # modal appear resolved.
+        log_id_param = request.args.get('log_id', '').strip() or None
+        specific_row = None
+        if log_id_param:
+            specific_row = next((r for r in error_rows if r.get("id") == log_id_param), None)
+
+        if specific_row:
+            # Status from the specific row only
+            row_status = specific_row.get("error_status") or "open"
+            if row_status == "resolved":
+                status = "resolved"
+            elif row_status == "reopened":
+                status = "regression"
+            elif occurrence_count == 1:
+                status = "new"
+            else:
+                status = "existing"
+            # Use specific row's timestamps for resolved_at / reopened_at
+            first = specific_row
         else:
-            status = "existing"
+            # No specific row — derive status from the group (backward compat)
+            has_resolved = any(r.get("error_status") == "resolved" for r in error_rows)
+            has_reopened = any(r.get("error_status") == "reopened" for r in error_rows)
+            if has_resolved:
+                status = "resolved"
+            elif has_reopened:
+                status = "regression"
+            elif occurrence_count == 1:
+                status = "new"
+            else:
+                status = "existing"
 
         # Assign stable occurrence_number to each raw row based on chronological order
         # Chronological = oldest first. Compute cumulative counts so rows keep their
@@ -4537,6 +4564,7 @@ def get_break_detail(error_hash):
             "error_detail": first.get("error_detail"),
             "parsed_stacktrace": parsed_stacktrace,
             "error_hash": error_hash,
+            "error_group_name": first.get("error_group_name") or None,
             "occurrence_count": occurrence_count,
             "first_seen": first_seen,
             "status": status,
@@ -4782,21 +4810,24 @@ def delete_solution_version_route(solution_id, version_id):
 def get_top_solutions_route():
     # Primary key: error_message (normalized in get_top_solutions).
     # error_hash accepted for backward-compat but ignored when error_message is present.
-    error_message = request.args.get("error_message", "").strip()
-    error_hash    = request.args.get("error_hash", "").strip()
-    project_name  = request.args.get("project_name")
-    limit         = int(request.args.get("limit", "5"))
-    offset        = int(request.args.get("offset", "0"))
+    # error_group_name enables the semantic-group fallback tier.
+    error_message    = request.args.get("error_message", "").strip()
+    error_hash       = request.args.get("error_hash", "").strip()
+    error_group_name = request.args.get("error_group_name", "").strip() or None
+    project_name     = request.args.get("project_name")
+    limit            = int(request.args.get("limit", "5"))
+    offset           = int(request.args.get("offset", "0"))
 
     if not error_message and not error_hash:
         return jsonify({"error": "error_message or error_hash is required"}), 400
     try:
         rows, total = get_top_solutions(
-            error_message=error_message,
-            project_name=project_name,
-            limit=limit,
-            offset=offset,
-            error_hash=error_hash or None,
+            error_message    = error_message,
+            project_name     = project_name,
+            limit            = limit,
+            offset           = offset,
+            error_hash       = error_hash or None,
+            error_group_name = error_group_name,
         )
         return jsonify({"solutions": rows, "total": total})
     except Exception as e:
@@ -5357,6 +5388,7 @@ def list_error_groups():
 
     Returns all distinct semantic groups with occurrence counts.
     Cross-project by default; pass project_name to scope to one project.
+    Groups are always a subset of the fixed taxonomy.
     """
     project_name = request.args.get("project_name", "").strip() or None
     try:
@@ -5365,6 +5397,22 @@ def list_error_groups():
         return jsonify({"groups": serialize_rows(rows)})
     except Exception as e:
         logger.exception("[ErrorGroups] list failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/error-groups/taxonomy", methods=["GET"])
+def get_error_taxonomy():
+    """
+    GET /api/error-groups/taxonomy
+
+    Returns the full fixed taxonomy: all 18 predefined group names and their stable IDs.
+    Useful for the frontend to render the complete list even before any errors are classified.
+    """
+    try:
+        from ai.error_grouper import get_taxonomy
+        return jsonify({"taxonomy": get_taxonomy()})
+    except Exception as e:
+        logger.exception("[ErrorGroups] taxonomy failed: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
