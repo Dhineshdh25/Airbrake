@@ -10,7 +10,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { apiFetch } from '../lib/api';
+import { apiFetch, API_BASE_URL } from '../lib/api';
 
 interface JiraStatusResponse {
   connected: boolean;
@@ -82,9 +82,8 @@ export function JiraSettings() {
   }, []);
 
   function handleConnect() {
-    // The backend /api/jira/login returns a redirect to Atlassian.
-    // We navigate the whole page so the OAuth round-trip works correctly.
-    window.location.href = '/api/jira/login';
+    // Must go directly to Lambda, not S3 (the frontend host)
+    window.location.href = `${API_BASE_URL}/api/jira/login`;
   }
 
   async function handleDisconnect() {

@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from 'react';
-import { apiFetch, ApiError } from '../lib/api';
+import { apiFetch, ApiError, API_BASE_URL } from '../lib/api';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -484,9 +484,9 @@ export function ErrorDetailModal({
 
   // ── Jira: create ticket ───────────────────────────────────────────────────
   async function handleCreateJiraTicket() {
-    // If not connected, redirect to OAuth login flow
+    // If not connected, redirect to OAuth login flow — must go to Lambda, not S3
     if (!jiraConnected) {
-      window.location.href = '/api/jira/login';
+      window.location.href = `${API_BASE_URL}/api/jira/login`;
       return;
     }
 
@@ -526,7 +526,7 @@ export function ErrorDetailModal({
           msg = 'Your Jira session expired. Reconnecting…';
           setJiraError(msg);
           setJiraStatus('error');
-          setTimeout(() => { window.location.href = '/api/jira/login'; }, 1500);
+          setTimeout(() => { window.location.href = `${API_BASE_URL}/api/jira/login`; }, 1500);
           return;
         }
         if (e.status === 403 || e.status === 502) {
