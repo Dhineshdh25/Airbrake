@@ -531,7 +531,7 @@ exports.app.get('/api/projects/:name/logs', async (req, res) => {
             ...r,
             isResolved: r.error && r.error !== '' && r.error_status === 'resolved',
         }));
-        console.log(`[DEBUG] Project: ${projectName}, Page: ${page}/${totalPages}, Date Filter: ${from ? `from ${from}` : ''} ${to ? `to ${to}` : ''}`);
+        console.log(`[DEBUG] Project: ${projectName}, Page: ${page}/${totalPages}${from ? `, From: ${from}` : ''}${to ? `, To: ${to}` : ''}`);
         console.log(`  - Total records: ${totalRecords}`);
         console.log(`  - Files with active errors (this page): ${activeLogs.length}`);
         console.log(`  - Files with resolved errors (this page): ${resolvedLogs.length}`);
