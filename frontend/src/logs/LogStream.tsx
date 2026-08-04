@@ -286,8 +286,13 @@ function SectionHeader({ title, count, color, collapsed, onToggle }: {
 
 function ProjectModal({ project, onClose }: { project: Project; onClose: () => void }) {
   const [stats, setStats] = useState<ProjectStats | null>(null);
+  const [failedStats, setFailedStats] = useState<ProjectStats | null>(null);
+  const [resolvedStats, setResolvedStats] = useState<ProjectStats | null>(null);
+  const [successStats, setSuccessStats] = useState<ProjectStats | null>(null);
   const [loading, setLoading] = useState(true);
-  const [currentPage, setCurrentPage] = useState(1);
+  const [failedPage, setFailedPage] = useState(1);
+  const [resolvedPage, setResolvedPage] = useState(1);
+  const [successPage, setSuccessPage] = useState(1);
   const [failedCollapsed, setFailedCollapsed] = useState(false);
   const [resolvedCollapsed, setResolvedCollapsed] = useState(true);
   const [successCollapsed, setSuccessCollapsed] = useState(true);
@@ -298,10 +303,7 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
   const [customTo, setCustomTo] = useState('');
   const [customApplyTick, setCustomApplyTick] = useState(0);
 
-  useEffect(() => {
-    setLoading(true);
-
-    // Build date filter params based on time period
+  const buildDateParams = () => {
     let dateParams = '';
     if (timePeriod === 'daily') {
       const today = new Date();
@@ -309,48 +311,87 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
       const tomorrow = new Date(today);
       tomorrow.setDate(tomorrow.getDate() + 1);
       dateParams = `&from=${today.toISOString()}&to=${tomorrow.toISOString()}`;
-      console.log('[LogStream] Daily filter:', { from: today.toISOString(), to: tomorrow.toISOString() });
     } else if (timePeriod === 'weekly') {
       const weekAgo = new Date();
       weekAgo.setDate(weekAgo.getDate() - 7);
       weekAgo.setHours(0, 0, 0, 0);
       const now = new Date();
       dateParams = `&from=${weekAgo.toISOString()}&to=${now.toISOString()}`;
-      console.log('[LogStream] Weekly filter:', { from: weekAgo.toISOString(), to: now.toISOString() });
     } else if (timePeriod === 'custom' && customFrom && customTo && customApplyTick > 0) {
       const fromDate = new Date(customFrom);
       fromDate.setHours(0, 0, 0, 0);
       const toDate = new Date(customTo);
       toDate.setHours(23, 59, 59, 999);
       dateParams = `&from=${fromDate.toISOString()}&to=${toDate.toISOString()}`;
-      console.log('[LogStream] Custom filter:', { from: fromDate.toISOString(), to: toDate.toISOString() });
     }
+    return dateParams;
+  };
 
-    const apiUrl = `/api/projects/${encodeURIComponent(project.name)}/logs?page=${currentPage}&limit=50${dateParams}`;
-    console.log('[LogStream] Fetching:', apiUrl);
+  useEffect(() => {
+    setLoading(true);
+    const dateParams = buildDateParams();
+    const apiUrl = `/api/projects/${encodeURIComponent(project.name)}/logs?page=1&limit=1${dateParams}`;
 
     apiFetch(apiUrl)
       .then((r) => r.json())
-      .then((d) => {
-        console.log('[LogStream] Response:', d);
-        setStats(d as ProjectStats);
-        setLoading(false);
-      })
-      .catch((err) => {
-        console.error('[LogStream] Error:', err);
-        setLoading(false);
-      });
-  }, [project.name, currentPage, timePeriod, customApplyTick]);
+      .then((d) => setStats(d as ProjectStats))
+      .catch((err) => console.error('[LogStream] Stats error:', err))
+      .finally(() => setLoading(false));
+  }, [project.name, timePeriod, customApplyTick]);
 
-  // Filter logs by status - no slicing, show all in current page
-  const failedLogs = stats?.logs?.filter((r) => !!r.error && !r.isResolved) ?? [];
-  const resolvedLogs = stats?.logs?.filter((r) => !!r.error && r.isResolved) ?? [];
-  const successLogs = stats?.logs?.filter((r) => !r.error) ?? [];
+  const fetchSectionStats = (status: string, page: number, setter: React.Dispatch<React.SetStateAction<ProjectStats | null>>) => {
+    setLoading(true);
+    const dateParams = buildDateParams();
+    const apiUrl = `/api/projects/${encodeURIComponent(project.name)}/logs?status=${status}&page=${page}&limit=5${dateParams}`;
+
+    apiFetch(apiUrl)
+      .then((r) => r.json())
+      .then((d) => setter(d as ProjectStats))
+      .catch((err) => console.error(`[LogStream] ${status} section error:`, err))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    setFailedPage(1);
+    setResolvedPage(1);
+    setSuccessPage(1);
+  }, [project.name, timePeriod, customApplyTick]);
+
+  const paginationButtonStyle = (enabled: boolean) => ({
+    padding: '6px 12px',
+    borderRadius: 6,
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: enabled ? 'pointer' : 'not-allowed',
+    background: enabled ? 'rgba(99,102,241,0.1)' : 'rgba(255,255,255,0.05)',
+    border: `1px solid ${enabled ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.1)'}`,
+    color: enabled ? '#818cf8' : '#475569',
+  });
+
+  useEffect(() => {
+    fetchSectionStats('active', failedPage, setFailedStats);
+  }, [project.name, timePeriod, customApplyTick, failedPage]);
+
+  useEffect(() => {
+    fetchSectionStats('resolved', resolvedPage, setResolvedStats);
+  }, [project.name, timePeriod, customApplyTick, resolvedPage]);
+
+  useEffect(() => {
+    fetchSectionStats('success', successPage, setSuccessStats);
+  }, [project.name, timePeriod, customApplyTick, successPage]);
+
+  const failedLogs = failedStats?.logs ?? [];
+  const resolvedLogs = resolvedStats?.logs ?? [];
+  const successLogs = successStats?.logs ?? [];
 
   // Count totals
   const totalFailedLogs = failedLogs.length;
   const totalResolvedLogs = resolvedLogs.length;
   const totalSuccessLogs = successLogs.length;
+
+  const hasFailureTotals = totalFailedLogs > 0;
+  const hasResolvedTotals = totalResolvedLogs > 0;
+  const hasSuccessTotals = totalSuccessLogs > 0;
 
   // Aggregate token/cost totals if available
   const totalInputTokens = stats?.logs?.reduce((s, r) => s + (r.input_tokens ?? 0), 0) ?? 0;
@@ -395,7 +436,7 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
             <div>
               <div style={{ fontSize: 16, fontWeight: 700, color: '#f1f5f9' }}>{project.name}</div>
               <div style={{ fontSize: 11, color: '#475569', marginTop: 2 }}>
-                {stats?.exists ? `${stats.total} total records` : 'Loading…'}
+                {stats?.exists ? `${stats.total} total files` : 'Loading…'}
               </div>
             </div>
           </div>
@@ -436,7 +477,9 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
                     key={period}
                     onClick={() => {
                       setTimePeriod(period);
-                      setCurrentPage(1); // Reset to first page when changing time period
+                      setFailedPage(1);
+                      setResolvedPage(1);
+                      setSuccessPage(1);
                     }}
                     style={{
                       padding: '5px 12px', borderRadius: 6, fontSize: 11, fontWeight: 600,
@@ -479,7 +522,9 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
                   <button
                     onClick={() => {
                       setCustomApplyTick((t) => t + 1);
-                      setCurrentPage(1);
+                      setFailedPage(1);
+                      setResolvedPage(1);
+                      setSuccessPage(1);
                     }}
                     disabled={!customFrom || !customTo}
                     style={{
@@ -542,11 +587,11 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
               <SuccessBar success={stats.success} total={stats.filesProcessed} />
 
               {/* ── Failed files ── */}
-              {totalFailedLogs > 0 && (
+              {failedStats && (
                 <div style={{ marginBottom: 16 }}>
                   <SectionHeader
                     title="Failed Files"
-                    count={totalFailedLogs}
+                    count={failedStats.pagination?.totalRecords ?? 0}
                     color="#f87171"
                     collapsed={failedCollapsed}
                     onToggle={() => setFailedCollapsed((v) => !v)}
@@ -556,15 +601,29 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
                       {failedLogs.map((row, i) => <FileCard key={i} row={row} />)}
                     </div>
                   )}
+                  {failedStats.pagination && failedStats.pagination.totalPages > 1 && (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.07)' }}>
+                      <div style={{ fontSize: 12, color: '#94a3b8' }}>
+                        Page {failedStats.pagination.currentPage} of {failedStats.pagination.totalPages}
+                        <span style={{ marginLeft: 8, color: '#64748b' }}>(showing {failedLogs.length})</span>
+                      </div>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button onClick={() => setFailedPage(1)} disabled={!failedStats.pagination.hasPreviousPage} style={paginationButtonStyle(failedStats.pagination.hasPreviousPage)}>First</button>
+                        <button onClick={() => setFailedPage(failedStats.pagination.currentPage - 1)} disabled={!failedStats.pagination.hasPreviousPage} style={paginationButtonStyle(failedStats.pagination.hasPreviousPage)}>← Previous</button>
+                        <button onClick={() => setFailedPage(failedStats.pagination.currentPage + 1)} disabled={!failedStats.pagination.hasNextPage} style={paginationButtonStyle(failedStats.pagination.hasNextPage)}>Next →</button>
+                        <button onClick={() => setFailedPage(failedStats.pagination.totalPages)} disabled={!failedStats.pagination.hasNextPage} style={paginationButtonStyle(failedStats.pagination.hasNextPage)}>Last</button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
               {/* ── Resolved files ── */}
-              {totalResolvedLogs > 0 && (
+              {resolvedStats && (
                 <div style={{ marginBottom: 16 }}>
                   <SectionHeader
                     title="Resolved Files"
-                    count={totalResolvedLogs}
+                    count={resolvedStats.pagination?.totalRecords ?? 0}
                     color="#8b5cf6"
                     collapsed={resolvedCollapsed}
                     onToggle={() => setResolvedCollapsed((v) => !v)}
@@ -574,15 +633,29 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
                       {resolvedLogs.map((row, i) => <FileCard key={i} row={row} />)}
                     </div>
                   )}
+                  {resolvedStats.pagination && resolvedStats.pagination.totalPages > 1 && (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.07)' }}>
+                      <div style={{ fontSize: 12, color: '#94a3b8' }}>
+                        Page {resolvedStats.pagination.currentPage} of {resolvedStats.pagination.totalPages}
+                        <span style={{ marginLeft: 8, color: '#64748b' }}>(showing {resolvedLogs.length})</span>
+                      </div>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button onClick={() => setResolvedPage(1)} disabled={!resolvedStats.pagination.hasPreviousPage} style={paginationButtonStyle(resolvedStats.pagination.hasPreviousPage)}>First</button>
+                        <button onClick={() => setResolvedPage(resolvedStats.pagination.currentPage - 1)} disabled={!resolvedStats.pagination.hasPreviousPage} style={paginationButtonStyle(resolvedStats.pagination.hasPreviousPage)}>← Previous</button>
+                        <button onClick={() => setResolvedPage(resolvedStats.pagination.currentPage + 1)} disabled={!resolvedStats.pagination.hasNextPage} style={paginationButtonStyle(resolvedStats.pagination.hasNextPage)}>Next →</button>
+                        <button onClick={() => setResolvedPage(resolvedStats.pagination.totalPages)} disabled={!resolvedStats.pagination.hasNextPage} style={paginationButtonStyle(resolvedStats.pagination.hasNextPage)}>Last</button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
               {/* ── Successful files ── */}
-              {totalSuccessLogs > 0 && (
+              {successStats && (
                 <div style={{ marginBottom: 8 }}>
                   <SectionHeader
                     title="Successful Files"
-                    count={totalSuccessLogs}
+                    count={successStats.pagination?.totalRecords ?? 0}
                     color="#34d399"
                     collapsed={successCollapsed}
                     onToggle={() => setSuccessCollapsed((v) => !v)}
@@ -590,6 +663,20 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
                   {!successCollapsed && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                       {successLogs.map((row, i) => <FileCard key={i} row={row} />)}
+                    </div>
+                  )}
+                  {successStats.pagination && successStats.pagination.totalPages > 1 && !successCollapsed && (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.07)' }}>
+                      <div style={{ fontSize: 12, color: '#94a3b8' }}>
+                        Page {successStats.pagination.currentPage} of {successStats.pagination.totalPages}
+                        <span style={{ marginLeft: 8, color: '#64748b' }}>(showing {successLogs.length})</span>
+                      </div>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button onClick={() => setSuccessPage(1)} disabled={!successStats.pagination.hasPreviousPage} style={paginationButtonStyle(successStats.pagination.hasPreviousPage)}>First</button>
+                        <button onClick={() => setSuccessPage(successStats.pagination.currentPage - 1)} disabled={!successStats.pagination.hasPreviousPage} style={paginationButtonStyle(successStats.pagination.hasPreviousPage)}>← Previous</button>
+                        <button onClick={() => setSuccessPage(successStats.pagination.currentPage + 1)} disabled={!successStats.pagination.hasNextPage} style={paginationButtonStyle(successStats.pagination.hasNextPage)}>Next →</button>
+                        <button onClick={() => setSuccessPage(successStats.pagination.totalPages)} disabled={!successStats.pagination.hasNextPage} style={paginationButtonStyle(successStats.pagination.hasNextPage)}>Last</button>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -602,90 +689,6 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
                 </div>
               )}
 
-              {/* ── Pagination ── */}
-              {stats.pagination && stats.pagination.totalPages > 1 && (
-                <div style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  marginTop: 20,
-                  padding: '16px 0',
-                  borderTop: '1px solid rgba(255,255,255,0.07)'
-                }}>
-                  <div style={{ fontSize: 12, color: '#94a3b8' }}>
-                    Page {stats.pagination.currentPage} of {stats.pagination.totalPages}
-                    <span style={{ marginLeft: 8, color: '#64748b' }}>
-                      ({stats.pagination.totalRecords.toLocaleString()} total records)
-                    </span>
-                  </div>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <button
-                      onClick={() => setCurrentPage(1)}
-                      disabled={!stats.pagination.hasPreviousPage}
-                      style={{
-                        padding: '6px 12px',
-                        borderRadius: 6,
-                        fontSize: 12,
-                        fontWeight: 600,
-                        cursor: stats.pagination.hasPreviousPage ? 'pointer' : 'not-allowed',
-                        background: stats.pagination.hasPreviousPage ? 'rgba(99,102,241,0.1)' : 'rgba(255,255,255,0.05)',
-                        border: `1px solid ${stats.pagination.hasPreviousPage ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.1)'}`,
-                        color: stats.pagination.hasPreviousPage ? '#818cf8' : '#475569',
-                      }}
-                    >
-                      First
-                    </button>
-                    <button
-                      onClick={() => setCurrentPage(currentPage - 1)}
-                      disabled={!stats.pagination.hasPreviousPage}
-                      style={{
-                        padding: '6px 12px',
-                        borderRadius: 6,
-                        fontSize: 12,
-                        fontWeight: 600,
-                        cursor: stats.pagination.hasPreviousPage ? 'pointer' : 'not-allowed',
-                        background: stats.pagination.hasPreviousPage ? 'rgba(99,102,241,0.1)' : 'rgba(255,255,255,0.05)',
-                        border: `1px solid ${stats.pagination.hasPreviousPage ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.1)'}`,
-                        color: stats.pagination.hasPreviousPage ? '#818cf8' : '#475569',
-                      }}
-                    >
-                      ← Previous
-                    </button>
-                    <button
-                      onClick={() => setCurrentPage(currentPage + 1)}
-                      disabled={!stats.pagination.hasNextPage}
-                      style={{
-                        padding: '6px 12px',
-                        borderRadius: 6,
-                        fontSize: 12,
-                        fontWeight: 600,
-                        cursor: stats.pagination.hasNextPage ? 'pointer' : 'not-allowed',
-                        background: stats.pagination.hasNextPage ? 'rgba(99,102,241,0.1)' : 'rgba(255,255,255,0.05)',
-                        border: `1px solid ${stats.pagination.hasNextPage ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.1)'}`,
-                        color: stats.pagination.hasNextPage ? '#818cf8' : '#475569',
-                      }}
-                    >
-                      Next →
-                    </button>
-                    <button
-                      onClick={() => setCurrentPage(stats.pagination!.totalPages)}
-                      disabled={!stats.pagination.hasNextPage}
-                      style={{
-                        padding: '6px 12px',
-                        borderRadius: 6,
-                        fontSize: 12,
-                        fontWeight: 600,
-                        cursor: stats.pagination.hasNextPage ? 'pointer' : 'not-allowed',
-                        background: stats.pagination.hasNextPage ? 'rgba(99,102,241,0.1)' : 'rgba(255,255,255,0.05)',
-                        border: `1px solid ${stats.pagination.hasNextPage ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.1)'}`,
-                        color: stats.pagination.hasNextPage ? '#818cf8' : '#475569',
-                      }}
-                    >
-                      Last
-                    </button>
-                  </div>
-                </div>
-              )}
             </>
           )}
         </div>
