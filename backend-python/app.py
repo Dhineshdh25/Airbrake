@@ -3227,30 +3227,24 @@ def project_logs(name):
         )
         logs = query(logs_query, tuple(query_params))
 
-        # Get status counts (without pagination)
-        success_query = (
-            f"SELECT COUNT(*) as total FROM {TABLE} "
-            f"WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){''.join(filters)} "
-            f"AND (error IS NULL OR error = '')"
+        # Get status totals (without pagination) in one query
+        totals_query = (
+            f"SELECT \
+"
+            f"  COUNT(*) FILTER (WHERE error IS NULL OR error = '') AS success, \
+"
+            f"  COUNT(*) FILTER (WHERE error IS NOT NULL AND error != '' AND (error_status IS NULL OR error_status != 'resolved')) AS failure, \
+"
+            f"  COUNT(*) FILTER (WHERE error IS NOT NULL AND error != '' AND error_status = 'resolved') AS resolved \
+"
+            f"FROM {TABLE} "
+            f"WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){''.join(filters)}"
         )
-        success_result = query(success_query, tuple(count_params))
-        success = int(success_result[0].get("total", 0)) if success_result else 0
-        
-        failure_query = (
-            f"SELECT COUNT(*) as total FROM {TABLE} "
-            f"WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){''.join(filters)} "
-            f"AND error IS NOT NULL AND error != '' AND (error_status IS NULL OR error_status != 'resolved')"
-        )
-        failure_result = query(failure_query, tuple(count_params))
-        failure = int(failure_result[0].get("total", 0)) if failure_result else 0
-        
-        resolved_query = (
-            f"SELECT COUNT(*) as total FROM {TABLE} "
-            f"WHERE row_type = 'log' AND LOWER(project_name) = LOWER(%s){''.join(filters)} "
-            f"AND error IS NOT NULL AND error != '' AND error_status = 'resolved'"
-        )
-        resolved_result = query(resolved_query, tuple(count_params))
-        resolved = int(resolved_result[0].get("total", 0)) if resolved_result else 0
+        totals_result = query(totals_query, tuple(count_params))
+        totals_row = totals_result[0] if totals_result else {}
+        success = int(totals_row.get("success", 0))
+        failure = int(totals_row.get("failure", 0))
+        resolved = int(totals_row.get("resolved", 0))
 
         # Separate logs by status for the current page
         resolved_logs = [r for r in logs if r.get("error") and r.get("error") != "" and r.get("error_status") == "resolved"]
