@@ -551,7 +551,7 @@ def add_cors_headers(response):
     allow_origin = origin if origin in ALLOWED_ORIGINS else "*"
     response.headers["Access-Control-Allow-Origin"] = allow_origin
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-API-Key"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-API-Key, X-Device-ID"
     response.headers["Access-Control-Max-Age"] = "86400"
     if origin in ALLOWED_ORIGINS:
         response.headers["Vary"] = "Origin"
