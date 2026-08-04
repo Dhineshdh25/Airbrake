@@ -476,6 +476,25 @@ export function ErrorDetailModal({
   // ── Jira: initiate OAuth — authenticated fetch returns the redirect URL ──
   async function startJiraOAuth() {
     try {
+      // Store pending ticket context so we can auto-retry after OAuth callback
+      const pendingContext = {
+        error_hash: effectiveErrorHash,
+        project_name: projectName,
+        error_message: errorMessage,
+        error_group: data?.error_group_name,
+        error_detail: data?.error_detail,
+        occurrence_count: data?.occurrence_count,
+        status: data?.error_status,
+        solution: data?.solution?.solution,
+        ai_recommendation: data?.ai_recommendation?.recommendation,
+        timestamp: data?.last_seen,
+        file_name: data?.file_name,
+        airbrake_url: effectiveErrorHash
+          ? `${window.location.origin}/breaks/${effectiveErrorHash}${projectName ? `?project_name=${encodeURIComponent(projectName)}` : ''}`
+          : undefined,
+      };
+      sessionStorage.setItem('jira_pending_ticket', JSON.stringify(pendingContext));
+
       const r = await apiFetch('/api/jira/initiate', { method: 'POST' });
       const j = await r.json();
       if (j.redirect_url) {
@@ -483,10 +502,12 @@ export function ErrorDetailModal({
       } else {
         setJiraError('Could not start Jira connection. Please try again.');
         setJiraStatus('error');
+        sessionStorage.removeItem('jira_pending_ticket');
       }
     } catch {
       setJiraError('Could not start Jira connection. Please try again.');
       setJiraStatus('error');
+      sessionStorage.removeItem('jira_pending_ticket');
     }
   }
 
@@ -500,12 +521,23 @@ export function ErrorDetailModal({
   }, [effectiveErrorHash]);
 
   // ── Jira: create ticket ───────────────────────────────────────────────────
-  async function handleCreateJiraTicket() {
-    // If not connected, start OAuth via authenticated initiate call
-    if (!jiraConnected) {
-      await startJiraOAuth();
-      return;
-    }
+  async function createJiraTicketInternal(errorData?: any) {
+    const ticketData = errorData || {
+      project_name:      projectName   || undefined,
+      error_group:       data?.error_group_name || undefined,
+      error_message:     errorMessage  || undefined,
+      error_detail:      data?.error_detail     || undefined,
+      error_hash:        effectiveErrorHash      || undefined,
+      occurrence_count:  data?.occurrence_count  ?? undefined,
+      status:            data?.error_status      || undefined,
+      solution:          data?.solution?.solution || undefined,
+      ai_recommendation: data?.ai_recommendation?.recommendation || undefined,
+      timestamp:         data?.last_seen         || undefined,
+      file_name:         data?.file_name         || undefined,
+      airbrake_url:      effectiveErrorHash
+        ? `${window.location.origin}/breaks/${effectiveErrorHash}${projectName ? `?project_name=${encodeURIComponent(projectName)}` : ''}`
+        : undefined,
+    };
 
     setJiraStatus('creating');
     setJiraError('');
@@ -515,22 +547,7 @@ export function ErrorDetailModal({
       const r = await apiFetch('/api/jira/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_name:      projectName   || undefined,
-          error_group:       data?.error_group_name || undefined,
-          error_message:     errorMessage  || undefined,
-          error_detail:      data?.error_detail     || undefined,
-          error_hash:        effectiveErrorHash      || undefined,
-          occurrence_count:  data?.occurrence_count  ?? undefined,
-          status:            data?.error_status      || undefined,
-          solution:          data?.solution?.solution || undefined,
-          ai_recommendation: data?.ai_recommendation?.recommendation || undefined,
-          timestamp:         data?.last_seen         || undefined,
-          file_name:         data?.file_name         || undefined,
-          airbrake_url:      effectiveErrorHash
-            ? `${window.location.origin}/breaks/${effectiveErrorHash}${projectName ? `?project_name=${encodeURIComponent(projectName)}` : ''}`
-            : undefined,
-        }),
+        body: JSON.stringify(ticketData),
       });
       const j = await r.json();
       setJiraTicket({ key: j.key, url: j.url });
@@ -555,6 +572,34 @@ export function ErrorDetailModal({
       setJiraStatus('error');
     }
   }
+
+  async function handleCreateJiraTicket() {
+    // If not connected, start OAuth via authenticated initiate call
+    if (!jiraConnected) {
+      await startJiraOAuth();
+      return;
+    }
+    await createJiraTicketInternal();
+  }
+
+  // ── Auto-retry ticket creation after OAuth callback ─────────────────────
+  useEffect(() => {
+    const pendingStr = sessionStorage.getItem('jira_pending_ticket');
+    if (!pendingStr) return;
+
+    // Only auto-retry if we're back on the error detail and Jira is now connected
+    if (effectiveErrorHash && jiraConnected === true) {
+      try {
+        const pending = JSON.parse(pendingStr);
+        sessionStorage.removeItem('jira_pending_ticket');
+        // Auto-retry with the stored error data
+        createJiraTicketInternal(pending);
+      } catch (err) {
+        console.error('[ErrorDetailModal] Failed to parse pending ticket context:', err);
+        sessionStorage.removeItem('jira_pending_ticket');
+      }
+    }
+  }, [jiraConnected, effectiveErrorHash]);
 
   // ── Reopen ───────────────────────────────────────────────────────────────
 

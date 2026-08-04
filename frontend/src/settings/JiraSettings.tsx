@@ -68,8 +68,8 @@ export function JiraSettings() {
       // Re-check status after successful OAuth round-trip
       apiFetch('/api/jira/status')
         .then(r => r.json())
-        .then((j: JiraStatusResponse) => setStatus(j))
-        .catch(() => {});
+        .then((j: JiraStatusResponse) => { setStatus(j); setLoading(false); })
+        .catch(() => { setStatus({ connected: false, email: '', account_id: '' }); setLoading(false); });
       // Clean up the query param without a page reload
       const clean = window.location.pathname + window.location.hash;
       window.history.replaceState({}, '', clean);
@@ -82,6 +82,7 @@ export function JiraSettings() {
   }, []);
 
   async function handleConnect() {
+    setBusy(true);
     setError('');
     try {
       const r = await apiFetch('/api/jira/initiate', { method: 'POST' });
@@ -90,9 +91,11 @@ export function JiraSettings() {
         window.location.href = j.redirect_url;  // navigate to Atlassian — no credentials in URL
       } else {
         setError('Could not start Jira connection. Please try again.');
+        setBusy(false);
       }
     } catch {
       setError('Could not start Jira connection. Please try again.');
+      setBusy(false);
     }
   }
 
