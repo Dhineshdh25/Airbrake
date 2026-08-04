@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from 'react';
-import { apiFetch, ApiError, API_BASE_URL } from '../lib/api';
+import { apiFetch, ApiError } from '../lib/api';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -473,6 +473,23 @@ export function ErrorDetailModal({
     } finally { setActionBusy(false); }
   }
 
+  // ── Jira: initiate OAuth — authenticated fetch returns the redirect URL ──
+  async function startJiraOAuth() {
+    try {
+      const r = await apiFetch('/api/jira/initiate', { method: 'POST' });
+      const j = await r.json();
+      if (j.redirect_url) {
+        window.location.href = j.redirect_url;  // navigate to Atlassian — no credentials in URL
+      } else {
+        setJiraError('Could not start Jira connection. Please try again.');
+        setJiraStatus('error');
+      }
+    } catch {
+      setJiraError('Could not start Jira connection. Please try again.');
+      setJiraStatus('error');
+    }
+  }
+
   // ── Jira: check connection status when modal opens ────────────────────────
   useEffect(() => {
     if (!effectiveErrorHash) return;
@@ -484,9 +501,9 @@ export function ErrorDetailModal({
 
   // ── Jira: create ticket ───────────────────────────────────────────────────
   async function handleCreateJiraTicket() {
-    // If not connected, redirect to OAuth login flow — must go to Lambda, not S3
+    // If not connected, start OAuth via authenticated initiate call
     if (!jiraConnected) {
-      window.location.href = `${API_BASE_URL}/api/jira/login`;
+      await startJiraOAuth();
       return;
     }
 
@@ -526,7 +543,7 @@ export function ErrorDetailModal({
           msg = 'Your Jira session expired. Reconnecting…';
           setJiraError(msg);
           setJiraStatus('error');
-          setTimeout(() => { window.location.href = `${API_BASE_URL}/api/jira/login`; }, 1500);
+          setTimeout(() => { startJiraOAuth(); }, 1500);
           return;
         }
         if (e.status === 403 || e.status === 502) {

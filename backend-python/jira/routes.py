@@ -84,13 +84,21 @@ def _frontend_url() -> str:
 # GET /api/jira/login
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@jira_bp.route("/login")
-def jira_login():
+@jira_bp.route("/initiate", methods=["POST"])
+def jira_initiate():
     """
-    Redirect the browser to the Atlassian authorization page.
+    POST /api/jira/initiate
 
-    Requires an authenticated session so we can tie the CSRF state token to
-    the correct Airbrake user_id before the redirect happens.
+    Authenticated endpoint (Bearer token required).
+    Generates a CSRF state token, stores the user_id → state mapping,
+    and returns the Atlassian authorization URL for the frontend to
+    navigate to.
+
+    The frontend calls this via apiFetch (which attaches the Bearer token),
+    then does window.location.href = data.redirect_url.
+    No credentials ever appear in a URL.
+
+    Response: { redirect_url: str }
     """
     user_id, err = _require_auth()
     if err:
@@ -98,13 +106,26 @@ def jira_login():
 
     try:
         state = generate_state()
-        _pending_states[user_id] = state
-        url = build_authorization_url(state)
-        logger.info("[Jira Routes] OAuth login started for user_id=%s", user_id)
-        return redirect(url)
+        _pending_states[state] = user_id          # state → user_id
+        redirect_url = build_authorization_url(state)
+        logger.info("[Jira Routes] OAuth initiate for user_id=%s", user_id)
+        return jsonify({"redirect_url": redirect_url})
     except EnvironmentError as exc:
-        logger.error("[Jira Routes] login config error: %s", exc)
+        logger.error("[Jira Routes] initiate config error: %s", exc)
         return jsonify({"error": str(exc)}), 500
+
+
+@jira_bp.route("/login")
+def jira_login():
+    """
+    GET /api/jira/login  — legacy/direct browser navigation fallback.
+
+    This route exists only so that any bookmark or direct link still works.
+    It cannot be authenticated (browser navigation cannot attach headers),
+    so it redirects to the frontend Settings page where the user can click
+    "Connect Jira" which uses the proper /initiate flow.
+    """
+    return redirect(f"{_frontend_url()}/settings?jira_connect=1")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -129,19 +150,12 @@ def jira_callback():
     state = request.args.get("state", "")
 
     # ── Validate CSRF state ───────────────────────────────────────────────────
-    # Find which user_id this state belongs to
-    matched_user_id = None
-    for uid, stored_state in list(_pending_states.items()):
-        if stored_state == state:
-            matched_user_id = uid
-            break
+    # Look up which user_id this state belongs to
+    matched_user_id = _pending_states.pop(state, None)
 
     if not matched_user_id:
         logger.warning("[Jira Routes] Invalid or expired OAuth state token")
         return redirect(f"{_frontend_url()}?jira_error=invalid_state")
-
-    # Clean up the used state token
-    _pending_states.pop(matched_user_id, None)
 
     try:
         # Exchange code for tokens
