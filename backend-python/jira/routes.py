@@ -80,11 +80,26 @@ def _get_session() -> dict | None:
 
 
 def _require_auth():
-    """Return (user_id, None) or (None, error_response)."""
+    """Return (user_id, None) or (None, error_response).
+
+    user_id is the stable identity used as the Jira token store key.
+    It is derived from X-Device-ID when present (stable across logouts),
+    otherwise falls back to the role-based userId from the session token.
+    """
     session = _get_session()
     if not session:
         return None, (jsonify({"error": "Unauthorized"}), 401)
-    return session["userId"], None
+
+    # X-Device-ID is a permanent per-browser identifier set by LoginPage.tsx.
+    # Using it means the Jira token survives logout/login cycles on the same
+    # browser — the user only needs to connect Jira once per device.
+    device_id = request.headers.get("X-Device-ID", "").strip()
+    if device_id:
+        user_id = f"device-{device_id}"
+    else:
+        user_id = session["userId"]
+
+    return user_id, None
 
 
 def _frontend_url() -> str:

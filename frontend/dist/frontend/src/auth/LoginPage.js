@@ -10,8 +10,19 @@ function LoginPage() {
     const navigate = (0, react_router_dom_1.useNavigate)();
     const [params] = (0, react_router_dom_1.useSearchParams)();
     const handleLogin = () => {
-        localStorage.setItem('session_token', `dev-token-${role}`);
+        // Session token identifies the role for this session.
+        // Kept as a fixed pattern so the backend can resolve it.
+        const token = `dev-token-${role}`;
+        localStorage.setItem('session_token', token);
         localStorage.setItem('session_role', role);
+        // device_id is a stable, permanent identity for this browser profile.
+        // It is generated once and never rotated — survives logout/login cycles.
+        // This is what the backend uses as the Jira token store key, so the
+        // user only needs to connect Jira once regardless of how many times
+        // they log out and back in.
+        if (!localStorage.getItem('device_id')) {
+            localStorage.setItem('device_id', crypto.randomUUID().replace(/-/g, '').slice(0, 16));
+        }
         const redirect = params.get('redirect_uri') ?? '/dashboard';
         navigate(decodeURIComponent(redirect), { replace: true });
     };

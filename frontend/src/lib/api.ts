@@ -71,6 +71,11 @@ export async function apiFetch(
       ...(localStorage.getItem('session_token')
         ? { Authorization: `Bearer ${localStorage.getItem('session_token')}` }
         : {}),
+      // Stable device identity — used by Jira token store so the user's
+      // Jira connection survives logout/login cycles on the same browser.
+      ...(localStorage.getItem('device_id')
+        ? { 'X-Device-ID': localStorage.getItem('device_id')! }
+        : {}),
       ...(init?.headers ?? {}),
     },
   });
