@@ -10,7 +10,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { apiFetch, API_BASE_URL } from '../lib/api';
+import { apiFetch } from '../lib/api';
 
 interface JiraStatusResponse {
   connected: boolean;
@@ -81,9 +81,19 @@ export function JiraSettings() {
     }
   }, []);
 
-  function handleConnect() {
-    // Must go directly to Lambda, not S3 (the frontend host)
-    window.location.href = `${API_BASE_URL}/api/jira/login`;
+  async function handleConnect() {
+    setError('');
+    try {
+      const r = await apiFetch('/api/jira/initiate', { method: 'POST' });
+      const j = await r.json();
+      if (j.redirect_url) {
+        window.location.href = j.redirect_url;  // navigate to Atlassian — no credentials in URL
+      } else {
+        setError('Could not start Jira connection. Please try again.');
+      }
+    } catch {
+      setError('Could not start Jira connection. Please try again.');
+    }
   }
 
   async function handleDisconnect() {
