@@ -60,11 +60,22 @@ _DEV_SESSIONS = {
 
 
 def _get_session() -> dict | None:
-    """Return the session dict for the current request, or None."""
+    """Return the session dict for the current request, or None.
+    
+    Checks (in order):
+    1. Bearer token in Authorization header
+    2. Token as query parameter (for browser redirects that lose headers)
+    """
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         token = auth[7:].strip()
         return _DEV_SESSIONS.get(token)
+
+    # Fallback for browser redirects (no headers preserved)
+    query_token = (request.args.get("token") or "").strip()
+    if query_token:
+        return _DEV_SESSIONS.get(query_token)
+
     return None
 
 
