@@ -74,7 +74,7 @@ async function getProjectTables(pool) {
  * Normalizes project_name: underscores → spaces so duplicate tables merge cleanly.
  */
 function buildErrorUnion(tables, extraWhere = '') {
-    const parts = tables.map((t) => `SELECT REPLACE(project_name, '_', ' ') AS project_name, file_name, error, error_detail, error_hash, timestamp, reopened_at FROM "${t}" WHERE error IS NOT NULL AND error <> '' AND error_status IN ('open', 'reopened')${extraWhere}`);
+    const parts = tables.map((t) => `SELECT REPLACE(project_name, '_', ' ') AS project_name, file_name, error, error_detail, error_hash, timestamp, reopened_at, COALESCE(error_group_name, '') AS error_group_name, COALESCE(error_group_id, '') AS error_group_id FROM "${t}" WHERE error IS NOT NULL AND error <> '' AND error_status IN ('open', 'reopened')${extraWhere}`);
     return parts.join('\n UNION ALL\n');
 }
 /**
@@ -219,7 +219,9 @@ function createProjectDashboardRouter(pool) {
       )`;
             const union = buildErrorUnion(tables, todayWhere);
             const { rows } = await pool.query(`
-        SELECT project_name AS project, file_name, error, error_detail, error_hash, timestamp AS timestamp
+        SELECT project_name AS project, file_name, error, error_detail, error_hash, timestamp AS timestamp,
+               NULLIF(error_group_name, '') AS error_group_name,
+               NULLIF(error_group_id, '') AS error_group_id
         FROM (${union}) AS combined
         ORDER BY timestamp DESC
       `);
@@ -250,7 +252,9 @@ function createProjectDashboardRouter(pool) {
             }
             const union = buildErrorUnion(tables, extraWhere);
             const { rows } = await pool.query(`
-        SELECT project_name AS project, file_name, error, error_detail, error_hash, timestamp
+        SELECT project_name AS project, file_name, error, error_detail, error_hash, timestamp,
+               NULLIF(error_group_name, '') AS error_group_name,
+               NULLIF(error_group_id, '') AS error_group_id
         FROM (${union}) AS combined
         ORDER BY timestamp DESC
         LIMIT 2000
@@ -259,6 +263,46 @@ function createProjectDashboardRouter(pool) {
         }
         catch (err) {
             console.error('[Dashboard] errors error:', err.message ?? err);
+            res.status(500).json({ error: 'Internal server error', detail: err.message });
+        }
+    });
+    // GET /project-errors?project=NAME&from=ISO&to=ISO — errors for a specific project in date range
+    router.get('/project-errors', async (req, res) => {
+        try {
+            const { project, from, to } = req.query;
+            if (!project) {
+                return res.status(400).json({ error: 'project query parameter is required' });
+            }
+            const tables = await getProjectTables(pool);
+            if (tables.length === 0)
+                return res.json({ errors: [] });
+            // Filter to only the tables matching this project
+            const projectTableName = project.toLowerCase().replace(/ /g, '_');
+            const matchingTables = tables.filter(t => t.toLowerCase() === projectTableName ||
+                t.toLowerCase().replace(/_/g, ' ') === project.toLowerCase());
+            if (matchingTables.length === 0) {
+                return res.json({ errors: [] });
+            }
+            let extraWhere = '';
+            if (from) {
+                extraWhere += ` AND timestamp >= '${from.replace(/'/g, "''")}'`;
+            }
+            if (to) {
+                extraWhere += ` AND timestamp <= '${to.replace(/'/g, "''")}'`;
+            }
+            const union = buildErrorUnion(matchingTables, extraWhere);
+            const { rows } = await pool.query(`
+        SELECT project_name AS project, file_name, error, error_detail, error_hash, timestamp,
+               NULLIF(error_group_name, '') AS error_group_name,
+               NULLIF(error_group_id, '') AS error_group_id
+        FROM (${union}) AS combined
+        ORDER BY timestamp DESC
+        LIMIT 2000
+      `);
+            res.json({ errors: rows });
+        }
+        catch (err) {
+            console.error('[Dashboard] project-errors error:', err.message ?? err);
             res.status(500).json({ error: 'Internal server error', detail: err.message });
         }
     });
@@ -282,17 +326,19 @@ function createProjectDashboardRouter(pool) {
                 dateWhere += ` AND timestamp >= '${from.replace(/'/g, "''")}'`;
             if (to)
                 dateWhere += ` AND timestamp <= '${to.replace(/'/g, "''")}'`;
-            // UNION ALL across all tables — only active (non-resolved) errors
-            // If project filter set, only query that project's table
+            // Include resolved cases in the grouped list as well so the UI can show
+            // a proper resolved badge after a user marks an error as fixed.
             const filteredTables = projectFilter
                 ? tables.filter(t => t.toLowerCase() === projectFilter.toLowerCase().replace(/ /g, '_') ||
                     t.toLowerCase().replace(/_/g, ' ') === projectFilter.toLowerCase())
                 : tables;
             if (filteredTables.length === 0)
                 return res.json({ data: [], total: 0, page, limit });
-            const unionParts = filteredTables.map((t) => `SELECT REPLACE(project_name, '_', ' ') AS project_name, error, error_detail, error_hash, failure_count, timestamp, error_status, reopened_at FROM "${t}" WHERE error IS NOT NULL AND error <> '' AND error_status IN ('open', 'reopened')${dateWhere}`);
+            const unionParts = filteredTables.map((t) => `SELECT REPLACE(project_name, '_', ' ') AS project_name, error, error_detail, error_hash, failure_count, timestamp, error_status, reopened_at, resolved_at FROM "${t}" WHERE error IS NOT NULL AND error <> '' AND error_status IN ('open', 'reopened', 'resolved')${dateWhere}`);
             const union = unionParts.join('\nUNION ALL\n');
-            // Group by project + error_hash, compute occurrence counts and first/last seen
+            // Group by project + error_hash, compute occurrence counts and first/last seen.
+            // Resolved items are carried through with an explicit resolved status flag so
+            // the frontend can render a resolved badge instead of an old open/reopened state.
             const grouped = `
         SELECT
           project_name,
@@ -302,6 +348,7 @@ function createProjectDashboardRouter(pool) {
           MIN(timestamp)                               AS first_seen,
           COALESCE(MAX(reopened_at), MAX(timestamp))   AS last_seen,
           CASE
+            WHEN BOOL_OR(error_status = 'resolved') THEN 'resolved'
             WHEN BOOL_OR(error_status = 'reopened') THEN 'regression'
             WHEN SUM(failure_count) = 1 THEN 'new'
             ELSE 'existing'

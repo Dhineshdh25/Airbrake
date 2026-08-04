@@ -70,7 +70,7 @@ function StatusBadge({ isError, isResolved }) {
             border: `1px solid ${borderColor}`,
         }, children: [(0, jsx_runtime_1.jsx)("span", { style: { fontSize: 8 }, children: "\u25CF" }), label] }));
 }
-function FileCard({ row }) {
+function FileCard({ row, onGroupClick }) {
     const [expanded, setExpanded] = (0, react_1.useState)(false);
     const isError = !!row.error;
     const isResolved = row.isResolved ?? false;
@@ -111,7 +111,22 @@ function FileCard({ row }) {
                                     textOverflow: 'ellipsis',
                                     whiteSpace: 'nowrap',
                                     textDecoration: isResolved ? 'line-through' : 'none',
-                                }, children: row.error }))] }), (0, jsx_runtime_1.jsxs)("div", { style: { textAlign: 'right', flexShrink: 0 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 11, color: '#64748b', fontFamily: 'ui-monospace, monospace' }, children: fmtTime(row.timestamp) }), (0, jsx_runtime_1.jsx)("div", { style: { fontSize: 10, color: '#475569' }, children: fmtDate(row.timestamp) })] }), (0, jsx_runtime_1.jsx)("div", { style: { flexShrink: 0 }, children: (0, jsx_runtime_1.jsx)(StatusBadge, { isError: isError, isResolved: isResolved }) }), hasDetails && ((0, jsx_runtime_1.jsx)("div", { style: { color: '#475569', fontSize: 12, flexShrink: 0, transition: 'transform 0.2s', transform: expanded ? 'rotate(180deg)' : 'none' }, children: "\u25BE" }))] }), expanded && hasDetails && ((0, jsx_runtime_1.jsxs)("div", { style: {
+                                }, children: row.error }))] }), (0, jsx_runtime_1.jsxs)("div", { style: { textAlign: 'right', flexShrink: 0 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 11, color: '#64748b', fontFamily: 'ui-monospace, monospace' }, children: fmtTime(row.timestamp) }), (0, jsx_runtime_1.jsx)("div", { style: { fontSize: 10, color: '#475569' }, children: fmtDate(row.timestamp) })] }), (0, jsx_runtime_1.jsx)("div", { style: { flexShrink: 0 }, children: (0, jsx_runtime_1.jsx)(StatusBadge, { isError: isError, isResolved: isResolved }) }), row.error_group_name && ((0, jsx_runtime_1.jsx)("button", { onClick: (e) => {
+                            e.stopPropagation();
+                            if (onGroupClick && row.error_group_id && row.error_group_name) {
+                                onGroupClick(row.error_group_id, row.error_group_name);
+                            }
+                        }, style: {
+                            marginLeft: 8,
+                            border: 'none',
+                            background: 'rgba(56,189,248,0.16)',
+                            color: '#38bdf8',
+                            borderRadius: 999,
+                            padding: '4px 10px',
+                            fontSize: 11,
+                            cursor: onGroupClick ? 'pointer' : 'default',
+                            whiteSpace: 'nowrap',
+                        }, children: row.error_group_name })), hasDetails && ((0, jsx_runtime_1.jsx)("div", { style: { color: '#475569', fontSize: 12, flexShrink: 0, transition: 'transform 0.2s', transform: expanded ? 'rotate(180deg)' : 'none' }, children: "\u25BE" }))] }), expanded && hasDetails && ((0, jsx_runtime_1.jsxs)("div", { style: {
                     borderTop: '1px solid rgba(255,255,255,0.06)',
                     padding: '12px 14px',
                     display: 'flex', flexWrap: 'wrap', gap: 10,
@@ -138,19 +153,24 @@ function SectionHeader({ title, count, color, collapsed, onToggle }) {
 // ─── Main Modal ───────────────────────────────────────────────────────────────
 function ProjectModal({ project, onClose }) {
     const [stats, setStats] = (0, react_1.useState)(null);
+    const [failedStats, setFailedStats] = (0, react_1.useState)(null);
+    const [resolvedStats, setResolvedStats] = (0, react_1.useState)(null);
+    const [successStats, setSuccessStats] = (0, react_1.useState)(null);
     const [loading, setLoading] = (0, react_1.useState)(true);
-    const [currentPage, setCurrentPage] = (0, react_1.useState)(1);
+    const [failedPage, setFailedPage] = (0, react_1.useState)(1);
+    const [resolvedPage, setResolvedPage] = (0, react_1.useState)(1);
+    const [successPage, setSuccessPage] = (0, react_1.useState)(1);
     const [failedCollapsed, setFailedCollapsed] = (0, react_1.useState)(false);
     const [resolvedCollapsed, setResolvedCollapsed] = (0, react_1.useState)(true);
     const [successCollapsed, setSuccessCollapsed] = (0, react_1.useState)(true);
+    const [failedSearchTerm, setFailedSearchTerm] = (0, react_1.useState)('');
+    const [failedGroupFilter, setFailedGroupFilter] = (0, react_1.useState)(null);
     // Time period filter states
     const [timePeriod, setTimePeriod] = (0, react_1.useState)('daily');
     const [customFrom, setCustomFrom] = (0, react_1.useState)('');
     const [customTo, setCustomTo] = (0, react_1.useState)('');
     const [customApplyTick, setCustomApplyTick] = (0, react_1.useState)(0);
-    (0, react_1.useEffect)(() => {
-        setLoading(true);
-        // Build date filter params based on time period
+    const buildDateParams = () => {
         let dateParams = '';
         if (timePeriod === 'daily') {
             const today = new Date();
@@ -158,7 +178,6 @@ function ProjectModal({ project, onClose }) {
             const tomorrow = new Date(today);
             tomorrow.setDate(tomorrow.getDate() + 1);
             dateParams = `&from=${today.toISOString()}&to=${tomorrow.toISOString()}`;
-            console.log('[LogStream] Daily filter:', { from: today.toISOString(), to: tomorrow.toISOString() });
         }
         else if (timePeriod === 'weekly') {
             const weekAgo = new Date();
@@ -166,7 +185,6 @@ function ProjectModal({ project, onClose }) {
             weekAgo.setHours(0, 0, 0, 0);
             const now = new Date();
             dateParams = `&from=${weekAgo.toISOString()}&to=${now.toISOString()}`;
-            console.log('[LogStream] Weekly filter:', { from: weekAgo.toISOString(), to: now.toISOString() });
         }
         else if (timePeriod === 'custom' && customFrom && customTo && customApplyTick > 0) {
             const fromDate = new Date(customFrom);
@@ -174,30 +192,71 @@ function ProjectModal({ project, onClose }) {
             const toDate = new Date(customTo);
             toDate.setHours(23, 59, 59, 999);
             dateParams = `&from=${fromDate.toISOString()}&to=${toDate.toISOString()}`;
-            console.log('[LogStream] Custom filter:', { from: fromDate.toISOString(), to: toDate.toISOString() });
         }
-        const apiUrl = `/api/projects/${encodeURIComponent(project.name)}/logs?page=${currentPage}&limit=50${dateParams}`;
-        console.log('[LogStream] Fetching:', apiUrl);
+        return dateParams;
+    };
+    (0, react_1.useEffect)(() => {
+        setLoading(true);
+        const dateParams = buildDateParams();
+        const apiUrl = `/api/projects/${encodeURIComponent(project.name)}/logs?page=1&limit=1${dateParams}`;
         (0, api_1.apiFetch)(apiUrl)
             .then((r) => r.json())
-            .then((d) => {
-            console.log('[LogStream] Response:', d);
-            setStats(d);
-            setLoading(false);
-        })
-            .catch((err) => {
-            console.error('[LogStream] Error:', err);
-            setLoading(false);
-        });
-    }, [project.name, currentPage, timePeriod, customApplyTick]);
-    // Filter logs by status - no slicing, show all in current page
-    const failedLogs = stats?.logs?.filter((r) => !!r.error && !r.isResolved) ?? [];
-    const resolvedLogs = stats?.logs?.filter((r) => !!r.error && r.isResolved) ?? [];
-    const successLogs = stats?.logs?.filter((r) => !r.error) ?? [];
+            .then((d) => setStats(d))
+            .catch((err) => console.error('[LogStream] Stats error:', err))
+            .finally(() => setLoading(false));
+    }, [project.name, timePeriod, customApplyTick]);
+    const fetchSectionStats = (status, page, setter, searchTerm = '', groupFilter) => {
+        setLoading(true);
+        const dateParams = buildDateParams();
+        let apiUrl = `/api/projects/${encodeURIComponent(project.name)}/logs?status=${status}&page=${page}&limit=5${dateParams}`;
+        if (searchTerm)
+            apiUrl += `&search=${encodeURIComponent(searchTerm)}`;
+        if (groupFilter)
+            apiUrl += `&group=${encodeURIComponent(groupFilter)}`;
+        (0, api_1.apiFetch)(apiUrl)
+            .then((r) => r.json())
+            .then((d) => setter(d))
+            .catch((err) => console.error(`[LogStream] ${status} section error:`, err))
+            .finally(() => setLoading(false));
+    };
+    (0, react_1.useEffect)(() => {
+        setFailedPage(1);
+        setResolvedPage(1);
+        setSuccessPage(1);
+    }, [project.name, timePeriod, customApplyTick, failedSearchTerm]);
+    const paginationButtonStyle = (enabled) => ({
+        padding: '6px 12px',
+        borderRadius: 6,
+        fontSize: 12,
+        fontWeight: 600,
+        cursor: enabled ? 'pointer' : 'not-allowed',
+        background: enabled ? 'rgba(99,102,241,0.1)' : 'rgba(255,255,255,0.05)',
+        border: `1px solid ${enabled ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.1)'}`,
+        color: enabled ? '#818cf8' : '#475569',
+    });
+    (0, react_1.useEffect)(() => {
+        fetchSectionStats('active', failedPage, setFailedStats, failedSearchTerm);
+    }, [project.name, timePeriod, customApplyTick, failedPage, failedSearchTerm]);
+    (0, react_1.useEffect)(() => {
+        // refetch failed section when group filter changes
+        fetchSectionStats('active', failedPage, setFailedStats, failedSearchTerm, failedGroupFilter ?? undefined);
+    }, [failedGroupFilter]);
+    (0, react_1.useEffect)(() => {
+        fetchSectionStats('resolved', resolvedPage, setResolvedStats);
+    }, [project.name, timePeriod, customApplyTick, resolvedPage]);
+    (0, react_1.useEffect)(() => {
+        fetchSectionStats('success', successPage, setSuccessStats);
+    }, [project.name, timePeriod, customApplyTick, successPage]);
+    const failedLogs = failedStats?.logs ?? [];
+    const resolvedLogs = resolvedStats?.logs ?? [];
+    const successLogs = successStats?.logs ?? [];
     // Count totals
     const totalFailedLogs = failedLogs.length;
     const totalResolvedLogs = resolvedLogs.length;
     const totalSuccessLogs = successLogs.length;
+    const hasFailureTotals = totalFailedLogs > 0;
+    const hasResolvedTotals = totalResolvedLogs > 0;
+    const hasSuccessTotals = totalSuccessLogs > 0;
     // Aggregate token/cost totals if available
     const totalInputTokens = stats?.logs?.reduce((s, r) => s + (r.input_tokens ?? 0), 0) ?? 0;
     const totalOutputTokens = stats?.logs?.reduce((s, r) => s + (r.output_tokens ?? 0), 0) ?? 0;
@@ -227,7 +286,7 @@ function ProjectModal({ project, onClose }) {
                                         background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
                                         display: 'flex', alignItems: 'center', justifyContent: 'center',
                                         fontSize: 16, boxShadow: '0 0 16px rgba(99,102,241,0.4)',
-                                    }, children: "\uD83E\uDD16" }), (0, jsx_runtime_1.jsxs)("div", { children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 16, fontWeight: 700, color: '#f1f5f9' }, children: project.name }), (0, jsx_runtime_1.jsx)("div", { style: { fontSize: 11, color: '#475569', marginTop: 2 }, children: stats?.exists ? `${stats.total} total records` : 'Loading…' })] })] }), (0, jsx_runtime_1.jsx)("button", { onClick: onClose, style: {
+                                    }, children: "\uD83E\uDD16" }), (0, jsx_runtime_1.jsxs)("div", { children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 16, fontWeight: 700, color: '#f1f5f9' }, children: project.name }), (0, jsx_runtime_1.jsx)("div", { style: { fontSize: 11, color: '#475569', marginTop: 2 }, children: stats?.exists ? `${stats.total} total files` : 'Loading…' })] })] }), (0, jsx_runtime_1.jsx)("button", { onClick: onClose, style: {
                                 background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
                                 color: '#94a3b8', fontSize: 16, cursor: 'pointer',
                                 width: 32, height: 32, borderRadius: 8,
@@ -248,7 +307,9 @@ function ProjectModal({ project, onClose }) {
                                                 borderRadius: 8, padding: 3, gap: 2,
                                             }, children: ['daily', 'weekly', 'custom'].map((period) => ((0, jsx_runtime_1.jsx)("button", { onClick: () => {
                                                     setTimePeriod(period);
-                                                    setCurrentPage(1); // Reset to first page when changing time period
+                                                    setFailedPage(1);
+                                                    setResolvedPage(1);
+                                                    setSuccessPage(1);
                                                 }, style: {
                                                     padding: '5px 12px', borderRadius: 6, fontSize: 11, fontWeight: 600,
                                                     border: 'none', cursor: 'pointer', textTransform: 'capitalize',
@@ -267,56 +328,28 @@ function ProjectModal({ project, onClose }) {
                                                         cursor: 'pointer', colorScheme: 'dark',
                                                     } }), (0, jsx_runtime_1.jsx)("button", { onClick: () => {
                                                         setCustomApplyTick((t) => t + 1);
-                                                        setCurrentPage(1);
+                                                        setFailedPage(1);
+                                                        setResolvedPage(1);
+                                                        setSuccessPage(1);
                                                     }, disabled: !customFrom || !customTo, style: {
                                                         padding: '5px 14px', borderRadius: 6, fontSize: 11, fontWeight: 700,
                                                         cursor: (!customFrom || !customTo) ? 'not-allowed' : 'pointer',
                                                         background: '#6366f1', color: '#fff', border: 'none',
                                                         opacity: (!customFrom || !customTo) ? 0.5 : 1,
-                                                    }, children: "Apply" })] }))] }), (0, jsx_runtime_1.jsxs)("span", { style: { fontSize: 10, color: '#64748b', fontStyle: 'italic' }, children: [timePeriod === 'daily' && 'Today\'s data', timePeriod === 'weekly' && 'Last 7 days', timePeriod === 'custom' && customFrom && customTo && `${new Date(customFrom).toLocaleDateString()} - ${new Date(customTo).toLocaleDateString()}`, timePeriod === 'custom' && (!customFrom || !customTo) && 'Select date range'] })] }), loading && ((0, jsx_runtime_1.jsxs)("div", { style: { textAlign: 'center', color: '#475569', padding: '60px 0', fontSize: 14 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 28, marginBottom: 12 }, children: "\u23F3" }), "Loading logs\u2026"] })), !loading && stats && !stats.exists && ((0, jsx_runtime_1.jsxs)("div", { style: { textAlign: 'center', color: '#475569', padding: '60px 0', fontSize: 14 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 32, marginBottom: 12 }, children: "\uD83D\uDCED" }), "No data table found for this project yet."] })), !loading && stats && stats.exists && ((0, jsx_runtime_1.jsxs)(jsx_runtime_1.Fragment, { children: [(0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap', alignItems: 'stretch' }, children: [(0, jsx_runtime_1.jsx)(SummaryCard, { label: "Files Processed", value: stats.filesProcessed, color: "#3b82f6", icon: "\uD83D\uDCC1" }), (0, jsx_runtime_1.jsx)(SummaryCard, { label: "Total Success", value: stats.success, color: "#10b981", icon: "\u2705" }), (0, jsx_runtime_1.jsx)(SummaryCard, { label: "Total Failures", value: stats.failure, color: "#ef4444", icon: "\u274C" }), (stats.resolved ?? 0) > 0 && ((0, jsx_runtime_1.jsx)(SummaryCard, { label: "Resolved Errors", value: stats.resolved ?? 0, color: "#8b5cf6", icon: "\u2714\uFE0F" })), hasTokenData && ((0, jsx_runtime_1.jsx)(SummaryCard, { label: "Input Tokens", value: totalInputTokens.toLocaleString(), color: "#8b5cf6", icon: "\uD83D\uDD22" })), hasTokenData && ((0, jsx_runtime_1.jsx)(SummaryCard, { label: "Output Tokens", value: totalOutputTokens.toLocaleString(), color: "#6366f1", icon: "\uD83D\uDCE4" })), stats.totalCost && ((0, jsx_runtime_1.jsx)(SummaryCard, { label: "Total Cost", value: stats.totalCost, color: "#f59e0b", icon: "\uD83D\uDCB0" }))] }), (0, jsx_runtime_1.jsx)(SuccessBar, { success: stats.success, total: stats.filesProcessed }), totalFailedLogs > 0 && ((0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 16 }, children: [(0, jsx_runtime_1.jsx)(SectionHeader, { title: "Failed Files", count: totalFailedLogs, color: "#f87171", collapsed: failedCollapsed, onToggle: () => setFailedCollapsed((v) => !v) }), !failedCollapsed && ((0, jsx_runtime_1.jsx)("div", { style: { display: 'flex', flexDirection: 'column', gap: 6 }, children: failedLogs.map((row, i) => (0, jsx_runtime_1.jsx)(FileCard, { row: row }, i)) }))] })), totalResolvedLogs > 0 && ((0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 16 }, children: [(0, jsx_runtime_1.jsx)(SectionHeader, { title: "Resolved Files", count: totalResolvedLogs, color: "#8b5cf6", collapsed: resolvedCollapsed, onToggle: () => setResolvedCollapsed((v) => !v) }), !resolvedCollapsed && ((0, jsx_runtime_1.jsx)("div", { style: { display: 'flex', flexDirection: 'column', gap: 6 }, children: resolvedLogs.map((row, i) => (0, jsx_runtime_1.jsx)(FileCard, { row: row }, i)) }))] })), totalSuccessLogs > 0 && ((0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 8 }, children: [(0, jsx_runtime_1.jsx)(SectionHeader, { title: "Successful Files", count: totalSuccessLogs, color: "#34d399", collapsed: successCollapsed, onToggle: () => setSuccessCollapsed((v) => !v) }), !successCollapsed && ((0, jsx_runtime_1.jsx)("div", { style: { display: 'flex', flexDirection: 'column', gap: 6 }, children: successLogs.map((row, i) => (0, jsx_runtime_1.jsx)(FileCard, { row: row }, i)) }))] })), stats.logs?.length === 0 && ((0, jsx_runtime_1.jsx)("div", { style: { textAlign: 'center', color: '#475569', padding: '30px 0', fontSize: 13 }, children: "No file logs recorded yet." })), stats.pagination && stats.pagination.totalPages > 1 && ((0, jsx_runtime_1.jsxs)("div", { style: {
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        justifyContent: 'space-between',
-                                        marginTop: 20,
-                                        padding: '16px 0',
-                                        borderTop: '1px solid rgba(255,255,255,0.07)'
-                                    }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { fontSize: 12, color: '#94a3b8' }, children: ["Page ", stats.pagination.currentPage, " of ", stats.pagination.totalPages, (0, jsx_runtime_1.jsxs)("span", { style: { marginLeft: 8, color: '#64748b' }, children: ["(", stats.pagination.totalRecords.toLocaleString(), " total records)"] })] }), (0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', gap: 8 }, children: [(0, jsx_runtime_1.jsx)("button", { onClick: () => setCurrentPage(1), disabled: !stats.pagination.hasPreviousPage, style: {
-                                                        padding: '6px 12px',
-                                                        borderRadius: 6,
-                                                        fontSize: 12,
-                                                        fontWeight: 600,
-                                                        cursor: stats.pagination.hasPreviousPage ? 'pointer' : 'not-allowed',
-                                                        background: stats.pagination.hasPreviousPage ? 'rgba(99,102,241,0.1)' : 'rgba(255,255,255,0.05)',
-                                                        border: `1px solid ${stats.pagination.hasPreviousPage ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.1)'}`,
-                                                        color: stats.pagination.hasPreviousPage ? '#818cf8' : '#475569',
-                                                    }, children: "First" }), (0, jsx_runtime_1.jsx)("button", { onClick: () => setCurrentPage(currentPage - 1), disabled: !stats.pagination.hasPreviousPage, style: {
-                                                        padding: '6px 12px',
-                                                        borderRadius: 6,
-                                                        fontSize: 12,
-                                                        fontWeight: 600,
-                                                        cursor: stats.pagination.hasPreviousPage ? 'pointer' : 'not-allowed',
-                                                        background: stats.pagination.hasPreviousPage ? 'rgba(99,102,241,0.1)' : 'rgba(255,255,255,0.05)',
-                                                        border: `1px solid ${stats.pagination.hasPreviousPage ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.1)'}`,
-                                                        color: stats.pagination.hasPreviousPage ? '#818cf8' : '#475569',
-                                                    }, children: "\u2190 Previous" }), (0, jsx_runtime_1.jsx)("button", { onClick: () => setCurrentPage(currentPage + 1), disabled: !stats.pagination.hasNextPage, style: {
-                                                        padding: '6px 12px',
-                                                        borderRadius: 6,
-                                                        fontSize: 12,
-                                                        fontWeight: 600,
-                                                        cursor: stats.pagination.hasNextPage ? 'pointer' : 'not-allowed',
-                                                        background: stats.pagination.hasNextPage ? 'rgba(99,102,241,0.1)' : 'rgba(255,255,255,0.05)',
-                                                        border: `1px solid ${stats.pagination.hasNextPage ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.1)'}`,
-                                                        color: stats.pagination.hasNextPage ? '#818cf8' : '#475569',
-                                                    }, children: "Next \u2192" }), (0, jsx_runtime_1.jsx)("button", { onClick: () => setCurrentPage(stats.pagination.totalPages), disabled: !stats.pagination.hasNextPage, style: {
-                                                        padding: '6px 12px',
-                                                        borderRadius: 6,
-                                                        fontSize: 12,
-                                                        fontWeight: 600,
-                                                        cursor: stats.pagination.hasNextPage ? 'pointer' : 'not-allowed',
-                                                        background: stats.pagination.hasNextPage ? 'rgba(99,102,241,0.1)' : 'rgba(255,255,255,0.05)',
-                                                        border: `1px solid ${stats.pagination.hasNextPage ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.1)'}`,
-                                                        color: stats.pagination.hasNextPage ? '#818cf8' : '#475569',
-                                                    }, children: "Last" })] })] }))] }))] })] }) }));
+                                                    }, children: "Apply" })] }))] }), (0, jsx_runtime_1.jsxs)("span", { style: { fontSize: 10, color: '#64748b', fontStyle: 'italic' }, children: [timePeriod === 'daily' && 'Today\'s data', timePeriod === 'weekly' && 'Last 7 days', timePeriod === 'custom' && customFrom && customTo && `${new Date(customFrom).toLocaleDateString()} - ${new Date(customTo).toLocaleDateString()}`, timePeriod === 'custom' && (!customFrom || !customTo) && 'Select date range'] })] }), loading && ((0, jsx_runtime_1.jsxs)("div", { style: { textAlign: 'center', color: '#475569', padding: '60px 0', fontSize: 14 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 28, marginBottom: 12 }, children: "\u23F3" }), "Loading logs\u2026"] })), !loading && stats && !stats.exists && ((0, jsx_runtime_1.jsxs)("div", { style: { textAlign: 'center', color: '#475569', padding: '60px 0', fontSize: 14 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 32, marginBottom: 12 }, children: "\uD83D\uDCED" }), "No data table found for this project yet."] })), !loading && stats && stats.exists && ((0, jsx_runtime_1.jsxs)(jsx_runtime_1.Fragment, { children: [(0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap', alignItems: 'stretch' }, children: [(0, jsx_runtime_1.jsx)(SummaryCard, { label: "Files Processed", value: stats.filesProcessed, color: "#3b82f6", icon: "\uD83D\uDCC1" }), (0, jsx_runtime_1.jsx)(SummaryCard, { label: "Total Success", value: stats.success, color: "#10b981", icon: "\u2705" }), (0, jsx_runtime_1.jsx)(SummaryCard, { label: "Total Failures", value: stats.failure, color: "#ef4444", icon: "\u274C" }), (stats.resolved ?? 0) > 0 && ((0, jsx_runtime_1.jsx)(SummaryCard, { label: "Resolved Errors", value: stats.resolved ?? 0, color: "#8b5cf6", icon: "\u2714\uFE0F" })), hasTokenData && ((0, jsx_runtime_1.jsx)(SummaryCard, { label: "Input Tokens", value: totalInputTokens.toLocaleString(), color: "#8b5cf6", icon: "\uD83D\uDD22" })), hasTokenData && ((0, jsx_runtime_1.jsx)(SummaryCard, { label: "Output Tokens", value: totalOutputTokens.toLocaleString(), color: "#6366f1", icon: "\uD83D\uDCE4" })), stats.totalCost && ((0, jsx_runtime_1.jsx)(SummaryCard, { label: "Total Cost", value: stats.totalCost, color: "#f59e0b", icon: "\uD83D\uDCB0" }))] }), (0, jsx_runtime_1.jsx)(SuccessBar, { success: stats.success, total: stats.filesProcessed }), failedStats && ((0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 16 }, children: [(0, jsx_runtime_1.jsx)(SectionHeader, { title: "Failed Files", count: failedStats?.pagination?.totalRecords ?? 0, color: "#f87171", collapsed: failedCollapsed, onToggle: () => setFailedCollapsed((v) => !v) }), !failedCollapsed && ((0, jsx_runtime_1.jsxs)(jsx_runtime_1.Fragment, { children: [(0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 12 }, children: [(0, jsx_runtime_1.jsx)("input", { value: failedSearchTerm, onChange: (e) => setFailedSearchTerm(e.target.value), placeholder: "Search failed files or errors", style: {
+                                                                flex: '1 1 240px', minWidth: 180,
+                                                                background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)',
+                                                                borderRadius: 8, color: '#e2e8f0', padding: '8px 10px', fontSize: 12,
+                                                            } }), failedSearchTerm && ((0, jsx_runtime_1.jsx)("button", { onClick: () => setFailedSearchTerm(''), style: {
+                                                                background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.12)',
+                                                                borderRadius: 8, color: '#e2e8f0', padding: '8px 12px', fontSize: 12,
+                                                                cursor: 'pointer', height: 40,
+                                                            }, children: "Clear" }))] }), (0, jsx_runtime_1.jsx)("div", { style: { display: 'flex', flexDirection: 'column', gap: 6 }, children: failedLogs.map((row, i) => ((0, jsx_runtime_1.jsx)(FileCard, { row: row, onGroupClick: (groupId) => {
+                                                            setFailedSearchTerm('');
+                                                            setFailedGroupFilter(groupId);
+                                                            setFailedPage(1);
+                                                            setFailedCollapsed(false);
+                                                        } }, i))) }), failedStats?.pagination && (failedStats.pagination.totalPages ?? 0) > 1 && ((0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.07)' }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { fontSize: 12, color: '#94a3b8' }, children: ["Page ", failedStats?.pagination?.currentPage ?? 1, " of ", failedStats?.pagination?.totalPages ?? 1, (0, jsx_runtime_1.jsxs)("span", { style: { marginLeft: 8, color: '#64748b' }, children: ["(showing ", failedLogs.length, ")"] })] }), (0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', gap: 8 }, children: [(0, jsx_runtime_1.jsx)("button", { onClick: () => setFailedPage(1), disabled: !failedStats?.pagination?.hasPreviousPage, style: paginationButtonStyle(!!failedStats?.pagination?.hasPreviousPage), children: "First" }), (0, jsx_runtime_1.jsx)("button", { onClick: () => setFailedPage((failedStats?.pagination?.currentPage ?? 1) - 1), disabled: !failedStats?.pagination?.hasPreviousPage, style: paginationButtonStyle(!!failedStats?.pagination?.hasPreviousPage), children: "\u2190 Previous" }), (0, jsx_runtime_1.jsx)("button", { onClick: () => setFailedPage((failedStats?.pagination?.currentPage ?? 1) + 1), disabled: !failedStats?.pagination?.hasNextPage, style: paginationButtonStyle(!!failedStats?.pagination?.hasNextPage), children: "Next \u2192" }), (0, jsx_runtime_1.jsx)("button", { onClick: () => setFailedPage(failedStats?.pagination?.totalPages ?? 1), disabled: !failedStats?.pagination?.hasNextPage, style: paginationButtonStyle(!!failedStats?.pagination?.hasNextPage), children: "Last" })] })] }))] }))] })), resolvedStats && ((0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 16 }, children: [(0, jsx_runtime_1.jsx)(SectionHeader, { title: "Resolved Files", count: resolvedStats?.pagination?.totalRecords ?? 0, color: "#8b5cf6", collapsed: resolvedCollapsed, onToggle: () => setResolvedCollapsed((v) => !v) }), !resolvedCollapsed && ((0, jsx_runtime_1.jsx)("div", { style: { display: 'flex', flexDirection: 'column', gap: 6 }, children: resolvedLogs.map((row, i) => (0, jsx_runtime_1.jsx)(FileCard, { row: row }, i)) })), resolvedStats?.pagination && (resolvedStats.pagination.totalPages ?? 0) > 1 && ((0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.07)' }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { fontSize: 12, color: '#94a3b8' }, children: ["Page ", resolvedStats?.pagination?.currentPage ?? 1, " of ", resolvedStats?.pagination?.totalPages ?? 1, (0, jsx_runtime_1.jsxs)("span", { style: { marginLeft: 8, color: '#64748b' }, children: ["(showing ", resolvedLogs.length, ")"] })] }), (0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', gap: 8 }, children: [(0, jsx_runtime_1.jsx)("button", { onClick: () => setResolvedPage(1), disabled: !resolvedStats?.pagination?.hasPreviousPage, style: paginationButtonStyle(!!resolvedStats?.pagination?.hasPreviousPage), children: "First" }), (0, jsx_runtime_1.jsx)("button", { onClick: () => setResolvedPage((resolvedStats?.pagination?.currentPage ?? 1) - 1), disabled: !resolvedStats?.pagination?.hasPreviousPage, style: paginationButtonStyle(!!resolvedStats?.pagination?.hasPreviousPage), children: "\u2190 Previous" }), (0, jsx_runtime_1.jsx)("button", { onClick: () => setResolvedPage((resolvedStats?.pagination?.currentPage ?? 1) + 1), disabled: !resolvedStats?.pagination?.hasNextPage, style: paginationButtonStyle(!!resolvedStats?.pagination?.hasNextPage), children: "Next \u2192" }), (0, jsx_runtime_1.jsx)("button", { onClick: () => setResolvedPage(resolvedStats?.pagination?.totalPages ?? 1), disabled: !resolvedStats?.pagination?.hasNextPage, style: paginationButtonStyle(!!resolvedStats?.pagination?.hasNextPage), children: "Last" })] })] }))] })), successStats && ((0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 8 }, children: [(0, jsx_runtime_1.jsx)(SectionHeader, { title: "Successful Files", count: successStats?.pagination?.totalRecords ?? 0, color: "#34d399", collapsed: successCollapsed, onToggle: () => setSuccessCollapsed((v) => !v) }), !successCollapsed && ((0, jsx_runtime_1.jsx)("div", { style: { display: 'flex', flexDirection: 'column', gap: 6 }, children: successLogs.map((row, i) => (0, jsx_runtime_1.jsx)(FileCard, { row: row }, i)) })), successStats?.pagination && (successStats.pagination.totalPages ?? 0) > 1 && !successCollapsed && ((0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.07)' }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { fontSize: 12, color: '#94a3b8' }, children: ["Page ", successStats?.pagination?.currentPage ?? 1, " of ", successStats?.pagination?.totalPages ?? 1, (0, jsx_runtime_1.jsxs)("span", { style: { marginLeft: 8, color: '#64748b' }, children: ["(showing ", successLogs.length, ")"] })] }), (0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', gap: 8 }, children: [(0, jsx_runtime_1.jsx)("button", { onClick: () => setSuccessPage(1), disabled: !successStats?.pagination?.hasPreviousPage, style: paginationButtonStyle(!!successStats?.pagination?.hasPreviousPage), children: "First" }), (0, jsx_runtime_1.jsx)("button", { onClick: () => setSuccessPage((successStats?.pagination?.currentPage ?? 1) - 1), disabled: !successStats?.pagination?.hasPreviousPage, style: paginationButtonStyle(!!successStats?.pagination?.hasPreviousPage), children: "\u2190 Previous" }), (0, jsx_runtime_1.jsx)("button", { onClick: () => setSuccessPage((successStats?.pagination?.currentPage ?? 1) + 1), disabled: !successStats?.pagination?.hasNextPage, style: paginationButtonStyle(!!successStats?.pagination?.hasNextPage), children: "Next \u2192" }), (0, jsx_runtime_1.jsx)("button", { onClick: () => setSuccessPage(successStats?.pagination?.totalPages ?? 1), disabled: !successStats?.pagination?.hasNextPage, style: paginationButtonStyle(!!successStats?.pagination?.hasNextPage), children: "Last" })] })] }))] })), stats.logs?.length === 0 && ((0, jsx_runtime_1.jsx)("div", { style: { textAlign: 'center', color: '#475569', padding: '30px 0', fontSize: 13 }, children: "No file logs recorded yet." }))] }))] })] }) }));
 }
 // ─── Tile ─────────────────────────────────────────────────────────────────────
 function ProjectTile({ project, index, onClick }) {
