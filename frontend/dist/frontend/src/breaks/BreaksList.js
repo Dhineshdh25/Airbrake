@@ -37,6 +37,7 @@ function StatusBadge({ status }) {
         new: { bg: 'rgba(99,102,241,0.15)', color: '#818cf8', border: 'rgba(99,102,241,0.3)', label: '● New' },
         existing: { bg: 'rgba(245,158,11,0.15)', color: '#fbbf24', border: 'rgba(245,158,11,0.3)', label: '◎ Existing' },
         regression: { bg: 'rgba(239,68,68,0.15)', color: '#f87171', border: 'rgba(239,68,68,0.3)', label: '⚠ Regression' },
+        resolved: { bg: 'rgba(52,211,153,0.15)', color: '#34d399', border: 'rgba(52,211,153,0.3)', label: '✓ Resolved' },
     };
     const s = styles[status] ?? styles.new;
     return ((0, jsx_runtime_1.jsx)("span", { style: {
@@ -66,6 +67,7 @@ function fmt(ts) {
 // ── Main component ────────────────────────────────────────────────────────────
 function BreaksList() {
     const navigate = (0, react_router_dom_1.useNavigate)();
+    const location = (0, react_router_dom_1.useLocation)();
     // ── Filter state ─────────────────────────────────────────────────────────
     const [page, setPage] = (0, react_1.useState)(1);
     const [statusFilter, setStatusFilter] = (0, react_1.useState)('');
@@ -105,6 +107,15 @@ function BreaksList() {
             .catch(e => console.error('[Breaks] failed to load semantic groups:', e))
             .finally(() => setGroupsLoading(false));
     }, [showGroupPanel, projectFilter]);
+    (0, react_1.useEffect)(() => {
+        const params = new URLSearchParams(location.search);
+        const projectFromUrl = params.get('project') ?? '';
+        const groupFromUrl = params.get('semantic_group') ?? '';
+        if (projectFromUrl)
+            setProjectFilter(projectFromUrl);
+        if (groupFromUrl)
+            setGroupFilter(groupFromUrl);
+    }, [location.search]);
     // ── Fetch breaks ──────────────────────────────────────────────────────────
     (0, react_1.useEffect)(() => {
         let cancelled = false;
@@ -160,7 +171,7 @@ function BreaksList() {
                     padding: '12px 14px',
                     background: 'var(--surface)', border: '1px solid var(--card-border)', borderRadius: 8,
                     alignItems: 'center',
-                }, children: [(0, jsx_runtime_1.jsxs)("select", { value: projectFilter, onChange: e => { setProjectFilter(e.target.value); setPage(1); }, "aria-label": "Project", style: selectStyle, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All Projects" }), projects.map(p => (0, jsx_runtime_1.jsx)("option", { value: p, children: p }, p))] }), (0, jsx_runtime_1.jsxs)("select", { "data-testid": "filter-status", value: statusFilter, onChange: e => { setStatusFilter(e.target.value); setPage(1); }, "aria-label": "Status", style: selectStyle, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All Statuses" }), (0, jsx_runtime_1.jsx)("option", { value: "new", children: "New" }), (0, jsx_runtime_1.jsx)("option", { value: "existing", children: "Existing" }), (0, jsx_runtime_1.jsx)("option", { value: "regression", children: "Regression" })] }), (0, jsx_runtime_1.jsxs)("button", { onClick: () => setShowGroupPanel(p => !p), title: "Filter by AI semantic error group", style: {
+                }, children: [(0, jsx_runtime_1.jsxs)("select", { value: projectFilter, onChange: e => { setProjectFilter(e.target.value); setPage(1); }, "aria-label": "Project", style: selectStyle, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All Projects" }), projects.map(p => (0, jsx_runtime_1.jsx)("option", { value: p, children: p }, p))] }), (0, jsx_runtime_1.jsxs)("select", { "data-testid": "filter-status", value: statusFilter, onChange: e => { setStatusFilter(e.target.value); setPage(1); }, "aria-label": "Status", style: selectStyle, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All Statuses" }), (0, jsx_runtime_1.jsx)("option", { value: "new", children: "New" }), (0, jsx_runtime_1.jsx)("option", { value: "existing", children: "Existing" }), (0, jsx_runtime_1.jsx)("option", { value: "regression", children: "Regression" }), (0, jsx_runtime_1.jsx)("option", { value: "resolved", children: "Resolved" })] }), (0, jsx_runtime_1.jsxs)("button", { onClick: () => setShowGroupPanel(p => !p), title: "Filter by AI semantic error group", style: {
                             padding: '7px 12px', borderRadius: 6, fontSize: 13, fontWeight: 600,
                             background: (showGroupPanel || groupFilter) ? 'rgba(56,189,248,0.15)' : 'var(--input-bg)',
                             color: (showGroupPanel || groupFilter) ? '#38bdf8' : 'var(--text-muted)',
@@ -225,11 +236,12 @@ function BreaksList() {
                                                         cursor: 'pointer', whiteSpace: 'nowrap',
                                                         maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis',
                                                         display: 'block',
-                                                    }, children: b.error_group_name })) : ((0, jsx_runtime_1.jsx)("span", { style: { fontSize: 11, color: 'var(--text-muted)', fontStyle: 'italic' }, children: "\u2014" })) }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px', textAlign: 'center' }, children: (0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }, children: [(0, jsx_runtime_1.jsx)("span", { style: { fontWeight: 700, fontSize: 13, color: b.occurrence_count > 1 ? '#fbbf24' : '#818cf8' }, children: b.occurrence_count }), b.representative_occurrence_number != null && ((0, jsx_runtime_1.jsxs)("span", { style: {
-                                                                fontSize: 11, fontWeight: 700, color: 'var(--text)',
-                                                                background: 'rgba(99,102,241,0.12)', padding: '4px 8px', borderRadius: 999,
-                                                                border: '1px solid rgba(99,102,241,0.18)'
-                                                            }, children: ["#", b.representative_occurrence_number] }))] }) }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px', color: 'var(--text-muted)', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, monospace', fontSize: 11 }, children: fmt(b.first_seen) }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px', color: 'var(--text-muted)', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, monospace', fontSize: 11 }, children: b.status === 'new' ? (0, jsx_runtime_1.jsx)("span", { style: { color: '#475569' }, children: "\u2014" }) : fmt(b.last_seen) }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px' }, children: (0, jsx_runtime_1.jsx)(StatusBadge, { status: b.status }) })] }, i))) })] }) }), (0, jsx_runtime_1.jsxs)("div", { "data-testid": "pagination", style: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, marginTop: 20 }, children: [(0, jsx_runtime_1.jsx)("button", { "data-testid": "prev-page", disabled: page <= 1, onClick: () => setPage(p => p - 1), style: {
+                                                    }, children: b.error_group_name })) : ((0, jsx_runtime_1.jsx)("span", { style: { fontSize: 11, color: 'var(--text-muted)', fontStyle: 'italic' }, children: "\u2014" })) }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px', textAlign: 'center' }, children: (0, jsx_runtime_1.jsx)("span", { style: {
+                                                        fontWeight: 700, fontSize: 13,
+                                                        color: b.status === 'new' ? '#818cf8'
+                                                            : b.status === 'regression' ? '#f87171'
+                                                                : '#fbbf24',
+                                                    }, children: b.occurrence_count }) }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px', color: 'var(--text-muted)', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, monospace', fontSize: 11 }, children: fmt(b.first_seen) }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px', color: 'var(--text-muted)', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, monospace', fontSize: 11 }, children: b.status === 'new' ? (0, jsx_runtime_1.jsx)("span", { style: { color: '#475569' }, children: "\u2014" }) : fmt(b.last_seen) }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px' }, children: (0, jsx_runtime_1.jsx)(StatusBadge, { status: b.status }) })] }, i))) })] }) }), (0, jsx_runtime_1.jsxs)("div", { "data-testid": "pagination", style: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, marginTop: 20 }, children: [(0, jsx_runtime_1.jsx)("button", { "data-testid": "prev-page", disabled: page <= 1, onClick: () => setPage(p => p - 1), style: {
                                     padding: '7px 16px', background: 'var(--surface)',
                                     border: '1px solid var(--card-border)', borderRadius: 6,
                                     color: page <= 1 ? 'var(--text-muted)' : 'var(--text)',

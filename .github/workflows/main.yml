@@ -94,9 +94,16 @@ jobs:
           # Complete ai/ package (knowledge_base, recommendations, embeddings, llm, etc.)
           cp -r ai/ package/ai/
 
+          # Jira OAuth integration package (Phase 1)
+          cp -r jira/ package/jira/
+
           # Verify ai/ made it in with all expected modules
           echo "--- Contents of package/ai/ ---"
           ls -la package/ai/
+
+          # Verify jira/ made it in
+          echo "--- Contents of package/jira/ ---"
+          ls -la package/jira/
 
           # Fail explicitly if any critical file is missing
           for f in \
@@ -111,7 +118,13 @@ jobs:
             package/ai/bedrock_embeddings.py \
             package/ai/bedrock_llm.py \
             package/ai/pinecone_service.py \
-            package/ai/diagnostics.py; do
+            package/ai/diagnostics.py \
+            package/jira/__init__.py \
+            package/jira/oauth.py \
+            package/jira/token_store.py \
+            package/jira/client.py \
+            package/jira/ticket_service.py \
+            package/jira/routes.py; do
             if [ ! -f "$f" ]; then
               echo "MISSING: $f"
               exit 1

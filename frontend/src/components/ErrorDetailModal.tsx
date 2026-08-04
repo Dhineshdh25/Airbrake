@@ -309,6 +309,12 @@ export function ErrorDetailModal({
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState('');
 
+  // ── Jira ticket state ─────────────────────────────────────────────────────
+  const [jiraStatus, setJiraStatus]     = useState<'idle' | 'creating' | 'created' | 'error'>('idle');
+  const [jiraTicket, setJiraTicket]     = useState<{ key: string; url: string } | null>(null);
+  const [jiraError,  setJiraError]      = useState('');
+  const [jiraConnected, setJiraConnected] = useState<boolean | null>(null); // null = unknown
+
   // ── The specific log row id to target for resolve/reopen ─────────────────
   // When opened from BreaksList, row.representative_id is the most-recent
   // open log row id from the grouped query. We send it on every resolve/reopen
@@ -465,6 +471,72 @@ export function ErrorDetailModal({
     } catch (e) {
       setActionError(e instanceof ApiError ? e.label : String(e));
     } finally { setActionBusy(false); }
+  }
+
+  // ── Jira: check connection status when modal opens ────────────────────────
+  useEffect(() => {
+    if (!effectiveErrorHash) return;
+    apiFetch('/api/jira/status')
+      .then(r => r.json())
+      .then((j: { connected: boolean }) => setJiraConnected(j.connected))
+      .catch(() => setJiraConnected(false));
+  }, [effectiveErrorHash]);
+
+  // ── Jira: create ticket ───────────────────────────────────────────────────
+  async function handleCreateJiraTicket() {
+    // If not connected, redirect to OAuth login flow
+    if (!jiraConnected) {
+      window.location.href = '/api/jira/login';
+      return;
+    }
+
+    setJiraStatus('creating');
+    setJiraError('');
+    setJiraTicket(null);
+
+    try {
+      const r = await apiFetch('/api/jira/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_name:      projectName   || undefined,
+          error_group:       data?.error_group_name || undefined,
+          error_message:     errorMessage  || undefined,
+          error_detail:      data?.error_detail     || undefined,
+          error_hash:        effectiveErrorHash      || undefined,
+          occurrence_count:  data?.occurrence_count  ?? undefined,
+          status:            data?.error_status      || undefined,
+          solution:          data?.solution?.solution || undefined,
+          ai_recommendation: data?.ai_recommendation?.recommendation || undefined,
+          timestamp:         data?.last_seen         || undefined,
+          file_name:         data?.file_name         || undefined,
+          airbrake_url:      effectiveErrorHash
+            ? `${window.location.origin}/breaks/${effectiveErrorHash}${projectName ? `?project_name=${encodeURIComponent(projectName)}` : ''}`
+            : undefined,
+        }),
+      });
+      const j = await r.json();
+      setJiraTicket({ key: j.key, url: j.url });
+      setJiraStatus('created');
+    } catch (e: unknown) {
+      let msg = 'Failed to create Jira ticket.';
+      if (e instanceof ApiError) {
+        if (e.status === 401) {
+          // Token revoked — send user to reconnect
+          msg = 'Your Jira session expired. Reconnecting…';
+          setJiraError(msg);
+          setJiraStatus('error');
+          setTimeout(() => { window.location.href = '/api/jira/login'; }, 1500);
+          return;
+        }
+        if (e.status === 403 || e.status === 502) {
+          // Try to surface the Jira permission error
+          msg = "You don't have permission to create issues in this Jira project. Contact your Jira administrator.";
+        }
+      }
+      setJiraError(msg);
+      setJiraStatus('error');
+    }
   }
 
   // ── Reopen ───────────────────────────────────────────────────────────────
@@ -1066,6 +1138,59 @@ export function ErrorDetailModal({
             >
               {editorSaving ? 'Saving…' : improveTargetId ? 'Save Improved Version' : 'Save Solution'}
             </button>
+
+            {/* ── Create Jira Ticket ──────────────────────────────────────── */}
+            {jiraStatus !== 'created' ? (
+              <button
+                onClick={handleCreateJiraTicket}
+                disabled={jiraStatus === 'creating'}
+                title={jiraConnected === false ? 'Connect your Jira account to create tickets' : 'Create a Jira ticket from this error'}
+                style={{
+                  ...btnSecondary,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  opacity: jiraStatus === 'creating' ? 0.6 : 1,
+                  cursor: jiraStatus === 'creating' ? 'not-allowed' : 'pointer',
+                  borderColor: jiraStatus === 'error' ? 'rgba(239,68,68,0.4)' : undefined,
+                  color: jiraStatus === 'error' ? '#f87171' : undefined,
+                }}
+              >
+                <span style={{ fontSize: 13 }}>🎫</span>
+                {jiraStatus === 'creating'
+                  ? 'Creating…'
+                  : jiraConnected === false
+                    ? 'Connect Jira'
+                    : 'Create Jira Ticket'}
+              </button>
+            ) : (
+              /* ── Ticket created confirmation ───────────────────────────── */
+              <a
+                href={jiraTicket?.url ?? '#'}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  ...btnSecondary,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  textDecoration: 'none',
+                  color: '#34d399',
+                  borderColor: 'rgba(52,211,153,0.35)',
+                  background: 'rgba(52,211,153,0.08)',
+                }}
+              >
+                <span>✓</span>
+                <span style={{ fontWeight: 700 }}>Ticket Created</span>
+                <span style={{ color: '#818cf8' }}>{jiraTicket?.key}</span>
+                <span style={{ fontSize: 10, opacity: 0.6 }}>↗</span>
+              </a>
+            )}
+            {jiraStatus === 'error' && jiraError && (
+              <div style={{ fontSize: 11, color: '#f87171', marginTop: 4, width: '100%', textAlign: 'right' }}>
+                {jiraError}
+              </div>
+            )}
           </div>
         </div>
 

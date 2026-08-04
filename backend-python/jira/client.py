@@ -1,0 +1,100 @@
+"""
+Jira REST API client.
+
+Wraps the Atlassian REST API v3 calls needed for Phase 1:
+  - Creating an issue
+  - Resolving the site URL for building browse links
+
+The client always uses the token belonging to the requesting Airbrake user so
+every ticket is created under that user's Jira identity (not a shared bot).
+
+DO NOT log access_token values.
+"""
+
+import os
+import logging
+import requests
+
+logger = logging.getLogger(__name__)
+
+_TIMEOUT = 15  # seconds
+
+
+class JiraClient:
+    """Thin wrapper around the Atlassian REST API using an OAuth access token."""
+
+    def __init__(self, access_token: str, cloud_id: str):
+        self._access_token = access_token
+        self._cloud_id     = cloud_id
+        self._base          = f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3"
+        self._headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept":        "application/json",
+            "Content-Type":  "application/json",
+        }
+
+    # ── Issue creation ────────────────────────────────────────────────────────
+
+    def create_issue(self, project_key: str, summary: str, description_adf: dict) -> dict:
+        """
+        Create a Jira issue and return { key, id, url }.
+
+        summary          — plain text (≤ 255 chars)
+        description_adf  — Atlassian Document Format dict
+        """
+        payload = {
+            "fields": {
+                "project":     {"key": project_key},
+                "summary":     summary[:255],
+                "description": description_adf,
+                "issuetype":   {"name": "Bug"},
+            }
+        }
+        url = f"{self._base}/issue"
+        logger.info(
+            "[Jira Client] Creating issue project=%s summary=%s",
+            project_key, summary[:80],
+        )
+        resp = requests.post(url, json=payload, headers=self._headers, timeout=_TIMEOUT)
+
+        if not resp.ok:
+            logger.error(
+                "[Jira Client] create_issue failed status=%s body=%s",
+                resp.status_code, resp.text[:500],
+            )
+            resp.raise_for_status()
+
+        data       = resp.json()
+        ticket_key = data.get("key", "")
+        ticket_id  = data.get("id", "")
+
+        # Build browse URL using the cloud site URL
+        browse_url = self._build_browse_url(ticket_key)
+
+        logger.info(
+            "[Jira Client] Issue created key=%s id=%s url=%s",
+            ticket_key, ticket_id, browse_url,
+        )
+        return {"key": ticket_key, "id": ticket_id, "url": browse_url}
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _build_browse_url(self, ticket_key: str) -> str:
+        """Build the human-readable browse URL for a ticket key."""
+        try:
+            resp = requests.get(
+                "https://api.atlassian.com/oauth/token/accessible-resources",
+                headers={"Authorization": f"Bearer {self._access_token}", "Accept": "application/json"},
+                timeout=_TIMEOUT,
+            )
+            if resp.ok:
+                resources = resp.json()
+                if resources:
+                    site_url = resources[0].get("url", "")
+                    if site_url:
+                        return f"{site_url}/browse/{ticket_key}"
+        except Exception as exc:
+            logger.warning("[Jira Client] Could not resolve site URL: %s", exc)
+
+        # Fallback: use configured cloud ID in a generic URL pattern
+        return f"https://your-domain.atlassian.net/browse/{ticket_key}"

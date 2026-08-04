@@ -158,6 +158,7 @@ function ProjectModal({ project, onClose }) {
             const tomorrow = new Date(today);
             tomorrow.setDate(tomorrow.getDate() + 1);
             dateParams = `&from=${today.toISOString()}&to=${tomorrow.toISOString()}`;
+            console.log('[LogStream] Daily filter:', { from: today.toISOString(), to: tomorrow.toISOString() });
         }
         else if (timePeriod === 'weekly') {
             const weekAgo = new Date();
@@ -165,6 +166,7 @@ function ProjectModal({ project, onClose }) {
             weekAgo.setHours(0, 0, 0, 0);
             const now = new Date();
             dateParams = `&from=${weekAgo.toISOString()}&to=${now.toISOString()}`;
+            console.log('[LogStream] Weekly filter:', { from: weekAgo.toISOString(), to: now.toISOString() });
         }
         else if (timePeriod === 'custom' && customFrom && customTo && customApplyTick > 0) {
             const fromDate = new Date(customFrom);
@@ -172,11 +174,21 @@ function ProjectModal({ project, onClose }) {
             const toDate = new Date(customTo);
             toDate.setHours(23, 59, 59, 999);
             dateParams = `&from=${fromDate.toISOString()}&to=${toDate.toISOString()}`;
+            console.log('[LogStream] Custom filter:', { from: fromDate.toISOString(), to: toDate.toISOString() });
         }
-        (0, api_1.apiFetch)(`/api/projects/${encodeURIComponent(project.name)}/logs?page=${currentPage}&limit=50${dateParams}`)
+        const apiUrl = `/api/projects/${encodeURIComponent(project.name)}/logs?page=${currentPage}&limit=50${dateParams}`;
+        console.log('[LogStream] Fetching:', apiUrl);
+        (0, api_1.apiFetch)(apiUrl)
             .then((r) => r.json())
-            .then((d) => { setStats(d); setLoading(false); })
-            .catch(() => setLoading(false));
+            .then((d) => {
+            console.log('[LogStream] Response:', d);
+            setStats(d);
+            setLoading(false);
+        })
+            .catch((err) => {
+            console.error('[LogStream] Error:', err);
+            setLoading(false);
+        });
     }, [project.name, currentPage, timePeriod, customApplyTick]);
     // Filter logs by status - no slicing, show all in current page
     const failedLogs = stats?.logs?.filter((r) => !!r.error && !r.isResolved) ?? [];
@@ -234,7 +246,10 @@ function ProjectModal({ project, onClose }) {
                             }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }, children: [(0, jsx_runtime_1.jsx)("span", { style: { fontSize: 11, fontWeight: 600, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.5px' }, children: "Time Period:" }), (0, jsx_runtime_1.jsx)("div", { style: {
                                                 display: 'flex', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)',
                                                 borderRadius: 8, padding: 3, gap: 2,
-                                            }, children: ['daily', 'weekly', 'custom'].map((period) => ((0, jsx_runtime_1.jsx)("button", { onClick: () => setTimePeriod(period), style: {
+                                            }, children: ['daily', 'weekly', 'custom'].map((period) => ((0, jsx_runtime_1.jsx)("button", { onClick: () => {
+                                                    setTimePeriod(period);
+                                                    setCurrentPage(1); // Reset to first page when changing time period
+                                                }, style: {
                                                     padding: '5px 12px', borderRadius: 6, fontSize: 11, fontWeight: 600,
                                                     border: 'none', cursor: 'pointer', textTransform: 'capitalize',
                                                     background: timePeriod === period ? '#6366f1' : 'transparent',
