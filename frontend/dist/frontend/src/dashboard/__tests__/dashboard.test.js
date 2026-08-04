@@ -12,6 +12,7 @@ const ErrorRateTrendWidget_1 = require("../ErrorRateTrendWidget");
 const SeverityBreakdownWidget_1 = require("../SeverityBreakdownWidget");
 const TimeSeriesWidget_1 = require("../TimeSeriesWidget");
 const TopServicesWidget_1 = require("../TopServicesWidget");
+const Dashboard_1 = require("../Dashboard");
 describe('BreakCountWidget', () => {
     it('renders 24h and 7d counts', () => {
         (0, react_1.render)((0, jsx_runtime_1.jsx)(BreakCountWidget_1.BreakCountWidget, { data: { last24h: 42, last7d: 300 } }));
@@ -83,6 +84,40 @@ describe('SeverityBreakdownWidget', () => {
     it('shows empty state when no data', () => {
         (0, react_1.render)((0, jsx_runtime_1.jsx)(SeverityBreakdownWidget_1.SeverityBreakdownWidget, { breakdown: [] }));
         expect(react_1.screen.getByTestId('severity-empty')).toBeInTheDocument();
+    });
+});
+describe('summarizeSemanticGroupsForToday', () => {
+    it('prefers semantic group names and falls back for JSON-format errors', () => {
+        const rows = [
+            { error: 'LLM output was not valid JSON', error_group_name: 'JSON format error' },
+            { error: 'LLM output was not valid JSON' },
+            { error: 'File not found: uploads/missing.txt' },
+        ];
+        expect((0, Dashboard_1.normalizeSemanticGroupName)(rows[1])).toBe('JSON format error');
+        expect((0, Dashboard_1.summarizeSemanticGroupsForToday)(rows)).toEqual([
+            { name: 'JSON format error', value: 2 },
+            { name: 'File not found', value: 1 },
+        ]);
+    });
+    it('keeps the semantic group id when present', () => {
+        const rows = [
+            { project: 'fm_structuring', error: 'Syntax & Parsing error', error_group_name: 'Syntax & Parsing', error_group_id: 'group-123' },
+            { project: 'fm_structuring', error: 'Syntax & Parsing error', error_group_name: 'Syntax & Parsing', error_group_id: 'group-123' },
+        ];
+        expect((0, Dashboard_1.summarizeSemanticGroupsForToday)(rows, 'fm_structuring')).toEqual([
+            { id: 'group-123', name: 'Syntax & Parsing', value: 2 },
+        ]);
+    });
+    it('filters the summary to the selected project', () => {
+        const rows = [
+            { project: 'Alpha', error: 'LLM output was not valid JSON' },
+            { project: 'Alpha', error: 'File not found: uploads/missing.txt' },
+            { project: 'Beta', error: 'LLM output was not valid JSON' },
+        ];
+        expect((0, Dashboard_1.summarizeSemanticGroupsForToday)(rows, 'Alpha')).toEqual([
+            { name: 'File not found', value: 1 },
+            { name: 'JSON format error', value: 1 },
+        ]);
     });
 });
 //# sourceMappingURL=dashboard.test.js.map

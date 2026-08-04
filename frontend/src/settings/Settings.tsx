@@ -6,6 +6,7 @@
 import React, { useEffect, useState } from 'react';
 import type { RetentionPolicy, Role, User } from '@portal/shared';
 import { apiFetch } from '../lib/api';
+import { JiraSettings } from './JiraSettings';
 
 interface Props {
   readonly role: Role;
@@ -61,7 +62,17 @@ export function Settings({ role }: Props) {
     return () => { cancelled = true; };
   }, [isAdmin]);
 
-  if (!isAdmin) return null;
+  if (!isAdmin) {
+    // Non-admin users still see the Jira integration panel
+    return (
+      <div data-testid="settings">
+        <div style={{ marginBottom: 28 }}>
+          <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>Settings</h2>
+        </div>
+        <JiraSettings />
+      </div>
+    );
+  }
 
   return (
     <div data-testid="settings">
@@ -153,6 +164,9 @@ export function Settings({ role }: Props) {
               </select>
             </div>
           </section>
+
+          {/* Jira integration — shown to all authenticated users, not admin-only */}
+          <JiraSettings />
         </div>
       )}
     </div>

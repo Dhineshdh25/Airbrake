@@ -8,6 +8,7 @@ const jsx_runtime_1 = require("react/jsx-runtime");
  */
 const react_1 = require("react");
 const api_1 = require("../lib/api");
+const JiraSettings_1 = require("./JiraSettings");
 const selectStyle = {
     background: 'var(--input-bg)',
     border: '1px solid var(--input-border)',
@@ -53,8 +54,10 @@ function Settings({ role }) {
             setLoading(false); });
         return () => { cancelled = true; };
     }, [isAdmin]);
-    if (!isAdmin)
-        return null;
+    if (!isAdmin) {
+        // Non-admin users still see the Jira integration panel
+        return ((0, jsx_runtime_1.jsxs)("div", { "data-testid": "settings", children: [(0, jsx_runtime_1.jsx)("div", { style: { marginBottom: 28 }, children: (0, jsx_runtime_1.jsx)("h2", { style: { fontSize: 22, fontWeight: 700, marginBottom: 4 }, children: "Settings" }) }), (0, jsx_runtime_1.jsx)(JiraSettings_1.JiraSettings, {})] }));
+    }
     return ((0, jsx_runtime_1.jsxs)("div", { "data-testid": "settings", children: [(0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 28 }, children: [(0, jsx_runtime_1.jsx)("h2", { style: { fontSize: 22, fontWeight: 700, marginBottom: 4 }, children: "Settings" }), (0, jsx_runtime_1.jsx)("p", { style: { fontSize: 13, color: 'var(--text-muted)' }, children: "Manage users and data retention policies" })] }), loading ? ((0, jsx_runtime_1.jsx)("div", { "data-testid": "settings-loading", style: { padding: '40px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }, children: "Loading\u2026" })) : ((0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', flexDirection: 'column', gap: 24 }, children: [(0, jsx_runtime_1.jsxs)("section", { "data-testid": "user-management", style: {
                             background: 'var(--surface)',
                             border: '1px solid var(--card-border)',
@@ -72,6 +75,6 @@ function Settings({ role }) {
                             border: '1px solid var(--card-border)',
                             borderRadius: 'var(--radius-md)',
                             padding: '18px',
-                        }, children: [(0, jsx_runtime_1.jsx)("h3", { style: { fontSize: 14, fontWeight: 600, marginBottom: 14 }, children: "Data Retention" }), (0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', alignItems: 'center', gap: 12 }, children: [(0, jsx_runtime_1.jsx)("label", { htmlFor: "retention-select", style: { fontSize: 13, color: 'var(--text-muted)' }, children: "Retention period" }), (0, jsx_runtime_1.jsxs)("select", { id: "retention-select", "data-testid": "retention-selector", value: retention?.retentionDays ?? 30, onChange: () => { }, "aria-label": "Retention period", style: selectStyle, children: [(0, jsx_runtime_1.jsx)("option", { value: 30, children: "30 days" }), (0, jsx_runtime_1.jsx)("option", { value: 60, children: "60 days" }), (0, jsx_runtime_1.jsx)("option", { value: 90, children: "90 days" })] })] })] })] }))] }));
+                        }, children: [(0, jsx_runtime_1.jsx)("h3", { style: { fontSize: 14, fontWeight: 600, marginBottom: 14 }, children: "Data Retention" }), (0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', alignItems: 'center', gap: 12 }, children: [(0, jsx_runtime_1.jsx)("label", { htmlFor: "retention-select", style: { fontSize: 13, color: 'var(--text-muted)' }, children: "Retention period" }), (0, jsx_runtime_1.jsxs)("select", { id: "retention-select", "data-testid": "retention-selector", value: retention?.retentionDays ?? 30, onChange: () => { }, "aria-label": "Retention period", style: selectStyle, children: [(0, jsx_runtime_1.jsx)("option", { value: 30, children: "30 days" }), (0, jsx_runtime_1.jsx)("option", { value: 60, children: "60 days" }), (0, jsx_runtime_1.jsx)("option", { value: 90, children: "90 days" })] })] })] }), (0, jsx_runtime_1.jsx)(JiraSettings_1.JiraSettings, {})] }))] }));
 }
 //# sourceMappingURL=Settings.js.map

@@ -390,6 +390,10 @@ except Exception as exc:
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 
+# ── Jira OAuth integration (Phase 1) ─────────────────────────────────────────
+from jira import jira_bp          # noqa: E402
+app.register_blueprint(jira_bp)   # registers all /api/jira/* routes
+
 # ── SSE (Server-Sent Events) Infrastructure ──────────────────────────────────
 class SSEConnectionManager:
     """Manages SSE connections for real-time log streaming."""
