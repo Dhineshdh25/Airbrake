@@ -16,7 +16,25 @@ declare const __API_BASE_URL__: string | undefined;
 export const API_BASE_URL: string =
   typeof __API_BASE_URL__ !== 'undefined' ? __API_BASE_URL__ : '';
 
-// ─── Error type ───────────────────────────────────────────────────────────────
+// ─── Stable device identity ───────────────────────────────────────────────────
+// Generated once per browser profile, never rotated.
+// Seeded here at module load time so it exists before any apiFetch call,
+// regardless of whether the user has visited ProtectedRoute yet.
+// This is the key used for Jira token storage — isolates each browser session.
+function _ensureDeviceId(): string {
+  let id = localStorage.getItem('device_id');
+  if (!id) {
+    id = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+    localStorage.setItem('device_id', id);
+  }
+  return id;
+}
+// Seed immediately on import
+const _deviceId = _ensureDeviceId();
+
+export function getDeviceId(): string {
+  return _deviceId || _ensureDeviceId();
+}
 
 export class ApiError extends Error {
   constructor(
@@ -71,11 +89,8 @@ export async function apiFetch(
       ...(localStorage.getItem('session_token')
         ? { Authorization: `Bearer ${localStorage.getItem('session_token')}` }
         : {}),
-      // Stable device identity — used by Jira token store so the user's
-      // Jira connection survives logout/login cycles on the same browser.
-      ...(localStorage.getItem('device_id')
-        ? { 'X-Device-ID': localStorage.getItem('device_id')! }
-        : {}),
+      // Stable device identity — always present, seeded at module load time.
+      'X-Device-ID': getDeviceId(),
       ...(init?.headers ?? {}),
     },
   });

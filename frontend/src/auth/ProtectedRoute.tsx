@@ -16,5 +16,15 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
     return <Navigate to={`/auth/login?redirect_uri=${redirectUri}`} replace />;
   }
 
+  // Ensure every authenticated browser session has a stable device_id.
+  // This runs on every page load so already-logged-in users get one
+  // immediately without needing to log out and back in.
+  if (!localStorage.getItem('device_id')) {
+    localStorage.setItem(
+      'device_id',
+      crypto.randomUUID().replace(/-/g, '').slice(0, 16),
+    );
+  }
+
   return <>{children}</>;
 }

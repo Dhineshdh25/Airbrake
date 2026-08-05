@@ -34,6 +34,31 @@ logger = logging.getLogger(__name__)
 
 jira_bp = Blueprint("jira", __name__, url_prefix="/api/jira")
 
+# ── Legacy shared userIds that must never hold Jira tokens ───────────────────
+# These were the old role-based keys used before per-device isolation.
+# Any token stored under these keys is visible to ALL users on that role.
+_LEGACY_SHARED_USER_IDS = {"dev-admin", "dev-developer", "dev-viewer"}
+
+
+def _purge_legacy_shared_tokens() -> None:
+    """Delete any Jira tokens stored under the old shared role-based userIds.
+
+    Called on every /status request so the cleanup happens automatically
+    the first time any user loads Settings after the device_id fix deploys.
+    Safe to call repeatedly — deletes nothing if already clean.
+    """
+    try:
+        from db import execute
+        for uid in _LEGACY_SHARED_USER_IDS:
+            execute(
+                "DELETE FROM projects_data "
+                "WHERE row_type = 'jira_token' "
+                "AND metadata::jsonb->>'user_id' = %s",
+                (uid,),
+            )
+    except Exception as exc:
+        logger.warning("[Jira Routes] Legacy token purge failed (non-fatal): %s", exc)
+
 # ── In-process state store — only used for the brief OAuth round-trip ─────────
 # Maps user_id → CSRF state token.  Cleared after the callback is handled.
 #
@@ -240,6 +265,13 @@ def jira_status():
     user_id, err = _require_auth()
     if err:
         return err
+
+    # ── One-time cleanup of legacy shared tokens ──────────────────────────────
+    # Before device_id was introduced, tokens were stored under shared role-based
+    # userIds (dev-admin, dev-developer, dev-viewer). These must be deleted so
+    # they stop appearing as connected for everyone on that role.
+    # Safe to run on every status call — execute() is a no-op if nothing matches.
+    _purge_legacy_shared_tokens()
 
     token = get_token(user_id)
     if token:
