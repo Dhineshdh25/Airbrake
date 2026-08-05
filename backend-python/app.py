@@ -4213,6 +4213,33 @@ def get_break_detail(error_hash):
         last_seen = max(timestamps) if timestamps else None
         file_name = next((r.get("file_name") for r in error_rows if r.get("file_name")), first.get("file_name"))
 
+        # ── Jira ticket mapping: check if we've already created a Jira ticket
+        # for this error_hash (or its candidates). If present, include it so
+        # the frontend can show the existing ticket and avoid duplicate creation.
+        jira_ticket = None
+        try:
+            jt_params = list(hash_candidates) if hash_candidates else [error_hash]
+            jt_where = ' OR '.join(["metadata::jsonb->>'error_hash' = %s"] * len(jt_params))
+            jt_sql = f"SELECT metadata FROM {TABLE} WHERE row_type = 'jira_ticket' AND ({jt_where})"
+            if project_name:
+                jt_sql += " AND LOWER(metadata::jsonb->>'project_name') = LOWER(%s)"
+                jt_params.append(project_name)
+            jt_sql += " ORDER BY created_at DESC LIMIT 1"
+            jt_rows = query(jt_sql, tuple(jt_params))
+            if jt_rows:
+                raw = jt_rows[0].get('metadata')
+                if raw:
+                    try:
+                        parsed = json.loads(raw) if isinstance(raw, str) else raw
+                        jira_ticket = {
+                            'key': parsed.get('jira_key') or parsed.get('key'),
+                            'url': parsed.get('jira_url') or parsed.get('url'),
+                        }
+                    except Exception:
+                        logger.exception('[Breaks:detail] Failed to parse jira_ticket metadata')
+        except Exception as _jt_exc:
+            logger.exception('[Breaks:detail] Jira ticket lookup failed: %s', _jt_exc)
+
         # ── Status: use the SPECIFIC row when log_id supplied, not group aggregate ──
         # This is the critical fix: when the user opens a specific occurrence,
         # its error_status must come from that row alone.  Aggregating with

@@ -17,6 +17,9 @@ from typing import Optional
 from .client import JiraClient
 from .oauth import refresh_access_token
 from .token_store import get_token, save_token, is_token_expired
+import json
+import uuid
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,28 @@ def create_jira_ticket(user_id: str, error_data: dict) -> dict:
         access_token=token["access_token"],
         cloud_id=token["cloud_id"],
     )
+
+    # Check if a ticket already exists for this error to prevent duplicates
+    error_hash = error_data.get("error_hash")
+    project_name = error_data.get("project_name")
+    existing = None
+    
+    if error_hash:
+        try:
+            existing = find_jira_ticket_by_hash(error_hash, project_name)
+        except Exception:
+            logger.exception("[Jira TicketService] Failed to lookup existing ticket")
+            # Continue anyway - better to create a potential duplicate than fail
+    
+    if existing:
+        jira_key = existing.get("jira_key") or existing.get("key")
+        jira_id = existing.get("jira_id") or existing.get("id")
+        jira_url = existing.get("jira_url") or existing.get("url")
+        logger.info(
+            "[Jira TicketService] Reusing existing ticket for error_hash=%s key=%s",
+            error_hash, jira_key,
+        )
+        return {"key": jira_key, "id": jira_id, "url": jira_url}
 
     try:
         result = client.create_issue(project_key, summary, description_adf)
@@ -111,7 +136,75 @@ def create_jira_ticket(user_id: str, error_data: dict) -> dict:
         "[Jira TicketService] Ticket created user_id=%s key=%s",
         user_id, result.get("key"),
     )
+
+    # Save ticket to database - if this fails, log prominently but don't fail
+    # the request since the Jira ticket was already created successfully
+    if error_hash:
+        payload = {
+            "error_hash": error_hash,
+            "project_name": project_name,
+            "jira_key": result.get("key"),
+            "jira_id": result.get("id"),
+            "jira_url": result.get("url"),
+            # Also store the canonical Jira response keys for compatibility
+            "key": result.get("key"),
+            "id": result.get("id"),
+            "url": result.get("url"),
+            "created_by": user_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        
+        try:
+            # Try to insert the ticket directly (simpler than claim/update pattern)
+            inserted = try_claim_jira_ticket(error_hash, project_name, payload)
+            if inserted:
+                logger.info(
+                    "[Jira TicketService] SUCCESS: Ticket metadata saved to database key=%s hash=%s",
+                    result.get("key"),
+                    error_hash
+                )
+            else:
+                # Unique constraint violation - ticket already exists
+                logger.warning(
+                    "[Jira TicketService] WARNING: Ticket already exists in database (unique constraint) key=%s",
+                    result.get("key")
+                )
+        except Exception as db_error:
+            # Database save failed - log prominently so we can investigate
+            logger.exception(
+                "[Jira TicketService] CRITICAL ERROR: Failed to save ticket metadata to database"
+            )
+            logger.error(
+                "ORPHANED TICKET ALERT: Ticket %s (id=%s) was created in Jira but NOT saved to database. "
+                "Error: %s. Manual backfill required. Ticket payload: error_hash=%s, project=%s, url=%s",
+                result.get("key"),
+                result.get("id"),
+                str(db_error),
+                error_hash,
+                project_name,
+                result.get("url")
+            )
+            # Don't raise - Jira ticket creation was successful, that's what matters most
+    
     return result
+
+
+# ── DB helpers for ticket metadata ───────────────────────────────────────────
+try:
+    from db import query, execute, execute_returning, try_claim_jira_ticket, update_claimed_jira_ticket, find_jira_ticket_by_hash
+except Exception as _db_exc:  # pragma: no cover
+    def query(*a, **kw):
+        raise RuntimeError(f"DB unavailable: {_db_exc}")
+    def execute(*a, **kw):
+        raise RuntimeError(f"DB unavailable: {_db_exc}")
+    def execute_returning(*a, **kw):
+        raise RuntimeError(f"DB unavailable: {_db_exc}")
+    def try_claim_jira_ticket(*a, **kw):
+        raise RuntimeError(f"DB unavailable: {_db_exc}")
+    def update_claimed_jira_ticket(*a, **kw):
+        raise RuntimeError(f"DB unavailable: {_db_exc}")
+    def find_jira_ticket_by_hash(*a, **kw):
+        raise RuntimeError(f"DB unavailable: {_db_exc}")
 
 
 # ── Token helpers ─────────────────────────────────────────────────────────────

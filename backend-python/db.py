@@ -20,6 +20,8 @@ import psycopg2
 import psycopg2.extras
 import boto3
 from typing import Optional
+import json
+import uuid
 
 # Load .env file for local development (no-op in Lambda)
 try:
@@ -127,3 +129,67 @@ def execute_returning(sql: str, params=None) -> Optional[dict]:
         cur.execute(sql, params or ())
         row = cur.fetchone()
         return dict(row) if row else None
+
+
+def try_claim_jira_ticket(error_hash: str, project_name: Optional[str], metadata: dict) -> bool:
+    """Attempt to insert a placeholder jira_ticket row.
+
+    Returns True if inserted (claim succeeded), False if a conflict occurred.
+    """
+    conn = get_connection()
+    row_id = str(uuid.uuid4())
+    payload = metadata.copy()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO projects_data (id, row_type, metadata, created_at) VALUES (%s,'jira_ticket',%s,NOW())",
+                (row_id, json.dumps(payload)),
+            )
+        return True
+    except psycopg2.IntegrityError as exc:
+        # Unique constraint (index) violation — another worker claimed it
+        conn.rollback()
+        return False
+
+
+def update_claimed_jira_ticket(error_hash: str, project_name: Optional[str], metadata: dict) -> int:
+    """Update the most recent jira_ticket claim row for this error_hash with full metadata.
+
+    Returns number of rows updated (0 or 1).
+    """
+    conn = get_connection()
+    params = [json.dumps(metadata), error_hash]
+    sql = (
+        "UPDATE projects_data SET metadata = %s WHERE id = ("
+        "SELECT id FROM projects_data WHERE row_type = 'jira_ticket' AND metadata::jsonb->>'error_hash' = %s "
+    )
+    if project_name:
+        sql += "AND metadata::jsonb->>'project_name' = %s "
+        params.append(project_name)
+    sql += "ORDER BY created_at DESC LIMIT 1)"
+    with conn.cursor() as cur:
+        cur.execute(sql, tuple(params))
+        return cur.rowcount
+
+
+def find_jira_ticket_by_hash(error_hash: str, project_name: Optional[str]) -> Optional[dict]:
+    """Return the most recent jira_ticket metadata dict for this error_hash, or None."""
+    if not error_hash:
+        return None
+    params = [error_hash]
+    sql = (
+        "SELECT metadata FROM projects_data "
+        "WHERE row_type = 'jira_ticket' AND metadata::jsonb->>'error_hash' = %s "
+    )
+    if project_name:
+        sql += "AND metadata::jsonb->>'project_name' = %s "
+        params.append(project_name)
+    sql += "ORDER BY created_at DESC LIMIT 1"
+    rows = query(sql, tuple(params))
+    if not rows:
+        return None
+    raw = rows[0].get('metadata')
+    try:
+        return json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return None
