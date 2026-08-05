@@ -18,7 +18,7 @@ export default defineConfig(({ mode }) => {
       },
     },
     build: {
-      emptyOutDir: false, // Don't clean dist before build — avoids Windows file lock issues
+      emptyOutDir: true, // Clean dist before build to remove any stale files
     },
     // Inject API base URL as a build-time constant — works in both Vite and Jest
     define: {
