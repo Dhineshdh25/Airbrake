@@ -367,6 +367,17 @@ export function ErrorDetailModal({
       .then((d: ErrorDetailData) => {
         setData(d);
         setNotFound(false);
+        // If the backend reports an existing Jira ticket for this error,
+        // surface it immediately so the Create button can be disabled.
+        try {
+          const anyd: any = d as any;
+          if (anyd.jira_ticket && anyd.jira_ticket.key) {
+            setJiraTicket({ key: anyd.jira_ticket.key, url: anyd.jira_ticket.url });
+            setJiraStatus('created');
+          }
+        } catch (e) {
+          // ignore parse errors
+        }
         // Reset KB pagination whenever detail reloads
         setKbSolutions([]);
         setKbOffset(0);
@@ -1202,7 +1213,7 @@ export function ErrorDetailModal({
             </button>
 
             {/* ── Create Jira Ticket ──────────────────────────────────────── */}
-            {jiraStatus !== 'created' ? (
+            {(!jiraTicket && jiraStatus !== 'created') ? (
               <button
                 onClick={handleCreateJiraTicket}
                 disabled={jiraStatus === 'creating'}
