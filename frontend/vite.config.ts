@@ -11,6 +11,7 @@ export default defineConfig(({ mode }) => {
   const apiTarget = env.VITE_API_BASE_URL || LAMBDA_URL;
 
   return {
+    base: '/',
     plugins: [react()],
     resolve: {
       alias: {

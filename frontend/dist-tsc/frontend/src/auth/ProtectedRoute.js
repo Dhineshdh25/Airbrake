@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.ProtectedRoute = ProtectedRoute;
 const jsx_runtime_1 = require("react/jsx-runtime");
 const react_router_dom_1 = require("react-router-dom");
+const uuid_1 = require("../lib/uuid");
 const SESSION_TOKEN_KEY = 'session_token';
 function ProtectedRoute({ children }) {
     const location = (0, react_router_dom_1.useLocation)();
@@ -15,7 +16,7 @@ function ProtectedRoute({ children }) {
     // This runs on every page load so already-logged-in users get one
     // immediately without needing to log out and back in.
     if (!localStorage.getItem('device_id')) {
-        localStorage.setItem('device_id', crypto.randomUUID().replace(/-/g, '').slice(0, 16));
+        localStorage.setItem('device_id', (0, uuid_1.getSafeUUID)().replace(/-/g, '').slice(0, 16));
     }
     return (0, jsx_runtime_1.jsx)(jsx_runtime_1.Fragment, { children: children });
 }
