@@ -103,7 +103,10 @@ def _require_auth():
 
 
 def _frontend_url() -> str:
-    return os.environ.get("FRONTEND_URL", "http://localhost:3000")
+    return os.environ.get(
+        "FRONTEND_URL",
+        "https://airbrake.s3-website-us-east-1.amazonaws.com",
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
