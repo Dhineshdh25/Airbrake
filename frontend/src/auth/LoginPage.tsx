@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { getSafeUUID } from '../lib/uuid';
 
 const ROLES = ['admin', 'developer', 'viewer'] as const;
 
@@ -21,7 +22,7 @@ export function LoginPage() {
     // user only needs to connect Jira once regardless of how many times
     // they log out and back in.
     if (!localStorage.getItem('device_id')) {
-      localStorage.setItem('device_id', crypto.randomUUID().replace(/-/g, '').slice(0, 16));
+      localStorage.setItem('device_id', getSafeUUID().replace(/-/g, '').slice(0, 16));
     }
 
     const redirect = params.get('redirect_uri') ?? '/dashboard';

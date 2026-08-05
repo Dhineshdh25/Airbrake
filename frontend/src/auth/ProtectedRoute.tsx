@@ -1,5 +1,6 @@
 import React from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
+import { getSafeUUID } from '../lib/uuid';
 
 const SESSION_TOKEN_KEY = 'session_token';
 
@@ -22,7 +23,7 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
   if (!localStorage.getItem('device_id')) {
     localStorage.setItem(
       'device_id',
-      crypto.randomUUID().replace(/-/g, '').slice(0, 16),
+      getSafeUUID().replace(/-/g, '').slice(0, 16),
     );
   }
 

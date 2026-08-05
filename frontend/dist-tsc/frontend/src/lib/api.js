@@ -24,10 +24,11 @@ exports.API_BASE_URL = typeof __API_BASE_URL__ !== 'undefined' ? __API_BASE_URL_
 // Seeded here at module load time so it exists before any apiFetch call,
 // regardless of whether the user has visited ProtectedRoute yet.
 // This is the key used for Jira token storage — isolates each browser session.
+const uuid_1 = require("./uuid");
 function _ensureDeviceId() {
     let id = localStorage.getItem('device_id');
     if (!id) {
-        id = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+        id = (0, uuid_1.getSafeUUID)().replace(/-/g, '').slice(0, 16);
         localStorage.setItem('device_id', id);
     }
     return id;

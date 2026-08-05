@@ -4,6 +4,7 @@ exports.LoginPage = LoginPage;
 const jsx_runtime_1 = require("react/jsx-runtime");
 const react_1 = require("react");
 const react_router_dom_1 = require("react-router-dom");
+const uuid_1 = require("../lib/uuid");
 const ROLES = ['admin', 'developer', 'viewer'];
 function LoginPage() {
     const [role, setRole] = (0, react_1.useState)('admin');
@@ -21,7 +22,7 @@ function LoginPage() {
         // user only needs to connect Jira once regardless of how many times
         // they log out and back in.
         if (!localStorage.getItem('device_id')) {
-            localStorage.setItem('device_id', crypto.randomUUID().replace(/-/g, '').slice(0, 16));
+            localStorage.setItem('device_id', (0, uuid_1.getSafeUUID)().replace(/-/g, '').slice(0, 16));
         }
         const redirect = params.get('redirect_uri') ?? '/dashboard';
         navigate(decodeURIComponent(redirect), { replace: true });
