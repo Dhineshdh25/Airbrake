@@ -531,13 +531,14 @@ def jira_link():
     body      = request.get_json(silent=True) or {}
     log_id    = (body.get("log_id") or "").strip()
     issue_key = (body.get("issue_key") or "").strip()
+    issue_url = (body.get("issue_url") or "").strip()
 
     if not log_id or not issue_key:
         return jsonify({"error": "log_id and issue_key are required"}), 400
 
     try:
         from .jira_sync import mark_log_jira_key
-        mark_log_jira_key(log_id, issue_key)
+        mark_log_jira_key(log_id, issue_key, issue_url=issue_url)
         logger.info(
             "[Jira Routes] Linked log_id=%s to issue_key=%s by user_id=%s",
             log_id, issue_key, user_id,
@@ -545,4 +546,113 @@ def jira_link():
         return jsonify({"linked": True, "log_id": log_id, "issue_key": issue_key})
     except Exception as exc:
         logger.exception("[Jira Routes] link failed: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GET /api/jira/ticket-status
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@jira_bp.route("/ticket-status")
+def jira_ticket_status():
+    """
+    GET /api/jira/ticket-status?error_hash=<hash>
+
+    Returns whether a Jira ticket already exists for this error_hash.
+    This is a GLOBAL check — not scoped to the current user.
+    Any user opening the error detail gets the same answer.
+
+    Does NOT require Jira OAuth. Only reads the local database.
+    Does NOT create anything.
+
+    Response (ticket exists):
+      { has_ticket: true, issue_key: "ARGUS-15", issue_url: "...", status: "exists" }
+
+    Response (no ticket):
+      { has_ticket: false }
+    """
+    _, err = _require_auth()
+    if err:
+        return err
+
+    error_hash = (request.args.get("error_hash") or "").strip()
+    if not error_hash:
+        return jsonify({"error": "error_hash is required"}), 400
+
+    try:
+        from db import query as _query
+        # Look for any log row with this error_hash that has a jira_issue_key
+        rows = _query(
+            "SELECT metadata "
+            "FROM projects_data "
+            "WHERE row_type = 'log' "
+            "  AND error_hash = %s "
+            "  AND metadata::jsonb ? 'jira_issue_key' "
+            "  AND metadata::jsonb->>'jira_issue_key' IS NOT NULL "
+            "  AND metadata::jsonb->>'jira_issue_key' != '' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (error_hash,),
+        )
+
+        if not rows:
+            return jsonify({"has_ticket": False})
+
+        import json as _json
+        raw = rows[0].get("metadata")
+        meta = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+
+        issue_key = meta.get("jira_issue_key", "")
+        if not issue_key:
+            return jsonify({"has_ticket": False})
+
+        # Build the browse URL from the stored ticket URL if available,
+        # otherwise construct a generic one from the cloud domain
+        issue_url = meta.get("jira_issue_url", "")
+        if not issue_url:
+            # Attempt to build URL from any stored token's cloud URL
+            token_rows = _query(
+                "SELECT metadata FROM projects_data "
+                "WHERE row_type = 'jira_token' "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+            if token_rows:
+                token_raw = token_rows[0].get("metadata")
+                token_meta = _json.loads(token_raw) if isinstance(token_raw, str) else (token_raw or {})
+                cloud_id = token_meta.get("cloud_id", "")
+                if cloud_id:
+                    # Resolve site URL from accessible resources
+                    try:
+                        from .jira_sync import find_airbrake_token_for_webhook
+                        token_pair = find_airbrake_token_for_webhook()
+                        if token_pair:
+                            import requests as _req
+                            resp = _req.get(
+                                "https://api.atlassian.com/oauth/token/accessible-resources",
+                                headers={
+                                    "Authorization": f"Bearer {token_pair[0]}",
+                                    "Accept": "application/json",
+                                },
+                                timeout=5,
+                            )
+                            if resp.ok:
+                                resources = resp.json()
+                                if resources:
+                                    site_url = resources[0].get("url", "")
+                                    issue_url = f"{site_url}/browse/{issue_key}"
+                    except Exception:
+                        pass
+
+        logger.info(
+            "[Jira Routes] ticket-status hit error_hash=%s issue_key=%s",
+            error_hash, issue_key,
+        )
+        return jsonify({
+            "has_ticket": True,
+            "issue_key":  issue_key,
+            "issue_url":  issue_url,
+            "status":     "exists",
+        })
+
+    except Exception as exc:
+        logger.exception("[Jira Routes] ticket-status failed: %s", exc)
         return jsonify({"error": str(exc)}), 500

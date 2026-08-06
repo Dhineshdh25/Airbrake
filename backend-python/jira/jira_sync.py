@@ -190,9 +190,10 @@ def find_log_rows_by_jira_key(issue_key: str) -> list[dict]:
         return []
 
 
-def mark_log_jira_key(log_id: str, issue_key: str) -> None:
+def mark_log_jira_key(log_id: str, issue_key: str, issue_url: str = "") -> None:
     """
-    Store the Jira issue key on a log row's metadata so we can look it up later.
+    Store the Jira issue key (and URL) on a log row's metadata so we can
+    look it up later via the global ticket-status endpoint.
 
     Uses a JSON merge so existing metadata is preserved.
     """
@@ -201,9 +202,12 @@ def mark_log_jira_key(log_id: str, issue_key: str) -> None:
         execute(
             "UPDATE projects_data "
             "SET metadata = COALESCE(metadata::jsonb, '{}'::jsonb) "
-            "           || jsonb_build_object('jira_issue_key', %s::text) "
+            "           || jsonb_build_object("
+            "               'jira_issue_key', %s::text,"
+            "               'jira_issue_url', %s::text"
+            "             ) "
             "WHERE row_type = 'log' AND id = %s",
-            (issue_key, log_id),
+            (issue_key, issue_url, log_id),
         )
         logger.info("[JiraSync] Linked log_id=%s → jira_issue_key=%s", log_id, issue_key)
     except Exception as exc:

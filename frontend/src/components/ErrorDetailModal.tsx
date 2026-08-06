@@ -522,7 +522,24 @@ export function ErrorDetailModal({
     }
   }
 
-  // ── Jira: check connection status when modal opens ────────────────────────
+  // ── Jira: check GLOBAL ticket existence when modal opens ─────────────────
+  // This is separate from the OAuth status check. It reads the database for
+  // any existing Jira ticket linked to this error_hash — regardless of which
+  // user created it. Both User A and User B see the same ticket info.
+  useEffect(() => {
+    if (!effectiveErrorHash) return;
+    apiFetch(`/api/jira/ticket-status?error_hash=${encodeURIComponent(effectiveErrorHash)}`)
+      .then(r => r.json())
+      .then((j: { has_ticket: boolean; issue_key?: string; issue_url?: string }) => {
+        if (j.has_ticket && j.issue_key) {
+          setJiraTicket({ key: j.issue_key, url: j.issue_url ?? '' });
+          setJiraStatus('created');
+        }
+      })
+      .catch(() => {/* non-fatal — button stays in default state */});
+  }, [effectiveErrorHash]);
+
+  // ── Jira: check OAuth connection status when modal opens ──────────────────
   useEffect(() => {
     if (!effectiveErrorHash) return;
     apiFetch('/api/jira/status')
@@ -563,6 +580,20 @@ export function ErrorDetailModal({
       const j = await r.json();
       setJiraTicket({ key: j.key, url: j.url });
       setJiraStatus('created');
+
+      // Link the Jira ticket to the log row so the global ticket-status
+      // endpoint can find it when any other user opens this error.
+      if (j.key && targetLogId) {
+        apiFetch('/api/jira/link', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            log_id:    targetLogId,
+            issue_key: j.key,
+            issue_url: j.url,
+          }),
+        }).catch(() => {/* non-fatal */});
+      }
     } catch (e: unknown) {
       let msg = 'Failed to create Jira ticket.';
       if (e instanceof ApiError) {

@@ -344,7 +344,24 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
             sessionStorage.removeItem('jira_pending_ticket');
         }
     }
-    // ── Jira: check connection status when modal opens ────────────────────────
+    // ── Jira: check GLOBAL ticket existence when modal opens ─────────────────
+    // This is separate from the OAuth status check. It reads the database for
+    // any existing Jira ticket linked to this error_hash — regardless of which
+    // user created it. Both User A and User B see the same ticket info.
+    (0, react_1.useEffect)(() => {
+        if (!effectiveErrorHash)
+            return;
+        (0, api_1.apiFetch)(`/api/jira/ticket-status?error_hash=${encodeURIComponent(effectiveErrorHash)}`)
+            .then(r => r.json())
+            .then((j) => {
+            if (j.has_ticket && j.issue_key) {
+                setJiraTicket({ key: j.issue_key, url: j.issue_url ?? '' });
+                setJiraStatus('created');
+            }
+        })
+            .catch(() => { });
+    }, [effectiveErrorHash]);
+    // ── Jira: check OAuth connection status when modal opens ──────────────────
     (0, react_1.useEffect)(() => {
         if (!effectiveErrorHash)
             return;
@@ -383,6 +400,19 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
             const j = await r.json();
             setJiraTicket({ key: j.key, url: j.url });
             setJiraStatus('created');
+            // Link the Jira ticket to the log row so the global ticket-status
+            // endpoint can find it when any other user opens this error.
+            if (j.key && targetLogId) {
+                (0, api_1.apiFetch)('/api/jira/link', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        log_id: targetLogId,
+                        issue_key: j.key,
+                        issue_url: j.url,
+                    }),
+                }).catch(() => { });
+            }
         }
         catch (e) {
             let msg = 'Failed to create Jira ticket.';
