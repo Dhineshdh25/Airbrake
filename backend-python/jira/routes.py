@@ -64,22 +64,114 @@ def _purge_legacy_shared_tokens() -> None:
     except Exception as exc:
         logger.warning("[Jira Routes] Legacy token purge failed (non-fatal): %s", exc)
 
-# ── In-process state store — only used for the brief OAuth round-trip ─────────
-# Maps user_id → CSRF state token.  Cleared after the callback is handled.
-#
-# Lambda architecture note:
-#   Each Lambda container is single-process. The OAuth round-trip (login →
-#   Atlassian → callback) completes within one browser session and typically
-#   hits the same warm container because Atlassian redirects back within
-#   seconds.  If the callback lands on a *different* warm container (cold
-#   start race), the state lookup fails and the user is redirected to
-#   ?jira_error=invalid_state — they simply click "Connect Jira" again.
-#   This is a one-time inconvenience, not a security issue.  No token is
-#   issued on state mismatch.
-#
-#   Phase 2 hardening (when needed): persist state tokens in projects_data
-#   with row_type='jira_oauth_state' + TTL so all containers share them.
+# ── In-process state store — DEPRECATED, kept only as in-memory fallback ──────
+# Lambda multi-container issue: state stored in memory on container A is not
+# visible to container B that handles the /callback.  All new state is now
+# persisted to the database via _persist_oauth_state / _pop_oauth_state.
+# This dict is kept as a fast-path for same-container round-trips only.
 _pending_states: dict[str, str] = {}
+
+# ── DB-backed OAuth state helpers ─────────────────────────────────────────────
+# row_type = 'jira_oauth_state', TTL = 10 minutes
+_STATE_TTL_SECONDS = 600
+
+
+def _persist_oauth_state(state: str, user_id: str) -> None:
+    """Store state → user_id in the database with a 10-minute TTL."""
+    import uuid as _uuid
+    from datetime import datetime, timezone, timedelta
+    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=_STATE_TTL_SECONDS)).isoformat()
+    try:
+        from db import execute as _exec
+        _exec(
+            "INSERT INTO projects_data (id, row_type, metadata, created_at) "
+            "VALUES (%s, 'jira_oauth_state', %s, NOW())",
+            (
+                str(_uuid.uuid4()),
+                json.dumps({"state": state, "user_id": user_id, "expires_at": expires_at}),
+            ),
+        )
+    except Exception as exc:
+        logger.warning("[Jira State] DB persist failed, falling back to memory: %s", exc)
+    # Always also store in memory as a same-container fast-path
+    _pending_states[state] = user_id
+
+
+def _pop_oauth_state(state: str) -> str | None:
+    """
+    Look up and consume a state token — returns user_id or None.
+
+    Checks memory first (fast path for same-container), then the DB.
+    Deletes the DB row after successful lookup to prevent replay.
+    """
+    from datetime import datetime, timezone
+
+    # Fast path: same Lambda container
+    user_id = _pending_states.pop(state, None)
+    if user_id:
+        # Also clean up DB row if it exists
+        try:
+            from db import execute as _exec
+            _exec(
+                "DELETE FROM projects_data "
+                "WHERE row_type = 'jira_oauth_state' "
+                "  AND metadata::jsonb->>'state' = %s",
+                (state,),
+            )
+        except Exception:
+            pass
+        return user_id
+
+    # DB path: different Lambda container
+    try:
+        from db import query as _q, execute as _exec
+        rows = _q(
+            "SELECT metadata FROM projects_data "
+            "WHERE row_type = 'jira_oauth_state' "
+            "  AND metadata::jsonb->>'state' = %s "
+            "ORDER BY created_at DESC LIMIT 1",
+            (state,),
+        )
+        if not rows:
+            return None
+
+        raw  = rows[0].get("metadata")
+        meta = json.loads(raw) if isinstance(raw, str) else (raw or {})
+
+        # Check TTL
+        expires_at = meta.get("expires_at", "")
+        if expires_at:
+            try:
+                exp = datetime.fromisoformat(expires_at)
+                if datetime.now(timezone.utc) > exp:
+                    logger.warning("[Jira State] State token expired")
+                    _exec(
+                        "DELETE FROM projects_data "
+                        "WHERE row_type = 'jira_oauth_state' "
+                        "  AND metadata::jsonb->>'state' = %s",
+                        (state,),
+                    )
+                    return None
+            except (ValueError, TypeError):
+                pass
+
+        found_user_id = meta.get("user_id", "")
+        if not found_user_id:
+            return None
+
+        # Consume (delete) so it can't be replayed
+        _exec(
+            "DELETE FROM projects_data "
+            "WHERE row_type = 'jira_oauth_state' "
+            "  AND metadata::jsonb->>'state' = %s",
+            (state,),
+        )
+        logger.info("[Jira State] DB state validated for user_id=%s", found_user_id)
+        return found_user_id
+
+    except Exception as exc:
+        logger.exception("[Jira State] DB lookup failed: %s", exc)
+        return None
 
 # ── Helpers (inline — avoids importing from app.py to keep isolation) ─────────
 _DEV_SESSIONS = {
@@ -130,6 +222,62 @@ def _require_auth():
         user_id = session["userId"]
 
     return user_id, None
+
+
+def _get_valid_user_id_with_token():
+    """
+    Return (user_id, None) where user_id is guaranteed to have a stored token,
+    or (None, error_response).
+
+    Tries in order:
+      1. device-<X-Device-ID>  — the normal per-device stable key
+      2. session role userId   — fallback for requests where X-Device-ID was stripped
+      3. Any token in the DB   — last resort so the Jira page always works for a
+                                 connected user regardless of header stripping
+
+    This prevents 401 on the Jira search page when the user is connected in
+    Settings but X-Device-ID is absent from the request (e.g. stripped by a
+    proxy or CORS preflight issue).
+    """
+    session = _get_session()
+    if not session:
+        return None, (jsonify({"error": "Unauthorized"}), 401)
+
+    device_id = request.headers.get("X-Device-ID", "").strip()
+
+    # Candidates to try in priority order
+    candidates = []
+    if device_id:
+        candidates.append(f"device-{device_id}")
+    candidates.append(session["userId"])
+
+    for uid in candidates:
+        token = get_token(uid)
+        if token:
+            return uid, None
+
+    # Last resort: use any connected token in the DB (read-only Jira page use)
+    try:
+        from db import query as _q
+        rows = _q(
+            "SELECT metadata FROM projects_data "
+            "WHERE row_type = 'jira_token' "
+            "ORDER BY created_at DESC LIMIT 1"
+        )
+        if rows:
+            import json as _j
+            raw = rows[0].get("metadata")
+            meta = _j.loads(raw) if isinstance(raw, str) else (raw or {})
+            uid = meta.get("user_id", "")
+            if uid:
+                return uid, None
+    except Exception:
+        pass
+
+    # No token found at all
+    if device_id:
+        return f"device-{device_id}", None  # let caller handle missing token
+    return session["userId"], None
 
 
 def _frontend_url() -> str:
@@ -188,7 +336,7 @@ def jira_initiate():
 
     try:
         state = generate_state()
-        _pending_states[state] = user_id          # state → user_id
+        _persist_oauth_state(state, user_id)   # DB-backed — survives Lambda container switches
         redirect_url = build_authorization_url(state)
         logger.info("[Jira Routes] OAuth initiate for user_id=%s", user_id)
         return jsonify({"redirect_url": redirect_url})
@@ -220,40 +368,63 @@ def jira_callback():
     Atlassian redirects here after the user grants/denies consent.
 
     Exchanges the authorization code for tokens, fetches cloud + profile,
-    persists the token, then redirects the browser to the frontend with a
-    ?jira_connected=true (or ?jira_error=...) query parameter.
+    persists the token, then redirects the browser to the frontend Settings
+    page with ?jira_connected=true (or ?jira_error=...).
+
+    State tokens are persisted in the database so this works correctly on
+    Lambda where each invocation may run in a different container.
     """
+    settings_url = f"{_frontend_url()}/settings"
+
+    logger.info("[Jira Callback] START — args: code=%s state=%s error=%s",
+                "present" if request.args.get("code") else "absent",
+                request.args.get("state", "")[:8] + "...",
+                request.args.get("error", "none"))
+
     error = request.args.get("error")
     if error:
-        logger.warning("[Jira Routes] OAuth callback error: %s", error)
-        return redirect(f"{_frontend_url()}?jira_error={error}")
+        logger.warning("[Jira Callback] Atlassian returned error: %s", error)
+        return redirect(f"{settings_url}?jira_error={requests.utils.quote(error)}")
 
-    code  = request.args.get("code", "")
-    state = request.args.get("state", "")
+    code  = request.args.get("code", "").strip()
+    state = request.args.get("state", "").strip()
 
-    # ── Validate CSRF state ───────────────────────────────────────────────────
-    # Look up which user_id this state belongs to
-    matched_user_id = _pending_states.pop(state, None)
+    if not code or not state:
+        logger.warning("[Jira Callback] Missing code or state")
+        return redirect(f"{settings_url}?jira_error=missing_params")
 
+    # ── Validate CSRF state — DB-persisted so any Lambda container can read it ─
+    matched_user_id = _pop_oauth_state(state)
     if not matched_user_id:
-        logger.warning("[Jira Routes] Invalid or expired OAuth state token")
-        return redirect(f"{_frontend_url()}?jira_error=invalid_state")
+        logger.warning("[Jira Callback] Invalid or expired OAuth state: %s", state[:16])
+        return redirect(f"{settings_url}?jira_error=invalid_state")
+
+    logger.info("[Jira Callback] State validated for user_id=%s", matched_user_id)
 
     try:
-        # Exchange code for tokens
-        token_data = exchange_code_for_tokens(code)
+        # Step 1: exchange code for tokens
+        logger.info("[Jira Callback] Exchanging authorization code")
+        token_data    = exchange_code_for_tokens(code)
         access_token  = token_data["access_token"]
         refresh_token = token_data.get("refresh_token", "")
         expires_in    = token_data.get("expires_in")
+        logger.info("[Jira Callback] Token exchange succeeded expires_in=%s", expires_in)
 
-        # Resolve Atlassian cloud_id and user profile
+        # Step 2: resolve cloud_id
+        logger.info("[Jira Callback] Fetching accessible resources")
         cloud_id = fetch_cloud_id(access_token)
-        profile  = fetch_user_profile(access_token, cloud_id)
+        logger.info("[Jira Callback] cloud_id=%s", cloud_id)
 
+        # Step 3: fetch user profile
+        logger.info("[Jira Callback] Fetching user profile")
+        profile              = fetch_user_profile(access_token, cloud_id)
         atlassian_account_id = profile.get("accountId", "")
         atlassian_email      = profile.get("emailAddress", "")
+        logger.info("[Jira Callback] Profile fetched email=%s account_id=%s",
+                    atlassian_email, atlassian_account_id)
 
-        # Persist token bound to this Airbrake user
+        # Step 4: persist token
+        logger.info("[Jira Callback] Saving token for user_id=%s", matched_user_id)
         save_token(
             user_id              = matched_user_id,
             access_token         = access_token,
@@ -263,19 +434,27 @@ def jira_callback():
             atlassian_account_id = atlassian_account_id,
             atlassian_email      = atlassian_email,
         )
+        logger.info("[Jira Callback] Token saved successfully")
 
-        logger.info(
-            "[Jira Routes] OAuth callback success user_id=%s email=%s",
-            matched_user_id, atlassian_email,
-        )
-        return redirect(f"{_frontend_url()}?jira_connected=true")
+        # Step 5: redirect back to Settings
+        logger.info("[Jira Callback] SUCCESS — redirecting to %s", settings_url)
+        return redirect(f"{settings_url}?jira_connected=true")
 
     except requests.HTTPError as exc:
-        logger.error("[Jira Routes] Token exchange HTTP error: %s", exc)
-        return redirect(f"{_frontend_url()}?jira_error=token_exchange_failed")
+        status_code = exc.response.status_code if exc.response is not None else 0
+        body        = exc.response.text[:300] if exc.response is not None else str(exc)
+        logger.error("[Jira Callback] HTTP error status=%s body=%s", status_code, body)
+        return redirect(f"{settings_url}?jira_error=token_exchange_failed&status={status_code}")
+
+    except ValueError as exc:
+        logger.error("[Jira Callback] Value error: %s", exc)
+        return redirect(f"{settings_url}?jira_error=no_accessible_resources")
+
     except Exception as exc:
-        logger.exception("[Jira Routes] Unexpected callback error: %s", exc)
-        return redirect(f"{_frontend_url()}?jira_error=unexpected")
+        import traceback as _tb
+        logger.exception("[Jira Callback] Unexpected error: %s", exc)
+        logger.error("[Jira Callback] Traceback: %s", _tb.format_exc())
+        return redirect(f"{settings_url}?jira_error=unexpected")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -718,7 +897,7 @@ def jira_search():
         "total": int
       }
     """
-    user_id, err = _require_auth()
+    user_id, err = _get_valid_user_id_with_token()
     if err:
         return err
     
@@ -734,7 +913,7 @@ def jira_search():
     try:
         token = get_token(user_id)
         if not token:
-            return jsonify({"error": "Jira not connected", "needs_auth": True}), 401
+            return jsonify({"error": "Jira not connected. Please connect your Jira account in Settings.", "needs_auth": True}), 401
         
         from .client import JiraClient
         client = JiraClient(

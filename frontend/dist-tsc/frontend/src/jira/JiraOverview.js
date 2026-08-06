@@ -2,127 +2,261 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.JiraOverview = JiraOverview;
 const jsx_runtime_1 = require("react/jsx-runtime");
+/**
+ * JiraOverview — Jira tickets dashboard.
+ *
+ * Fetches all Jira issues visible to the connected account via
+ * GET /api/jira/search?jql=...
+ * Reuses existing OAuth integration — no new auth logic.
+ *
+ * Columns: Issue Key | Summary | Project | Status | Priority | Assignee | Created | Updated | Actions
+ */
 const react_1 = require("react");
 const api_1 = require("../lib/api");
+const PRIORITY_ORDER = {
+    Highest: 0, Critical: 0,
+    High: 1,
+    Medium: 2,
+    Low: 3,
+    Lowest: 4, Trivial: 4,
+};
+const TERMINAL_STATUSES = new Set(['done', 'closed', 'resolved', 'fixed', 'complete', 'completed']);
+// 30-second in-memory cache — keyed by JQL string
+const _cache = new Map();
+const CACHE_TTL_MS = 30000;
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function fmtDate(iso) {
+    if (!iso)
+        return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime()))
+        return iso;
+    return d.toLocaleString([], {
+        month: 'short', day: 'numeric', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', hour12: true,
+    });
+}
+function statusColor(name) {
+    const n = (name ?? '').toLowerCase();
+    if (TERMINAL_STATUSES.has(n))
+        return '#34d399';
+    if (['in progress', 'in review', 'in development'].some(s => n.includes(s)))
+        return '#fbbf24';
+    return '#818cf8';
+}
+function priorityColor(name) {
+    const n = (name ?? '').toLowerCase();
+    if (n.includes('highest') || n.includes('critical'))
+        return '#ef4444';
+    if (n.includes('high'))
+        return '#f87171';
+    if (n.includes('medium'))
+        return '#fbbf24';
+    if (n.includes('low'))
+        return '#60a5fa';
+    return 'var(--text-muted)';
+}
+function browseUrl(issue, fallback) {
+    if (issue.self) {
+        try {
+            const u = new URL(issue.self);
+            return `${u.protocol}//${u.host}/browse/${issue.key}`;
+        }
+        catch { /* fall through */ }
+    }
+    return fallback ? `${fallback}/browse/${issue.key}` : `#${issue.key}`;
+}
+// ── Shared styles ─────────────────────────────────────────────────────────────
 const SELECT_STYLE = {
     background: 'var(--input-bg)',
     border: '1px solid var(--input-border)',
     borderRadius: 6,
     color: 'var(--text)',
-    padding: '8px 11px',
-    fontSize: 13,
+    padding: '7px 10px',
+    fontSize: 12,
     outline: 'none',
     cursor: 'pointer',
 };
-function formatDate(value) {
-    if (!value)
-        return '—';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime()))
-        return value;
-    return date.toLocaleString([], {
-        month: 'short', day: 'numeric', year: 'numeric',
-        hour: '2-digit', minute: '2-digit', hour12: true,
-    });
-}
+const INPUT_STYLE = {
+    ...SELECT_STYLE,
+    minWidth: 200,
+};
+const TH_STYLE = {
+    padding: '10px 14px',
+    textAlign: 'left',
+    fontSize: 11,
+    fontWeight: 700,
+    color: 'var(--text-muted)',
+    textTransform: 'uppercase',
+    letterSpacing: '0.06em',
+    whiteSpace: 'nowrap',
+    borderBottom: '1px solid var(--card-border)',
+    background: 'var(--surface)',
+};
+const TD_STYLE = {
+    padding: '10px 14px',
+    fontSize: 13,
+    verticalAlign: 'middle',
+    borderBottom: '1px solid var(--card-border)',
+};
+// ── Component ─────────────────────────────────────────────────────────────────
 function JiraOverview() {
-    const [tickets, setTickets] = (0, react_1.useState)([]);
-    const [summary, setSummary] = (0, react_1.useState)({
-        total: 0,
-        resolved: 0,
-        todo: 0,
-        sync_failed: 0,
-    });
-    const [statusFilter, setStatusFilter] = (0, react_1.useState)('');
-    const [syncStatusFilter, setSyncStatusFilter] = (0, react_1.useState)('');
-    const [projectFilter, setProjectFilter] = (0, react_1.useState)('');
+    // ── Remote data ──────────────────────────────────────────────────────────
+    const [issues, setIssues] = (0, react_1.useState)([]);
     const [loading, setLoading] = (0, react_1.useState)(true);
     const [loadError, setLoadError] = (0, react_1.useState)(null);
-    const [retryMessage, setRetryMessage] = (0, react_1.useState)(null);
-    const [retryingId, setRetryingId] = (0, react_1.useState)(null);
+    const [notConnected, setNotConnected] = (0, react_1.useState)(false);
+    const [jiraBase, setJiraBase] = (0, react_1.useState)('');
     const [reloadTick, setReloadTick] = (0, react_1.useState)(0);
-    const projectOptions = (0, react_1.useMemo)(() => {
-        const projects = Array.from(new Set(tickets.map((row) => row.project_name).filter(Boolean)));
-        return projects.sort();
-    }, [tickets]);
+    const bypassCache = (0, react_1.useRef)(false);
+    // ── Filter / sort / search state ─────────────────────────────────────────
+    const [search, setSearch] = (0, react_1.useState)('');
+    const [projectFilter, setProjectFilter] = (0, react_1.useState)('');
+    const [statusFilter, setStatusFilter] = (0, react_1.useState)('');
+    const [priorityFilter, setPriorityFilter] = (0, react_1.useState)('');
+    const [assigneeFilter, setAssigneeFilter] = (0, react_1.useState)('');
+    const [sortKey, setSortKey] = (0, react_1.useState)('updated');
+    const [sortDir, setSortDir] = (0, react_1.useState)('desc');
+    // ── Derived filter options ────────────────────────────────────────────────
+    const projectOptions = (0, react_1.useMemo)(() => [...new Set(issues.map(i => i.fields.project?.name ?? '').filter(Boolean))].sort(), [issues]);
+    const statusOptions = (0, react_1.useMemo)(() => [...new Set(issues.map(i => i.fields.status?.name ?? '').filter(Boolean))].sort(), [issues]);
+    const priorityOptions = (0, react_1.useMemo)(() => [...new Set(issues.map(i => i.fields.priority?.name ?? '').filter(Boolean))].sort(), [issues]);
+    const assigneeOptions = (0, react_1.useMemo)(() => [...new Set(issues.map(i => i.fields.assignee?.displayName ?? '').filter(Boolean))].sort(), [issues]);
+    // ── Filtered + sorted rows ────────────────────────────────────────────────
+    const visible = (0, react_1.useMemo)(() => {
+        let rows = issues;
+        const q = search.toLowerCase().trim();
+        if (q)
+            rows = rows.filter(i => i.key.toLowerCase().includes(q) ||
+                (i.fields.summary ?? '').toLowerCase().includes(q));
+        if (projectFilter)
+            rows = rows.filter(i => (i.fields.project?.name ?? '') === projectFilter);
+        if (statusFilter)
+            rows = rows.filter(i => (i.fields.status?.name ?? '') === statusFilter);
+        if (priorityFilter)
+            rows = rows.filter(i => (i.fields.priority?.name ?? '') === priorityFilter);
+        if (assigneeFilter)
+            rows = rows.filter(i => (i.fields.assignee?.displayName ?? '') === assigneeFilter);
+        rows = [...rows].sort((a, b) => {
+            let cmp = 0;
+            if (sortKey === 'updated') {
+                cmp = (a.fields.updated ?? '') < (b.fields.updated ?? '') ? -1 : 1;
+            }
+            else if (sortKey === 'created') {
+                cmp = (a.fields.created ?? '') < (b.fields.created ?? '') ? -1 : 1;
+            }
+            else if (sortKey === 'status') {
+                cmp = (a.fields.status?.name ?? '') < (b.fields.status?.name ?? '') ? -1 : 1;
+            }
+            else if (sortKey === 'priority') {
+                const pa = PRIORITY_ORDER[a.fields.priority?.name ?? ''] ?? 99;
+                const pb = PRIORITY_ORDER[b.fields.priority?.name ?? ''] ?? 99;
+                cmp = pa - pb;
+            }
+            return sortDir === 'asc' ? cmp : -cmp;
+        });
+        return rows;
+    }, [issues, search, projectFilter, statusFilter, priorityFilter, assigneeFilter, sortKey, sortDir]);
+    // ── Fetch ─────────────────────────────────────────────────────────────────
     (0, react_1.useEffect)(() => {
         let cancelled = false;
         setLoading(true);
         setLoadError(null);
-        setRetryMessage(null);
-        const params = new URLSearchParams();
-        if (projectFilter)
-            params.set('project', projectFilter);
-        if (statusFilter)
-            params.set('status', statusFilter);
-        if (syncStatusFilter)
-            params.set('sync_status', syncStatusFilter);
-        (0, api_1.apiFetch)(`/api/jira/tickets?${params.toString()}`)
-            .then((res) => res.json())
+        setNotConnected(false);
+        const jql = 'ORDER BY updated DESC';
+        const cacheKey = jql;
+        const cached = _cache.get(cacheKey);
+        const useCache = !bypassCache.current && cached && (Date.now() - cached.ts < CACHE_TTL_MS);
+        bypassCache.current = false;
+        const doFetch = useCache
+            ? Promise.resolve(cached.data)
+            : (0, api_1.apiFetch)(`/api/jira/search?jql=${encodeURIComponent(jql)}&maxResults=200`)
+                .then(r => r.json())
+                .then(data => { _cache.set(cacheKey, { ts: Date.now(), data }); return data; });
+        doFetch
             .then((data) => {
             if (cancelled)
                 return;
-            setSummary({
-                total: data.total ?? 0,
-                resolved: data.resolved ?? 0,
-                todo: data.todo ?? 0,
-                sync_failed: data.sync_failed ?? 0,
-            });
-            setTickets((data.tickets ?? []));
-        })
-            .catch((error) => {
-            if (!cancelled) {
-                console.error('[JiraOverview] failed to load tickets:', error);
-                setLoadError('Unable to load Jira tickets right now.');
-                setTickets([]);
-                setSummary({ total: 0, resolved: 0, todo: 0, sync_failed: 0 });
+            if (data.needs_auth || data.error?.toLowerCase().includes('not connected')) {
+                setNotConnected(true);
+                setIssues([]);
+                return;
             }
+            if (data.error) {
+                setLoadError(data.error);
+                setIssues([]);
+                return;
+            }
+            const list = data.issues ?? [];
+            // Extract base URL from first issue's self link
+            for (const issue of list) {
+                if (issue.self) {
+                    try {
+                        const u = new URL(issue.self);
+                        setJiraBase(`${u.protocol}//${u.host}`);
+                        break;
+                    }
+                    catch { /* continue */ }
+                }
+            }
+            setIssues(list);
         })
-            .finally(() => {
-            if (!cancelled)
-                setLoading(false);
-        });
-        return () => {
-            cancelled = true;
-        };
-    }, [projectFilter, statusFilter, syncStatusFilter, reloadTick]);
-    async function retrySync(logId, issueKey) {
-        setRetryMessage(null);
-        setRetryingId(logId);
-        try {
-            const response = await (0, api_1.apiFetch)(`/api/jira/tickets/${encodeURIComponent(logId)}/retry-sync`, {
-                method: 'POST',
-            });
-            const data = await response.json();
-            setRetryMessage(data.success
-                ? `Sync retry triggered for ${issueKey}. Refreshed ${data.log_ids?.length ?? 0} log(s).`
-                : `Retry failed: ${data.detail || 'unknown error'}`);
-            setReloadTick((tick) => tick + 1);
+            .catch((err) => {
+            if (cancelled)
+                return;
+            const msg = String(err?.message ?? err ?? '');
+            if (msg.includes('401') || msg.includes('Unauthorized') || msg.includes('needs_auth')) {
+                setNotConnected(true);
+            }
+            else {
+                setLoadError('Unable to load Jira tickets. Check your connection in Settings.');
+            }
+            setIssues([]);
+        })
+            .finally(() => { if (!cancelled)
+            setLoading(false); });
+        return () => { cancelled = true; };
+    }, [reloadTick]);
+    // ── Column sort handler ───────────────────────────────────────────────────
+    function handleSort(key) {
+        if (sortKey === key) {
+            setSortDir(d => d === 'asc' ? 'desc' : 'asc');
         }
-        catch (error) {
-            console.error('[JiraOverview] retry sync failed:', error);
-            setRetryMessage('Retry failed. Please try again.');
-        }
-        finally {
-            setRetryingId(null);
+        else {
+            setSortKey(key);
+            setSortDir('desc');
         }
     }
-    return ((0, jsx_runtime_1.jsxs)("div", { "data-testid": "jira-overview", children: [(0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 24 }, children: [(0, jsx_runtime_1.jsx)("h2", { style: { fontSize: 22, fontWeight: 700, marginBottom: 4 }, children: "Jira" }), (0, jsx_runtime_1.jsx)("p", { style: { fontSize: 13, color: 'var(--text-muted)' }, children: "Jira tickets linked to Airbrake errors, with sync status and retry controls." })] }), (0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }, children: [(0, jsx_runtime_1.jsxs)("span", { style: { padding: '8px 12px', borderRadius: 999, background: 'rgba(99,102,241,0.16)', color: '#818cf8', fontSize: 12, fontWeight: 700 }, children: ["Total tickets: ", summary.total] }), (0, jsx_runtime_1.jsxs)("span", { style: { padding: '8px 12px', borderRadius: 999, background: 'rgba(52,211,153,0.16)', color: '#34d399', fontSize: 12, fontWeight: 700 }, children: ["Resolved: ", summary.resolved] }), (0, jsx_runtime_1.jsxs)("span", { style: { padding: '8px 12px', borderRadius: 999, background: 'rgba(248,113,113,0.16)', color: '#f87171', fontSize: 12, fontWeight: 700 }, children: ["Todo: ", summary.todo] }), (0, jsx_runtime_1.jsxs)("span", { style: { padding: '8px 12px', borderRadius: 999, background: 'rgba(251,191,36,0.16)', color: '#fbbf24', fontSize: 12, fontWeight: 700 }, children: ["Sync failed: ", summary.sync_failed] })] }), (0, jsx_runtime_1.jsxs)("div", { style: { display: 'grid', gap: 12, marginBottom: 20 }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', gap: 10, flexWrap: 'wrap' }, children: [(0, jsx_runtime_1.jsxs)("select", { value: projectFilter, onChange: (event) => setProjectFilter(event.target.value), style: SELECT_STYLE, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All projects" }), projectOptions.map((project) => ((0, jsx_runtime_1.jsx)("option", { value: project, children: project }, project)))] }), (0, jsx_runtime_1.jsxs)("select", { value: statusFilter, onChange: (event) => setStatusFilter(event.target.value), style: SELECT_STYLE, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All statuses" }), (0, jsx_runtime_1.jsx)("option", { value: "resolved", children: "Resolved" }), (0, jsx_runtime_1.jsx)("option", { value: "todo", children: "Todo" })] }), (0, jsx_runtime_1.jsxs)("select", { value: syncStatusFilter, onChange: (event) => setSyncStatusFilter(event.target.value), style: SELECT_STYLE, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All sync statuses" }), (0, jsx_runtime_1.jsx)("option", { value: "synced", children: "Synced" }), (0, jsx_runtime_1.jsx)("option", { value: "sync_failed", children: "Sync Failed" }), (0, jsx_runtime_1.jsx)("option", { value: "skipped", children: "Skipped" })] })] }), retryMessage ? ((0, jsx_runtime_1.jsx)("div", { style: { padding: '12px 14px', borderRadius: 8, background: 'rgba(56,189,248,0.12)', color: '#38bdf8' }, children: retryMessage })) : null] }), loading ? ((0, jsx_runtime_1.jsx)("div", { style: { padding: '40px 0', color: 'var(--text-muted)', fontSize: 14 }, children: "Loading Jira tickets\u2026" })) : loadError ? ((0, jsx_runtime_1.jsx)("div", { style: { padding: '16px', borderRadius: 8, background: 'rgba(248,113,113,0.1)', color: '#f87171' }, children: loadError })) : tickets.length === 0 ? ((0, jsx_runtime_1.jsx)("div", { style: { padding: '40px 0', color: 'var(--text-muted)', fontSize: 14 }, children: "No Jira tickets found for this filter." })) : ((0, jsx_runtime_1.jsx)("div", { style: { display: 'grid', gap: 12 }, children: tickets.map((ticket) => ((0, jsx_runtime_1.jsxs)("div", { style: {
-                        padding: 18,
-                        borderRadius: 12,
-                        background: 'var(--surface)',
-                        border: '1px solid var(--card-border)',
-                        display: 'grid',
-                        gridTemplateColumns: 'minmax(0, 1fr) auto',
-                        gap: 18,
-                        alignItems: 'start',
-                    }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { minWidth: 0, display: 'grid', gap: 10 }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }, children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 14, fontWeight: 700, color: '#fff' }, children: ticket.issue_key || 'Unknown issue' }), (0, jsx_runtime_1.jsx)("div", { style: { fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }, children: ticket.project_name || 'No project' }), (0, jsx_runtime_1.jsx)("div", { style: { padding: '4px 10px', borderRadius: 999, fontSize: 11, fontWeight: 700, background: ticket.jira_status?.toLowerCase() === 'resolved' ? 'rgba(52,211,153,0.12)' : 'rgba(248,113,113,0.12)', color: ticket.jira_status?.toLowerCase() === 'resolved' ? '#34d399' : '#f87171' }, children: ticket.jira_status || 'Unknown' }), (0, jsx_runtime_1.jsx)("div", { style: { padding: '4px 10px', borderRadius: 999, fontSize: 11, fontWeight: 700, background: ticket.jira_sync_status?.toLowerCase() === 'sync_failed' ? 'rgba(248,113,113,0.12)' : 'rgba(99,102,241,0.12)', color: ticket.jira_sync_status?.toLowerCase() === 'sync_failed' ? '#f87171' : '#818cf8' }, children: ticket.jira_sync_status || 'Unknown sync' })] }), (0, jsx_runtime_1.jsx)("div", { style: { fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.5 }, children: ticket.error || 'No error message available.' }), (0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', flexWrap: 'wrap', gap: 12, color: 'var(--text-muted)', fontSize: 12 }, children: [(0, jsx_runtime_1.jsxs)("span", { children: ["Updated ", formatDate(ticket.updated_at)] }), (0, jsx_runtime_1.jsxs)("span", { children: ["Created by ", ticket.created_by || 'unknown'] })] }), ticket.jira_sync_detail ? ((0, jsx_runtime_1.jsx)("div", { style: { padding: '10px 12px', borderRadius: 10, background: 'rgba(255,255,255,0.05)', color: 'var(--text-muted)', fontSize: 12, border: '1px solid rgba(255,255,255,0.08)' }, children: ticket.jira_sync_detail })) : null] }), (0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 10 }, children: [(0, jsx_runtime_1.jsx)("a", { href: ticket.jira_url || `https://your-domain.atlassian.net/browse/${encodeURIComponent(ticket.issue_key)}`, target: "_blank", rel: "noreferrer", style: {
-                                        padding: '8px 12px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.08)', color: '#38bdf8', background: 'rgba(56,189,248,0.08)', textDecoration: 'none', fontSize: 13,
-                                    }, children: "View in Jira" }), (0, jsx_runtime_1.jsx)("button", { type: "button", onClick: () => retrySync(ticket.log_id, ticket.issue_key), disabled: retryingId === ticket.log_id, style: {
-                                        padding: '10px 14px', borderRadius: 8, border: 'none',
-                                        background: retryingId === ticket.log_id ? 'rgba(148,163,184,0.4)' : 'rgba(99,102,241,0.95)',
-                                        color: '#fff', cursor: retryingId === ticket.log_id ? 'default' : 'pointer',
-                                        fontSize: 13, fontWeight: 700,
-                                    }, children: retryingId === ticket.log_id ? 'Retrying…' : 'Retry sync' })] })] }, ticket.log_id))) }))] }));
+    function SortArrow({ k }) {
+        if (sortKey !== k)
+            return (0, jsx_runtime_1.jsx)("span", { style: { opacity: 0.25 }, children: " \u2195" });
+        return (0, jsx_runtime_1.jsx)("span", { style: { color: '#818cf8' }, children: sortDir === 'asc' ? ' ↑' : ' ↓' });
+    }
+    const resolved = issues.filter(i => TERMINAL_STATUSES.has((i.fields.status?.name ?? '').toLowerCase())).length;
+    const todo = issues.length - resolved;
+    // ── Render ────────────────────────────────────────────────────────────────
+    return ((0, jsx_runtime_1.jsxs)("div", { "data-testid": "jira-overview", style: { minHeight: '100%' }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 20 }, children: [(0, jsx_runtime_1.jsx)("h2", { style: { fontSize: 22, fontWeight: 700, marginBottom: 4 }, children: "Jira" }), (0, jsx_runtime_1.jsx)("p", { style: { fontSize: 13, color: 'var(--text-muted)' }, children: "All tickets from your connected Jira instance." })] }), !notConnected && !loadError && ((0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 18 }, children: [(0, jsx_runtime_1.jsxs)("span", { style: { padding: '7px 12px', borderRadius: 999, background: 'rgba(99,102,241,0.16)', color: '#818cf8', fontSize: 12, fontWeight: 700 }, children: ["Total: ", issues.length] }), (0, jsx_runtime_1.jsxs)("span", { style: { padding: '7px 12px', borderRadius: 999, background: 'rgba(52,211,153,0.16)', color: '#34d399', fontSize: 12, fontWeight: 700 }, children: ["Resolved: ", resolved] }), (0, jsx_runtime_1.jsxs)("span", { style: { padding: '7px 12px', borderRadius: 999, background: 'rgba(248,113,113,0.16)', color: '#f87171', fontSize: 12, fontWeight: 700 }, children: ["Open: ", todo] })] })), !notConnected && ((0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16, alignItems: 'center' }, children: [(0, jsx_runtime_1.jsx)("input", { type: "search", placeholder: "Search key or summary\u2026", value: search, onChange: e => setSearch(e.target.value), style: INPUT_STYLE }), (0, jsx_runtime_1.jsxs)("select", { value: projectFilter, onChange: e => setProjectFilter(e.target.value), style: SELECT_STYLE, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All projects" }), projectOptions.map(p => (0, jsx_runtime_1.jsx)("option", { value: p, children: p }, p))] }), (0, jsx_runtime_1.jsxs)("select", { value: statusFilter, onChange: e => setStatusFilter(e.target.value), style: SELECT_STYLE, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All statuses" }), statusOptions.map(s => (0, jsx_runtime_1.jsx)("option", { value: s, children: s }, s))] }), (0, jsx_runtime_1.jsxs)("select", { value: priorityFilter, onChange: e => setPriorityFilter(e.target.value), style: SELECT_STYLE, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All priorities" }), priorityOptions.map(p => (0, jsx_runtime_1.jsx)("option", { value: p, children: p }, p))] }), (0, jsx_runtime_1.jsxs)("select", { value: assigneeFilter, onChange: e => setAssigneeFilter(e.target.value), style: SELECT_STYLE, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All assignees" }), assigneeOptions.map(a => (0, jsx_runtime_1.jsx)("option", { value: a, children: a }, a))] }), (0, jsx_runtime_1.jsx)("button", { type: "button", onClick: () => { bypassCache.current = true; setReloadTick(t => t + 1); }, style: { padding: '7px 14px', borderRadius: 6, border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', cursor: 'pointer', fontSize: 12 }, children: "\u21BA Refresh" }), !loading && ((0, jsx_runtime_1.jsxs)("span", { style: { fontSize: 12, color: 'var(--text-muted)', marginLeft: 4 }, children: [visible.length, " result", visible.length !== 1 ? 's' : ''] }))] })), notConnected ? ((0, jsx_runtime_1.jsxs)("div", { style: { padding: '24px 20px', borderRadius: 10, background: 'rgba(99,102,241,0.07)', border: '1px solid rgba(99,102,241,0.2)', fontSize: 14, color: 'var(--text-muted)' }, children: ["\uD83D\uDD17 Connect your Jira account from", ' ', (0, jsx_runtime_1.jsx)("a", { href: "/settings", style: { color: '#818cf8', textDecoration: 'none', fontWeight: 600 }, children: "Settings" }), ' ', "to view your tickets here."] })) : loading ? ((0, jsx_runtime_1.jsx)("div", { style: { padding: '40px 0', color: 'var(--text-muted)', fontSize: 14 }, children: "Loading Jira tickets\u2026" })) : loadError ? ((0, jsx_runtime_1.jsx)("div", { style: { padding: '14px 18px', borderRadius: 8, background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.2)', color: '#f87171', fontSize: 13 }, children: loadError })) : visible.length === 0 ? ((0, jsx_runtime_1.jsx)("div", { style: { padding: '40px 0', color: 'var(--text-muted)', fontSize: 14 }, children: "No tickets match the current filters." })) : (
+            /* ── Table ─────────────────────────────────────────────────────── */
+            (0, jsx_runtime_1.jsx)("div", { style: { overflowX: 'auto', borderRadius: 10, border: '1px solid var(--card-border)' }, children: (0, jsx_runtime_1.jsxs)("table", { style: { width: '100%', borderCollapse: 'collapse', background: 'var(--surface)' }, children: [(0, jsx_runtime_1.jsx)("thead", { children: (0, jsx_runtime_1.jsxs)("tr", { children: [(0, jsx_runtime_1.jsx)("th", { style: TH_STYLE, children: "Issue Key" }), (0, jsx_runtime_1.jsx)("th", { style: { ...TH_STYLE, minWidth: 260 }, children: "Summary" }), (0, jsx_runtime_1.jsx)("th", { style: TH_STYLE, children: "Project" }), (0, jsx_runtime_1.jsxs)("th", { style: { ...TH_STYLE, cursor: 'pointer', userSelect: 'none' }, onClick: () => handleSort('status'), children: ["Status ", (0, jsx_runtime_1.jsx)(SortArrow, { k: "status" })] }), (0, jsx_runtime_1.jsxs)("th", { style: { ...TH_STYLE, cursor: 'pointer', userSelect: 'none' }, onClick: () => handleSort('priority'), children: ["Priority ", (0, jsx_runtime_1.jsx)(SortArrow, { k: "priority" })] }), (0, jsx_runtime_1.jsx)("th", { style: TH_STYLE, children: "Assignee" }), (0, jsx_runtime_1.jsxs)("th", { style: { ...TH_STYLE, cursor: 'pointer', userSelect: 'none' }, onClick: () => handleSort('created'), children: ["Created ", (0, jsx_runtime_1.jsx)(SortArrow, { k: "created" })] }), (0, jsx_runtime_1.jsxs)("th", { style: { ...TH_STYLE, cursor: 'pointer', userSelect: 'none' }, onClick: () => handleSort('updated'), children: ["Updated ", (0, jsx_runtime_1.jsx)(SortArrow, { k: "updated" })] }), (0, jsx_runtime_1.jsx)("th", { style: { ...TH_STYLE, textAlign: 'right' }, children: "Actions" })] }) }), (0, jsx_runtime_1.jsx)("tbody", { children: visible.map((issue, idx) => {
+                                const isLast = idx === visible.length - 1;
+                                const tdStyle = {
+                                    ...TD_STYLE,
+                                    borderBottom: isLast ? 'none' : '1px solid var(--card-border)',
+                                };
+                                const url = browseUrl(issue, jiraBase);
+                                const sName = issue.fields.status?.name ?? '—';
+                                const pName = issue.fields.priority?.name;
+                                return ((0, jsx_runtime_1.jsxs)("tr", { style: { transition: 'background 0.1s' }, onMouseEnter: e => (e.currentTarget.style.background = 'rgba(255,255,255,0.025)'), onMouseLeave: e => (e.currentTarget.style.background = ''), children: [(0, jsx_runtime_1.jsx)("td", { style: tdStyle, children: (0, jsx_runtime_1.jsx)("a", { href: url, target: "_blank", rel: "noreferrer", style: { color: '#818cf8', fontWeight: 700, textDecoration: 'none', fontFamily: 'ui-monospace, monospace', fontSize: 12 }, children: issue.key }) }), (0, jsx_runtime_1.jsx)("td", { style: { ...tdStyle, maxWidth: 340 }, children: (0, jsx_runtime_1.jsx)("div", { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text)' }, children: issue.fields.summary ?? '—' }) }), (0, jsx_runtime_1.jsx)("td", { style: { ...tdStyle, color: 'var(--text-muted)', fontSize: 12 }, children: issue.fields.project?.name ?? issue.fields.project?.key ?? '—' }), (0, jsx_runtime_1.jsx)("td", { style: tdStyle, children: (0, jsx_runtime_1.jsx)("span", { style: {
+                                                    padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 700,
+                                                    background: `${statusColor(sName)}1a`,
+                                                    color: statusColor(sName),
+                                                    whiteSpace: 'nowrap',
+                                                }, children: sName }) }), (0, jsx_runtime_1.jsx)("td", { style: tdStyle, children: pName ? ((0, jsx_runtime_1.jsx)("span", { style: { fontSize: 12, fontWeight: 600, color: priorityColor(pName) }, children: pName })) : (0, jsx_runtime_1.jsx)("span", { style: { color: 'var(--text-muted)' }, children: "\u2014" }) }), (0, jsx_runtime_1.jsx)("td", { style: { ...tdStyle, color: 'var(--text-muted)', fontSize: 12 }, children: issue.fields.assignee?.displayName ?? ((0, jsx_runtime_1.jsx)("span", { style: { fontStyle: 'italic', opacity: 0.5 }, children: "Unassigned" })) }), (0, jsx_runtime_1.jsx)("td", { style: { ...tdStyle, color: 'var(--text-muted)', fontSize: 12, whiteSpace: 'nowrap' }, children: fmtDate(issue.fields.created) }), (0, jsx_runtime_1.jsx)("td", { style: { ...tdStyle, color: 'var(--text-muted)', fontSize: 12, whiteSpace: 'nowrap' }, children: fmtDate(issue.fields.updated) }), (0, jsx_runtime_1.jsx)("td", { style: { ...tdStyle, textAlign: 'right' }, children: (0, jsx_runtime_1.jsx)("a", { href: url, target: "_blank", rel: "noreferrer", style: {
+                                                    padding: '5px 12px', borderRadius: 6,
+                                                    border: '1px solid rgba(56,189,248,0.3)',
+                                                    color: '#38bdf8', background: 'rgba(56,189,248,0.07)',
+                                                    textDecoration: 'none', fontSize: 12, whiteSpace: 'nowrap',
+                                                }, children: "Open in Jira \u2197" }) })] }, issue.id));
+                            }) })] }) }))] }));
 }
 //# sourceMappingURL=JiraOverview.js.map
