@@ -75,7 +75,17 @@ export function JiraSettings() {
       window.history.replaceState({}, '', clean);
     }
     if (params.get('jira_error')) {
-      setError(`Jira connection failed: ${params.get('jira_error')}`);
+      const code = params.get('jira_error') ?? 'unknown';
+      const messages: Record<string, string> = {
+        invalid_state:          'OAuth session expired or ran in a different server — please try again.',
+        token_exchange_failed:  'Atlassian rejected the token exchange. Check your Client ID and Secret.',
+        no_accessible_resources:'No Jira sites found on your Atlassian account.',
+        missing_params:         'OAuth callback was missing required parameters.',
+        unexpected:             'An unexpected error occurred. Check Lambda logs for details.',
+        access_denied:          'You denied access to Jira. Click Connect Jira to try again.',
+      };
+      setError(`Jira connection failed: ${messages[code] ?? code}`);
+      setLoading(false);
       const clean = window.location.pathname + window.location.hash;
       window.history.replaceState({}, '', clean);
     }

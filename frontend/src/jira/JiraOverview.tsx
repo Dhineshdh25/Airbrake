@@ -1,17 +1,22 @@
-import { useEffect, useMemo, useState } from 'react';
+/**
+ * JiraOverview — Jira tickets dashboard.
+ *
+ * Fetches all Jira issues visible to the connected account via
+ * GET /api/jira/search?jql=...
+ * Reuses existing OAuth integration — no new auth logic.
+ *
+ * Columns: Issue Key | Summary | Project | Status | Priority | Assignee | Created | Updated | Actions
+ */
+
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from '../lib/api';
 
-interface JiraTicketRow {
-  log_id: string;
-  issue_key: string;
-  project_name: string;
-  error: string;
-  jira_status: string;
-  jira_sync_status: string;
-  jira_sync_detail: string;
-  jira_url: string;
-  created_by: string;
-  updated_at: string;
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+interface JiraUser {
+  displayName?: string;
+  emailAddress?: string;
+  accountId?: string;
 }
 
 interface JiraIssue {
@@ -20,278 +25,503 @@ interface JiraIssue {
   self?: string;
   fields: {
     summary?: string;
-    status?: { name?: string };
+    status?: { name?: string; statusCategory?: { colorName?: string } };
+    priority?: { name?: string; iconUrl?: string };
+    assignee?: JiraUser | null;
+    reporter?: JiraUser | null;
+    project?: { name?: string; key?: string };
+    issuetype?: { name?: string; iconUrl?: string };
+    labels?: string[];
     created?: string;
     updated?: string;
-    assignee?: { displayName?: string };
-    reporter?: { displayName?: string };
-    project?: { name?: string; key?: string };
+    description?: unknown;
   };
 }
+
+interface SearchResponse {
+  issues: JiraIssue[];
+  isLast?: boolean;
+  nextPageToken?: string | null;
+  total?: number;
+  error?: string;
+  needs_auth?: boolean;
+}
+
+type SortKey = 'updated' | 'created' | 'priority' | 'status';
+type SortDir = 'asc' | 'desc';
+
+const PRIORITY_ORDER: Record<string, number> = {
+  Highest: 0, Critical: 0,
+  High: 1,
+  Medium: 2,
+  Low: 3,
+  Lowest: 4, Trivial: 4,
+};
+
+const TERMINAL_STATUSES = new Set(['done', 'closed', 'resolved', 'fixed', 'complete', 'completed']);
+
+// 30-second in-memory cache — keyed by JQL string
+const _cache: Map<string, { ts: number; data: SearchResponse }> = new Map();
+const CACHE_TTL_MS = 30_000;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function fmtDate(iso: string | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString([], {
+    month: 'short', day: 'numeric', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true,
+  });
+}
+
+function statusColor(name: string | undefined): string {
+  const n = (name ?? '').toLowerCase();
+  if (TERMINAL_STATUSES.has(n)) return '#34d399';
+  if (['in progress', 'in review', 'in development'].some(s => n.includes(s))) return '#fbbf24';
+  return '#818cf8';
+}
+
+function priorityColor(name: string | undefined): string {
+  const n = (name ?? '').toLowerCase();
+  if (n.includes('highest') || n.includes('critical')) return '#ef4444';
+  if (n.includes('high')) return '#f87171';
+  if (n.includes('medium')) return '#fbbf24';
+  if (n.includes('low')) return '#60a5fa';
+  return 'var(--text-muted)';
+}
+
+function browseUrl(issue: JiraIssue, fallback: string): string {
+  if (issue.self) {
+    try {
+      const u = new URL(issue.self);
+      return `${u.protocol}//${u.host}/browse/${issue.key}`;
+    } catch { /* fall through */ }
+  }
+  return fallback ? `${fallback}/browse/${issue.key}` : `#${issue.key}`;
+}
+
+// ── Shared styles ─────────────────────────────────────────────────────────────
 
 const SELECT_STYLE: React.CSSProperties = {
   background: 'var(--input-bg)',
   border: '1px solid var(--input-border)',
   borderRadius: 6,
   color: 'var(--text)',
-  padding: '8px 11px',
-  fontSize: 13,
+  padding: '7px 10px',
+  fontSize: 12,
   outline: 'none',
   cursor: 'pointer',
 };
 
-function formatDate(value: string) {
-  if (!value) return '—';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString([], {
-    month: 'short', day: 'numeric', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', hour12: true,
-  });
-}
+const INPUT_STYLE: React.CSSProperties = {
+  ...SELECT_STYLE,
+  minWidth: 200,
+};
+
+const TH_STYLE: React.CSSProperties = {
+  padding: '10px 14px',
+  textAlign: 'left',
+  fontSize: 11,
+  fontWeight: 700,
+  color: 'var(--text-muted)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.06em',
+  whiteSpace: 'nowrap',
+  borderBottom: '1px solid var(--card-border)',
+  background: 'var(--surface)',
+};
+
+const TD_STYLE: React.CSSProperties = {
+  padding: '10px 14px',
+  fontSize: 13,
+  verticalAlign: 'middle',
+  borderBottom: '1px solid var(--card-border)',
+};
+
+// ── Component ─────────────────────────────────────────────────────────────────
 
 export function JiraOverview() {
-  const [tickets, setTickets] = useState<JiraTicketRow[]>([]);
-  const [summary, setSummary] = useState<{ total: number; resolved: number; todo: number }>({
-    total: 0,
-    resolved: 0,
-    todo: 0,
-  });
-  const [statusFilter, setStatusFilter] = useState('');
+  // ── Remote data ──────────────────────────────────────────────────────────
+  const [issues, setIssues]           = useState<JiraIssue[]>([]);
+  const [loading, setLoading]         = useState(true);
+  const [loadError, setLoadError]     = useState<string | null>(null);
+  const [notConnected, setNotConnected] = useState(false);
+  const [jiraBase, setJiraBase]       = useState('');
+  const [reloadTick, setReloadTick]   = useState(0);
+  const bypassCache = useRef(false);
+
+  // ── Filter / sort / search state ─────────────────────────────────────────
+  const [search,        setSearch]        = useState('');
   const [projectFilter, setProjectFilter] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [reloadTick, setReloadTick] = useState(0);
-  const [jiraBaseUrl, setJiraBaseUrl] = useState('https://your-domain.atlassian.net');
+  const [statusFilter,  setStatusFilter]  = useState('');
+  const [priorityFilter,setPriorityFilter] = useState('');
+  const [assigneeFilter,setAssigneeFilter] = useState('');
+  const [sortKey,       setSortKey]       = useState<SortKey>('updated');
+  const [sortDir,       setSortDir]       = useState<SortDir>('desc');
 
-  const projectOptions = useMemo(() => {
-    const projects = Array.from(new Set(tickets.map((row) => row.project_name).filter(Boolean)));
-    return projects.sort();
-  }, [tickets]);
+  // ── Derived filter options ────────────────────────────────────────────────
+  const projectOptions = useMemo(() =>
+    [...new Set(issues.map(i => i.fields.project?.name ?? '').filter(Boolean))].sort(),
+  [issues]);
 
+  const statusOptions = useMemo(() =>
+    [...new Set(issues.map(i => i.fields.status?.name ?? '').filter(Boolean))].sort(),
+  [issues]);
+
+  const priorityOptions = useMemo(() =>
+    [...new Set(issues.map(i => i.fields.priority?.name ?? '').filter(Boolean))].sort(),
+  [issues]);
+
+  const assigneeOptions = useMemo(() =>
+    [...new Set(issues.map(i => i.fields.assignee?.displayName ?? '').filter(Boolean))].sort(),
+  [issues]);
+
+  // ── Filtered + sorted rows ────────────────────────────────────────────────
+  const visible = useMemo(() => {
+    let rows = issues;
+    const q = search.toLowerCase().trim();
+
+    if (q) rows = rows.filter(i =>
+      i.key.toLowerCase().includes(q) ||
+      (i.fields.summary ?? '').toLowerCase().includes(q)
+    );
+    if (projectFilter)  rows = rows.filter(i => (i.fields.project?.name ?? '') === projectFilter);
+    if (statusFilter)   rows = rows.filter(i => (i.fields.status?.name ?? '') === statusFilter);
+    if (priorityFilter) rows = rows.filter(i => (i.fields.priority?.name ?? '') === priorityFilter);
+    if (assigneeFilter) rows = rows.filter(i => (i.fields.assignee?.displayName ?? '') === assigneeFilter);
+
+    rows = [...rows].sort((a, b) => {
+      let cmp = 0;
+      if (sortKey === 'updated') {
+        cmp = (a.fields.updated ?? '') < (b.fields.updated ?? '') ? -1 : 1;
+      } else if (sortKey === 'created') {
+        cmp = (a.fields.created ?? '') < (b.fields.created ?? '') ? -1 : 1;
+      } else if (sortKey === 'status') {
+        cmp = (a.fields.status?.name ?? '') < (b.fields.status?.name ?? '') ? -1 : 1;
+      } else if (sortKey === 'priority') {
+        const pa = PRIORITY_ORDER[a.fields.priority?.name ?? ''] ?? 99;
+        const pb = PRIORITY_ORDER[b.fields.priority?.name ?? ''] ?? 99;
+        cmp = pa - pb;
+      }
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+
+    return rows;
+  }, [issues, search, projectFilter, statusFilter, priorityFilter, assigneeFilter, sortKey, sortDir]);
+
+  // ── Fetch ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setLoadError(null);
+    setNotConnected(false);
 
-    // Build JQL query to search Jira directly
-    const jqlParts: string[] = [];
+    const jql = 'ORDER BY updated DESC';
+    const cacheKey = jql;
+    const cached = _cache.get(cacheKey);
+    const useCache = !bypassCache.current && cached && (Date.now() - cached.ts < CACHE_TTL_MS);
+    bypassCache.current = false;
 
-    if (projectFilter) {
-      jqlParts.push(`project = "${projectFilter}"`);
-    }
+    const doFetch = useCache
+      ? Promise.resolve(cached!.data)
+      : apiFetch(`/api/jira/search?jql=${encodeURIComponent(jql)}&maxResults=200`)
+          .then(r => r.json() as Promise<SearchResponse>)
+          .then(data => { _cache.set(cacheKey, { ts: Date.now(), data }); return data; });
 
-    if (statusFilter === 'resolved') {
-      jqlParts.push('status IN (Done, Resolved, Closed)');
-    } else if (statusFilter === 'todo') {
-      jqlParts.push('status NOT IN (Done, Resolved, Closed)');
-    }
-
-    // Build final JQL query
-    const jql = jqlParts.length > 0 ? jqlParts.join(' AND ') + ' ORDER BY updated DESC' : 'ORDER BY updated DESC';
-
-    // Query Jira directly using the new search endpoint
-    apiFetch(`/api/jira/search?jql=${encodeURIComponent(jql)}&maxResults=100`)
-      .then((res) => res.json())
-      .then((data) => {
+    doFetch
+      .then((data: SearchResponse) => {
         if (cancelled) return;
 
-        // Extract Jira base URL from the first issue's self URL if available
-        if (data.issues && data.issues.length > 0 && data.issues[0].self) {
-          try {
-            const url = new URL(data.issues[0].self);
-            const baseUrl = `${url.protocol}//${url.host}`;
-            setJiraBaseUrl(baseUrl);
-          } catch (e) {
-            console.warn('[JiraOverview] Could not parse Jira URL from self link');
+        if (data.needs_auth || data.error?.toLowerCase().includes('not connected')) {
+          setNotConnected(true);
+          setIssues([]);
+          return;
+        }
+
+        if (data.error) {
+          setLoadError(data.error);
+          setIssues([]);
+          return;
+        }
+
+        const list: JiraIssue[] = data.issues ?? [];
+
+        // Extract base URL from first issue's self link
+        for (const issue of list) {
+          if (issue.self) {
+            try {
+              const u = new URL(issue.self);
+              setJiraBase(`${u.protocol}//${u.host}`);
+              break;
+            } catch { /* continue */ }
           }
         }
 
-        // Transform Jira issues to our ticket format
-        const issues: JiraIssue[] = data.issues ?? [];
-        const transformedTickets: JiraTicketRow[] = issues.map((issue) => {
-          const status = issue.fields.status?.name || 'Unknown';
-
-          return {
-            log_id: issue.id,
-            issue_key: issue.key,
-            project_name: issue.fields.project?.name || issue.fields.project?.key || '',
-            error: issue.fields.summary || 'No summary',
-            jira_status: status,
-            jira_sync_status: 'synced',
-            jira_sync_detail: '',
-            jira_url: `${jiraBaseUrl}/browse/${issue.key}`,
-            created_by: issue.fields.reporter?.displayName || 'Unknown',
-            updated_at: issue.fields.updated || issue.fields.created || '',
-          };
-        });
-
-        // Calculate summary stats
-        const resolved = transformedTickets.filter(t =>
-          ['done', 'resolved', 'closed'].includes(t.jira_status.toLowerCase())
-        ).length;
-        const todo = transformedTickets.length - resolved;
-
-        setSummary({
-          total: transformedTickets.length,
-          resolved,
-          todo,
-        });
-        setTickets(transformedTickets);
+        setIssues(list);
       })
-      .catch((error) => {
-        if (!cancelled) {
-          console.error('[JiraOverview] failed to load tickets:', error);
-
-          // Check if it's an auth error
-          if (error.message?.includes('401') || error.message?.includes('Unauthorized')) {
-            setLoadError('Jira not connected. Please connect your Jira account in Settings.');
-          } else {
-            setLoadError('Unable to load Jira tickets. Make sure you have connected your Jira account.');
-          }
-
-          setTickets([]);
-          setSummary({ total: 0, resolved: 0, todo: 0 });
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        const msg = String((err as Error)?.message ?? err ?? '');
+        if (msg.includes('401') || msg.includes('Unauthorized') || msg.includes('needs_auth')) {
+          setNotConnected(true);
+        } else {
+          setLoadError('Unable to load Jira tickets. Check your connection in Settings.');
         }
+        setIssues([]);
       })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+      .finally(() => { if (!cancelled) setLoading(false); });
 
-    return () => {
-      cancelled = true;
-    };
-  }, [projectFilter, statusFilter, reloadTick, jiraBaseUrl]);
+    return () => { cancelled = true; };
+  }, [reloadTick]);
 
+  // ── Column sort handler ───────────────────────────────────────────────────
+  function handleSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortKey(key);
+      setSortDir('desc');
+    }
+  }
+
+  function SortArrow({ k }: { k: SortKey }) {
+    if (sortKey !== k) return <span style={{ opacity: 0.25 }}> ↕</span>;
+    return <span style={{ color: '#818cf8' }}>{sortDir === 'asc' ? ' ↑' : ' ↓'}</span>;
+  }
+
+  const resolved = issues.filter(i => TERMINAL_STATUSES.has((i.fields.status?.name ?? '').toLowerCase())).length;
+  const todo     = issues.length - resolved;
+
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div data-testid="jira-overview">
-      <div style={{ marginBottom: 24 }}>
+    <div data-testid="jira-overview" style={{ minHeight: '100%' }}>
+
+      {/* Header */}
+      <div style={{ marginBottom: 20 }}>
         <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>Jira</h2>
         <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-          All Jira tickets from your connected Jira instance.
+          All tickets from your connected Jira instance.
         </p>
       </div>
 
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 }}>
-        <span style={{ padding: '8px 12px', borderRadius: 999, background: 'rgba(99,102,241,0.16)', color: '#818cf8', fontSize: 12, fontWeight: 700 }}>
-          Total tickets: {summary.total}
-        </span>
-        <span style={{ padding: '8px 12px', borderRadius: 999, background: 'rgba(52,211,153,0.16)', color: '#34d399', fontSize: 12, fontWeight: 700 }}>
-          Resolved: {summary.resolved}
-        </span>
-        <span style={{ padding: '8px 12px', borderRadius: 999, background: 'rgba(248,113,113,0.16)', color: '#f87171', fontSize: 12, fontWeight: 700 }}>
-          Todo: {summary.todo}
-        </span>
-      </div>
+      {/* Summary chips */}
+      {!notConnected && !loadError && (
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 18 }}>
+          <span style={{ padding: '7px 12px', borderRadius: 999, background: 'rgba(99,102,241,0.16)', color: '#818cf8', fontSize: 12, fontWeight: 700 }}>
+            Total: {issues.length}
+          </span>
+          <span style={{ padding: '7px 12px', borderRadius: 999, background: 'rgba(52,211,153,0.16)', color: '#34d399', fontSize: 12, fontWeight: 700 }}>
+            Resolved: {resolved}
+          </span>
+          <span style={{ padding: '7px 12px', borderRadius: 999, background: 'rgba(248,113,113,0.16)', color: '#f87171', fontSize: 12, fontWeight: 700 }}>
+            Open: {todo}
+          </span>
+        </div>
+      )}
 
-      <div style={{ display: 'grid', gap: 12, marginBottom: 20 }}>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          <select
-            value={projectFilter}
-            onChange={(event) => setProjectFilter(event.target.value)}
-            style={SELECT_STYLE}
-          >
+      {/* Toolbar */}
+      {!notConnected && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16, alignItems: 'center' }}>
+          <input
+            type="search"
+            placeholder="Search key or summary…"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            style={INPUT_STYLE}
+          />
+
+          <select value={projectFilter} onChange={e => setProjectFilter(e.target.value)} style={SELECT_STYLE}>
             <option value="">All projects</option>
-            {projectOptions.map((project) => (
-              <option key={project} value={project}>
-                {project}
-              </option>
-            ))}
+            {projectOptions.map(p => <option key={p} value={p}>{p}</option>)}
           </select>
 
-          <select
-            value={statusFilter}
-            onChange={(event) => setStatusFilter(event.target.value)}
-            style={SELECT_STYLE}
-          >
+          <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={SELECT_STYLE}>
             <option value="">All statuses</option>
-            <option value="resolved">Resolved</option>
-            <option value="todo">Todo</option>
+            {statusOptions.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+
+          <select value={priorityFilter} onChange={e => setPriorityFilter(e.target.value)} style={SELECT_STYLE}>
+            <option value="">All priorities</option>
+            {priorityOptions.map(p => <option key={p} value={p}>{p}</option>)}
+          </select>
+
+          <select value={assigneeFilter} onChange={e => setAssigneeFilter(e.target.value)} style={SELECT_STYLE}>
+            <option value="">All assignees</option>
+            {assigneeOptions.map(a => <option key={a} value={a}>{a}</option>)}
           </select>
 
           <button
             type="button"
-            onClick={() => setReloadTick((tick) => tick + 1)}
-            style={{
-              padding: '8px 16px',
-              borderRadius: 8,
-              border: '1px solid var(--input-border)',
-              background: 'var(--input-bg)',
-              color: 'var(--text)',
-              cursor: 'pointer',
-              fontSize: 13,
-            }}
+            onClick={() => { bypassCache.current = true; setReloadTick(t => t + 1); }}
+            style={{ padding: '7px 14px', borderRadius: 6, border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', cursor: 'pointer', fontSize: 12 }}
           >
-            Refresh
+            ↺ Refresh
           </button>
-        </div>
-      </div>
 
-      {loading ? (
-        <div style={{ padding: '40px 0', color: 'var(--text-muted)', fontSize: 14 }}>
-          Loading Jira tickets…
+          {!loading && (
+            <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 4 }}>
+              {visible.length} result{visible.length !== 1 ? 's' : ''}
+            </span>
+          )}
         </div>
+      )}
+
+      {/* States */}
+      {notConnected ? (
+        <div style={{ padding: '24px 20px', borderRadius: 10, background: 'rgba(99,102,241,0.07)', border: '1px solid rgba(99,102,241,0.2)', fontSize: 14, color: 'var(--text-muted)' }}>
+          🔗 Connect your Jira account from{' '}
+          <a href="/settings" style={{ color: '#818cf8', textDecoration: 'none', fontWeight: 600 }}>Settings</a>{' '}
+          to view your tickets here.
+        </div>
+      ) : loading ? (
+        <div style={{ padding: '40px 0', color: 'var(--text-muted)', fontSize: 14 }}>Loading Jira tickets…</div>
       ) : loadError ? (
-        <div style={{ padding: '16px', borderRadius: 8, background: 'rgba(248,113,113,0.1)', color: '#f87171' }}>
+        <div style={{ padding: '14px 18px', borderRadius: 8, background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.2)', color: '#f87171', fontSize: 13 }}>
           {loadError}
         </div>
-      ) : tickets.length === 0 ? (
+      ) : visible.length === 0 ? (
         <div style={{ padding: '40px 0', color: 'var(--text-muted)', fontSize: 14 }}>
-          No Jira tickets found for this filter.
+          No tickets match the current filters.
         </div>
       ) : (
-        <div style={{ display: 'grid', gap: 12 }}>
-          {tickets.map((ticket) => (
-            <div
-              key={ticket.log_id}
-              style={{
-                padding: 18,
-                borderRadius: 12,
-                background: 'var(--surface)',
-                border: '1px solid var(--card-border)',
-                display: 'grid',
-                gridTemplateColumns: 'minmax(0, 1fr) auto',
-                gap: 18,
-                alignItems: 'start',
-              }}
-            >
-              <div style={{ minWidth: 0, display: 'grid', gap: 10 }}>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: '#fff' }}>
-                    {ticket.issue_key || 'Unknown issue'}
-                  </div>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
-                    {ticket.project_name || 'No project'}
-                  </div>
-                  <div style={{ padding: '4px 10px', borderRadius: 999, fontSize: 11, fontWeight: 700, background: ['done', 'resolved', 'closed'].includes(ticket.jira_status?.toLowerCase()) ? 'rgba(52,211,153,0.12)' : 'rgba(248,113,113,0.12)', color: ['done', 'resolved', 'closed'].includes(ticket.jira_status?.toLowerCase()) ? '#34d399' : '#f87171' }}>
-                    {ticket.jira_status || 'Unknown'}
-                  </div>
-                </div>
 
-                <div style={{ fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                  {ticket.error || 'No error message available.'}
-                </div>
-
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, color: 'var(--text-muted)', fontSize: 12 }}>
-                  <span>Updated {formatDate(ticket.updated_at)}</span>
-                  <span>Created by {ticket.created_by || 'unknown'}</span>
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 10 }}>
-                <a
-                  href={ticket.jira_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{
-                    padding: '8px 12px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.08)', color: '#38bdf8', background: 'rgba(56,189,248,0.08)', textDecoration: 'none', fontSize: 13,
-                  }}
+        /* ── Table ─────────────────────────────────────────────────────── */
+        <div style={{ overflowX: 'auto', borderRadius: 10, border: '1px solid var(--card-border)' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', background: 'var(--surface)' }}>
+            <thead>
+              <tr>
+                <th style={TH_STYLE}>Issue Key</th>
+                <th style={{ ...TH_STYLE, minWidth: 260 }}>Summary</th>
+                <th style={TH_STYLE}>Project</th>
+                <th
+                  style={{ ...TH_STYLE, cursor: 'pointer', userSelect: 'none' }}
+                  onClick={() => handleSort('status')}
                 >
-                  View in Jira
-                </a>
-              </div>
-            </div>
-          ))}
+                  Status <SortArrow k="status" />
+                </th>
+                <th
+                  style={{ ...TH_STYLE, cursor: 'pointer', userSelect: 'none' }}
+                  onClick={() => handleSort('priority')}
+                >
+                  Priority <SortArrow k="priority" />
+                </th>
+                <th style={TH_STYLE}>Assignee</th>
+                <th
+                  style={{ ...TH_STYLE, cursor: 'pointer', userSelect: 'none' }}
+                  onClick={() => handleSort('created')}
+                >
+                  Created <SortArrow k="created" />
+                </th>
+                <th
+                  style={{ ...TH_STYLE, cursor: 'pointer', userSelect: 'none' }}
+                  onClick={() => handleSort('updated')}
+                >
+                  Updated <SortArrow k="updated" />
+                </th>
+                <th style={{ ...TH_STYLE, textAlign: 'right' }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((issue, idx) => {
+                const isLast = idx === visible.length - 1;
+                const tdStyle: React.CSSProperties = {
+                  ...TD_STYLE,
+                  borderBottom: isLast ? 'none' : '1px solid var(--card-border)',
+                };
+                const url = browseUrl(issue, jiraBase);
+                const sName = issue.fields.status?.name ?? '—';
+                const pName = issue.fields.priority?.name;
+
+                return (
+                  <tr key={issue.id} style={{ transition: 'background 0.1s' }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.025)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = '')}
+                  >
+                    {/* Issue Key */}
+                    <td style={tdStyle}>
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ color: '#818cf8', fontWeight: 700, textDecoration: 'none', fontFamily: 'ui-monospace, monospace', fontSize: 12 }}
+                      >
+                        {issue.key}
+                      </a>
+                    </td>
+
+                    {/* Summary */}
+                    <td style={{ ...tdStyle, maxWidth: 340 }}>
+                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text)' }}>
+                        {issue.fields.summary ?? '—'}
+                      </div>
+                    </td>
+
+                    {/* Project */}
+                    <td style={{ ...tdStyle, color: 'var(--text-muted)', fontSize: 12 }}>
+                      {issue.fields.project?.name ?? issue.fields.project?.key ?? '—'}
+                    </td>
+
+                    {/* Status */}
+                    <td style={tdStyle}>
+                      <span style={{
+                        padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 700,
+                        background: `${statusColor(sName)}1a`,
+                        color: statusColor(sName),
+                        whiteSpace: 'nowrap',
+                      }}>
+                        {sName}
+                      </span>
+                    </td>
+
+                    {/* Priority */}
+                    <td style={tdStyle}>
+                      {pName ? (
+                        <span style={{ fontSize: 12, fontWeight: 600, color: priorityColor(pName) }}>
+                          {pName}
+                        </span>
+                      ) : <span style={{ color: 'var(--text-muted)' }}>—</span>}
+                    </td>
+
+                    {/* Assignee */}
+                    <td style={{ ...tdStyle, color: 'var(--text-muted)', fontSize: 12 }}>
+                      {issue.fields.assignee?.displayName ?? (
+                        <span style={{ fontStyle: 'italic', opacity: 0.5 }}>Unassigned</span>
+                      )}
+                    </td>
+
+                    {/* Created */}
+                    <td style={{ ...tdStyle, color: 'var(--text-muted)', fontSize: 12, whiteSpace: 'nowrap' }}>
+                      {fmtDate(issue.fields.created)}
+                    </td>
+
+                    {/* Updated */}
+                    <td style={{ ...tdStyle, color: 'var(--text-muted)', fontSize: 12, whiteSpace: 'nowrap' }}>
+                      {fmtDate(issue.fields.updated)}
+                    </td>
+
+                    {/* Actions */}
+                    <td style={{ ...tdStyle, textAlign: 'right' }}>
+                      <a
+                        href={url}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{
+                          padding: '5px 12px', borderRadius: 6,
+                          border: '1px solid rgba(56,189,248,0.3)',
+                          color: '#38bdf8', background: 'rgba(56,189,248,0.07)',
+                          textDecoration: 'none', fontSize: 12, whiteSpace: 'nowrap',
+                        }}
+                      >
+                        Open in Jira ↗
+                      </a>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
