@@ -4021,10 +4021,7 @@ def breaks_grouped():
             f"  MIN(timestamp) OVER ("
             f"    PARTITION BY project_name, COALESCE(error_hash, MD5(LOWER(TRIM(error)))) "
             f"  ) AS first_seen, "
-            # last_seen = most recent timestamp across all rows sharing this error identity
-            f"  MAX(timestamp) OVER ("
-            f"    PARTITION BY project_name, COALESCE(error_hash, MD5(LOWER(TRIM(error)))) "
-            f"  ) AS last_seen, "
+            f"  timestamp AS last_seen, "
             # Stable occurrence number within the error identity, oldest first
             f"  ROW_NUMBER() OVER ("
             f"    PARTITION BY project_name, COALESCE(error_hash, MD5(LOWER(TRIM(error)))) "
