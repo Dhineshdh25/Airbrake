@@ -35,6 +35,8 @@ _TRANSITION_EVENTS = {
     "jira:issue_transitioned",   # some Jira Cloud versions use this
 }
 
+_REOPEN_STATUSES = {"todo", "in progress", "reopened", "open"}
+
 _COMMENT_EVENTS = {
     "comment_created",
     "comment_updated",
@@ -143,6 +145,12 @@ def parse_webhook(payload: dict[str, Any]) -> Optional[dict[str, Any]]:
         )
 
         action = "resolve" if is_terminal else "update"
+        is_reopen = bool(transition_name and transition_name.lower() in {"reopened", "todo", "in progress", "inprogress"})
+        if not is_reopen and status_name in _REOPEN_STATUSES:
+            is_reopen = True
+
+        if is_reopen:
+            action = "reopen"
 
         return {
             "action":          action,
@@ -150,6 +158,7 @@ def parse_webhook(payload: dict[str, Any]) -> Optional[dict[str, Any]]:
             "issue_id":        issue_id,
             "status":          status_name,
             "is_terminal":     is_terminal,
+            "is_reopen":       is_reopen,
             "assignee":        _extract_user(fields.get("assignee")),
             "resolution":      fields.get("resolution"),
             "summary":         fields.get("summary", ""),

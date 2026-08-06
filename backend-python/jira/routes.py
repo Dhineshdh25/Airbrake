@@ -450,6 +450,25 @@ def jira_webhook():
         event.get("action"), event.get("issue_key"), event.get("is_terminal"),
     )
 
+    # ── Handle reopen transitions separately ────────────────────────────────
+    if event.get("is_reopen"):
+        try:
+            from .jira_sync import reopen_linked_airbrake_errors
+            result = reopen_linked_airbrake_errors(
+                event.get("issue_key", ""),
+                event.get("status") or event.get("transition_name") or "Reopened",
+            )
+            logger.info("[Jira Webhook] Reopen result: %s", result)
+            return jsonify({
+                "status":    "processed",
+                "action":    "reopen",
+                "issue_key": event.get("issue_key"),
+                "reopened":  result.get("reopened", 0),
+            }), 200
+        except Exception as exc:
+            logger.exception("[Jira Webhook] Reopen handler failed: %s", exc)
+            return jsonify({"status": "error", "action": "reopen", "issue_key": event.get("issue_key"), "error": str(exc)}), 200
+
     # ── Only sync when issue reaches a terminal state ─────────────────────────
     if not event.get("is_terminal"):
         return jsonify({

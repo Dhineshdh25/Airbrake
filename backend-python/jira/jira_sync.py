@@ -232,6 +232,36 @@ def mark_sync_status(log_id: str, status: str, detail: str = "") -> None:
         logger.exception("[JiraSync] mark_sync_status failed: %s", exc)
 
 
+def reopen_linked_airbrake_errors(issue_key: str, jira_status: str) -> dict[str, Any]:
+    """Reopen linked Airbrake log rows when a Jira issue moves back to an open state."""
+    try:
+        linked_rows = find_log_rows_by_jira_key(issue_key)
+        if not linked_rows:
+            return {"reopened": 0, "issue_key": issue_key, "status": jira_status}
+
+        updated = 0
+        for row in linked_rows:
+            log_id = row.get("id")
+            if not log_id:
+                continue
+            from db import execute
+            count = execute(
+                "UPDATE projects_data "
+                "SET error_status = 'reopened', "
+                "reopened_at = NOW(), resolved_at = NULL, "
+                "jira_status = %s, jira_last_sync = NOW() "
+                "WHERE row_type = 'log' AND id = %s "
+                "AND error_status IN ('resolved', 'reopened')",
+                (jira_status, log_id),
+            )
+            updated += int(count or 0)
+
+        return {"reopened": updated, "issue_key": issue_key, "status": jira_status}
+    except Exception as exc:
+        logger.exception("[JiraSync] reopen_linked_airbrake_errors failed: %s", exc)
+        return {"reopened": 0, "issue_key": issue_key, "status": jira_status, "error": str(exc)}
+
+
 # ── Private helpers ───────────────────────────────────────────────────────────
 
 def _fetch_all_comments(
