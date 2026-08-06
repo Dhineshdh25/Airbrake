@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getSafeUUID } from '../lib/uuid';
 
@@ -8,6 +8,12 @@ export function LoginPage() {
   const [role, setRole] = useState<string>('admin');
   const navigate = useNavigate();
   const [params] = useSearchParams();
+  const bannerMessage = useMemo(() => {
+    if (params.get('reason') === 'session_expired') {
+      return 'Your session has expired. Please log in again.';
+    }
+    return null;
+  }, [params]);
 
   const handleLogin = () => {
     // Session token identifies the role for this session.
@@ -81,6 +87,20 @@ export function LoginPage() {
             ))}
           </select>
         </div>
+
+        {bannerMessage ? (
+          <div style={{
+            marginBottom: 16,
+            padding: '10px 12px',
+            borderRadius: 8,
+            background: 'rgba(248, 113, 113, 0.16)',
+            color: '#f87171',
+            fontSize: 13,
+            border: '1px solid rgba(248, 113, 113, 0.25)',
+          }}>
+            {bannerMessage}
+          </div>
+        ) : null}
 
         {/* Sign in button */}
         <button

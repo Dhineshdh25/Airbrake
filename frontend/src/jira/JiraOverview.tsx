@@ -74,6 +74,15 @@ export function JiraOverview() {
     setLoading(true);
     setLoadError(null);
 
+    // If there's no session token, redirect to login and show friendly message.
+    const sessionToken = localStorage.getItem('session_token');
+    if (!sessionToken) {
+      setLoadError('Your session has expired. Please log in again.');
+      try { window.location.href = '/auth/login'; } catch (e) {}
+      setLoading(false);
+      return;
+    }
+
     // Build JQL query to search Jira directly
     const jqlParts: string[] = [];
 
@@ -143,8 +152,18 @@ export function JiraOverview() {
         if (!cancelled) {
           console.error('[JiraOverview] failed to load tickets:', error);
 
-          // Check if it's an auth error
-          if (error.message?.includes('401') || error.message?.includes('Unauthorized')) {
+          // If we received an ApiError-like object, prefer status/body for messages
+          const status = error?.status;
+          const body = error?.body as any;
+
+          if (status === 401 || body?.reason === 'missing_or_invalid_token' || body?.error === 'Unauthorized') {
+            // Clear session client-side already handled by apiFetch; show friendly message
+            setLoadError('Your session has expired. Please log in again.');
+          } else if (status === 403) {
+            setLoadError('You do not have permission to view Jira tickets.');
+          } else if (status === 404) {
+            setLoadError('Jira resource not found.');
+          } else if (body && typeof body === 'object' && (body.error === 'Jira account not connected' || body.error === 'Jira not connected')) {
             setLoadError('Jira not connected. Please connect your Jira account in Settings.');
           } else {
             setLoadError('Unable to load Jira tickets. Make sure you have connected your Jira account.');

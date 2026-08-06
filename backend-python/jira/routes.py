@@ -89,23 +89,46 @@ _DEV_SESSIONS = {
 }
 
 
+def _is_production_environment() -> bool:
+    env_name = (os.getenv("NODE_ENV") or os.getenv("FLASK_ENV") or os.getenv("ENVIRONMENT") or "").strip().lower()
+    return env_name in {"production", "prod", "staging"}
+
+
 def _get_session() -> dict | None:
     """Return the session dict for the current request, or None.
-    
+
     Checks (in order):
     1. Bearer token in Authorization header
     2. Token as query parameter (for browser redirects that lose headers)
     """
     auth = request.headers.get("Authorization", "")
+    logger.info('[Jira Routes] Authorization header present=%s', bool(auth))
+
+    token = None
     if auth.startswith("Bearer "):
         token = auth[7:].strip()
-        return _DEV_SESSIONS.get(token)
+        logger.info('[Jira Routes] Extracted bearer token=%s', token[:20] + ('...' if len(token) > 20 else ''))
+    elif auth:
+        logger.warning('[Jira Routes] Authorization header was present but not in Bearer format')
 
-    # Fallback for browser redirects (no headers preserved)
-    query_token = (request.args.get("token") or "").strip()
-    if query_token:
-        return _DEV_SESSIONS.get(query_token)
+    if not token:
+        # Fallback for browser redirects (no headers preserved)
+        token = (request.args.get("token") or "").strip()
+        logger.info('[Jira Routes] Query token present=%s', bool(token))
 
+    if not token:
+        logger.warning('[Jira Routes] No auth token supplied for Jira request')
+        return None
+
+    ses = _DEV_SESSIONS.get(token)
+    if ses:
+        if _is_production_environment():
+            logger.warning('[Jira Routes] Dev auth token rejected in production environment token=%s', token[:20] + ('...' if len(token) > 20 else ''))
+            return None
+        logger.info('[Jira Routes] Auth session resolved userId=%s role=%s', ses.get('userId'), ses.get('role'))
+        return ses
+
+    logger.warning('[Jira Routes] Unknown or invalid auth token supplied token=%s', token[:20] + ('...' if len(token) > 20 else ''))
     return None
 
 
@@ -118,7 +141,8 @@ def _require_auth():
     """
     session = _get_session()
     if not session:
-        return None, (jsonify({"error": "Unauthorized"}), 401)
+        logger.warning('[Jira Routes] _require_auth failed: missing or invalid session/token')
+        return None, (jsonify({"error": "Unauthorized", "reason": "missing_or_invalid_token"}), 401)
 
     # X-Device-ID is a permanent per-browser identifier set by LoginPage.tsx.
     # Using it means the Jira token survives logout/login cycles on the same
@@ -126,8 +150,10 @@ def _require_auth():
     device_id = request.headers.get("X-Device-ID", "").strip()
     if device_id:
         user_id = f"device-{device_id}"
+        logger.info('[Jira Routes] Authenticated user_id=%s role=%s device_id=%s', user_id, session.get('role'), device_id)
     else:
         user_id = session["userId"]
+        logger.info('[Jira Routes] Authenticated user_id=%s role=%s device_id=<none>', user_id, session.get('role'))
 
     return user_id, None
 
@@ -732,10 +758,26 @@ def jira_search():
     next_page_token = (request.args.get("nextPageToken") or "").strip() or None
     
     try:
-        token = get_token(user_id)
+        session = _get_session()
+        candidate_user_ids = [user_id]
+        if session and session.get("userId") and session.get("userId") not in candidate_user_ids:
+            candidate_user_ids.append(session["userId"])
+
+        token = None
+        token_user_id = None
+        for candidate_id in candidate_user_ids:
+            token = get_token(candidate_id)
+            if token:
+                token_user_id = candidate_id
+                break
+
+        logger.info('[Jira Routes] Jira token lookup for user_id=%s candidates=%s', user_id, candidate_user_ids)
         if not token:
-            return jsonify({"error": "Jira not connected", "needs_auth": True}), 401
-        
+            logger.warning('[Jira Routes] No Jira OAuth token found for user_id=%s; returning not-connected response', user_id)
+            return jsonify({"error": "Jira account not connected", "reason": "jira_account_not_connected"}), 404
+
+        logger.info('[Jira Routes] Found Jira OAuth token for user_id=%s', token_user_id)
+
         from .client import JiraClient
         client = JiraClient(
             access_token=token["access_token"],

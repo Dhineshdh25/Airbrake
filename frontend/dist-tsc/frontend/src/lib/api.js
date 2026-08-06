@@ -39,10 +39,11 @@ function getDeviceId() {
     return _deviceId || _ensureDeviceId();
 }
 class ApiError extends Error {
-    constructor(status, statusText, message) {
+    constructor(status, statusText, message, body) {
         super(message ?? `HTTP ${status}: ${statusText}`);
         this.status = status;
         this.statusText = statusText;
+        this.body = body;
         this.name = 'ApiError';
     }
     /** True for any client-side mistake (400–499). */
@@ -74,20 +75,63 @@ exports.ApiError = ApiError;
 async function apiFetch(path, init) {
     // Absolute URLs (e.g. external services) are passed through unchanged.
     const url = path.startsWith('http') ? path : `${exports.API_BASE_URL}${path}`;
+    // Ensure we have a session token for authenticated endpoints.
+    const token = localStorage.getItem('session_token') || '';
+    // Build headers with sensible defaults. Allow caller to override via init.headers.
+    const headers = {
+        // Attach Authorization header (may be empty if no token).
+        Authorization: `Bearer ${token}`,
+        // Stable device identity — always present, seeded at module load time.
+        'X-Device-ID': getDeviceId(),
+        // Default to JSON for API requests. Caller may override.
+        'Content-Type': 'application/json',
+        ...(init?.headers || {}),
+    };
+    // Log header presence for debugging (only in dev).
+    try {
+        console.debug('[apiFetch] Authorization header present:', Boolean(token));
+    }
+    catch (e) {
+        // ignore in non-browser environments (jest)
+    }
+    // If there's no token, proactively redirect to login instead of calling the API.
+    if (!token && path.startsWith('/api')) {
+        // Clear any partial session state and send user to login.
+        localStorage.removeItem('session_token');
+        try {
+            window.location.href = '/auth/login';
+        }
+        catch (e) { }
+        throw new ApiError(401, 'Unauthorized', 'No session token', { error: 'Session expired' });
+    }
     const response = await fetch(url, {
         ...init,
-        headers: {
-            // Attach auth token when present (dev token or real JWT).
-            ...(localStorage.getItem('session_token')
-                ? { Authorization: `Bearer ${localStorage.getItem('session_token')}` }
-                : {}),
-            // Stable device identity — always present, seeded at module load time.
-            'X-Device-ID': getDeviceId(),
-            ...(init?.headers ?? {}),
-        },
+        headers,
     });
     if (!response.ok) {
-        throw new ApiError(response.status, response.statusText);
+        // Try to parse JSON body for richer errors
+        let parsedBody = undefined;
+        try {
+            const txt = await response.text();
+            parsedBody = txt ? JSON.parse(txt) : undefined;
+        }
+        catch (e) {
+            parsedBody = undefined;
+        }
+        const apiErr = new ApiError(response.status, response.statusText, undefined, parsedBody);
+        // On 401, clear session and redirect to login automatically.
+        if (response.status === 401) {
+            try {
+                console.warn('[apiFetch] Received 401 — clearing session and redirecting to login');
+                localStorage.removeItem('session_token');
+                localStorage.removeItem('session_role');
+                window.location.href = '/auth/login';
+            }
+            catch (e) {
+                // ignore
+            }
+        }
+        throw apiErr;
     }
     return response;
 }

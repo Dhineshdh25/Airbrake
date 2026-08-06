@@ -81,14 +81,32 @@ function buildErrorUnion(tables: string[], extraWhere = ''): string {
   return parts.join('\n UNION ALL\n');
 }
 
+function buildErrorCountUnion(tables: string[], extraWhere = ''): string {
+  const parts = tables.map(
+    (t) => `SELECT REPLACE(project_name, '_', ' ') AS project_name, COUNT(*) AS cnt FROM "${t}" WHERE error IS NOT NULL AND error <> '' AND error_status IN ('open', 'reopened')${extraWhere} GROUP BY project_name`,
+  );
+  return parts.join('\n UNION ALL\n');
+}
+
+export function buildDateRangeWhere(from?: string, to?: string): string {
+  let where = '';
+  if (from) {
+    where += ` AND timestamp >= '${from.replace(/'/g, "''")}'`;
+  }
+  if (to) {
+    where += ` AND timestamp <= '${to.replace(/'/g, "''")}'`;
+  }
+  return where;
+}
+
 /**
  * Builds a UNION ALL query across all project tables selecting
- * project_name and COUNT(*) — for total usage (all rows).
+ * project_name and COUNT(*) — for total usage (filtered by optional date range).
  * Normalizes project_name: underscores → spaces.
  */
-function buildTotalUnion(tables: string[]): string {
+function buildTotalUnion(tables: string[], extraWhere = ''): string {
   const parts = tables.map(
-    (t) => `SELECT REPLACE(project_name, '_', ' ') AS project_name, COUNT(*) AS cnt FROM "${t}" GROUP BY project_name`,
+    (t) => `SELECT REPLACE(project_name, '_', ' ') AS project_name, COUNT(*) AS cnt FROM "${t}" WHERE 1=1${extraWhere} GROUP BY project_name`,
   );
   return parts.join('\n UNION ALL\n');
 }
@@ -177,13 +195,15 @@ export function createProjectDashboardRouter(pool: Pool) {
   const express = require('express');
   const router = express.Router();
 
-  // GET /top-projects — top 10 projects by total row count
-  router.get('/top-projects', async (_req: any, res: any) => {
+export function createTopProjectsHandler(pool: Pool) {
+  return async (req: any, res: any) => {
     try {
       const tables = await getProjectTables(pool);
       if (tables.length === 0) return res.json({ projects: [] });
 
-      const union = buildTotalUnion(tables);
+      const { from, to } = req.query as Record<string, string | undefined>;
+      const extraWhere = buildDateRangeWhere(from, to);
+      const union = buildTotalUnion(tables, extraWhere);
       const { rows } = await pool.query(`
         SELECT project_name, SUM(cnt)::int AS total
         FROM (${union}) AS combined
@@ -196,18 +216,18 @@ export function createProjectDashboardRouter(pool: Pool) {
       console.error('[Dashboard] top-projects error:', (err as any).message ?? err);
       res.status(500).json({ error: 'Internal server error', detail: (err as any).message });
     }
-  });
+  };
+}
 
-  // GET /top-error-projects — top 10 projects by error count
-  router.get('/top-error-projects', async (_req: any, res: any) => {
+export function createTopErrorProjectsHandler(pool: Pool) {
+  return async (req: any, res: any) => {
     try {
       const tables = await getProjectTables(pool);
       if (tables.length === 0) return res.json({ projects: [] });
 
-      const parts = tables.map(
-        (t) => `SELECT REPLACE(project_name, '_', ' ') AS project_name, COUNT(*) AS cnt FROM "${t}" WHERE error IS NOT NULL AND error <> '' AND error_status IN ('open', 'reopened') GROUP BY project_name`,
-      );
-      const union = parts.join('\n UNION ALL\n');
+      const { from, to } = req.query as Record<string, string | undefined>;
+      const extraWhere = buildDateRangeWhere(from, to);
+      const union = buildErrorCountUnion(tables, extraWhere);
 
       const { rows } = await pool.query(`
         SELECT project_name, SUM(cnt)::int AS total
@@ -222,7 +242,8 @@ export function createProjectDashboardRouter(pool: Pool) {
       console.error('[Dashboard] top-error-projects error:', (err as any).message ?? err);
       res.status(500).json({ error: 'Internal server error', detail: (err as any).message });
     }
-  });
+  };
+}
 
   // GET /today-errors — all errors where timestamp is today (UTC)
   router.get('/today-errors', async (_req: any, res: any) => {
