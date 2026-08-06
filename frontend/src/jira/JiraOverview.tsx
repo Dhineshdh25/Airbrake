@@ -14,12 +14,19 @@ interface JiraTicketRow {
   updated_at: string;
 }
 
-interface JiraTicketsResponse {
-  total: number;
-  resolved: number;
-  todo: number;
-  sync_failed: number;
-  tickets: JiraTicketRow[];
+interface JiraIssue {
+  id: string;
+  key: string;
+  self?: string;
+  fields: {
+    summary?: string;
+    status?: { name?: string };
+    created?: string;
+    updated?: string;
+    assignee?: { displayName?: string };
+    reporter?: { displayName?: string };
+    project?: { name?: string; key?: string };
+  };
 }
 
 const SELECT_STYLE: React.CSSProperties = {
@@ -45,20 +52,17 @@ function formatDate(value: string) {
 
 export function JiraOverview() {
   const [tickets, setTickets] = useState<JiraTicketRow[]>([]);
-  const [summary, setSummary] = useState<{ total: number; resolved: number; todo: number; sync_failed: number }>({
+  const [summary, setSummary] = useState<{ total: number; resolved: number; todo: number }>({
     total: 0,
     resolved: 0,
     todo: 0,
-    sync_failed: 0,
   });
   const [statusFilter, setStatusFilter] = useState('');
-  const [syncStatusFilter, setSyncStatusFilter] = useState('');
   const [projectFilter, setProjectFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [retryMessage, setRetryMessage] = useState<string | null>(null);
-  const [retryingId, setRetryingId] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
+  const [jiraBaseUrl, setJiraBaseUrl] = useState('https://your-domain.atlassian.net');
 
   const projectOptions = useMemo(() => {
     const projects = Array.from(new Set(tickets.map((row) => row.project_name).filter(Boolean)));
@@ -69,31 +73,85 @@ export function JiraOverview() {
     let cancelled = false;
     setLoading(true);
     setLoadError(null);
-    setRetryMessage(null);
 
-    const params = new URLSearchParams();
-    if (projectFilter) params.set('project', projectFilter);
-    if (statusFilter) params.set('status', statusFilter);
-    if (syncStatusFilter) params.set('sync_status', syncStatusFilter);
+    // Build JQL query to search Jira directly
+    const jqlParts: string[] = [];
 
-    apiFetch(`/api/jira/tickets?${params.toString()}`)
+    if (projectFilter) {
+      jqlParts.push(`project = "${projectFilter}"`);
+    }
+
+    if (statusFilter === 'resolved') {
+      jqlParts.push('status IN (Done, Resolved, Closed)');
+    } else if (statusFilter === 'todo') {
+      jqlParts.push('status NOT IN (Done, Resolved, Closed)');
+    }
+
+    // Build final JQL query
+    const jql = jqlParts.length > 0 ? jqlParts.join(' AND ') + ' ORDER BY updated DESC' : 'ORDER BY updated DESC';
+
+    // Query Jira directly using the new search endpoint
+    apiFetch(`/api/jira/search?jql=${encodeURIComponent(jql)}&maxResults=100`)
       .then((res) => res.json())
       .then((data) => {
         if (cancelled) return;
-        setSummary({
-          total: data.total ?? 0,
-          resolved: data.resolved ?? 0,
-          todo: data.todo ?? 0,
-          sync_failed: data.sync_failed ?? 0,
+
+        // Extract Jira base URL from the first issue's self URL if available
+        if (data.issues && data.issues.length > 0 && data.issues[0].self) {
+          try {
+            const url = new URL(data.issues[0].self);
+            const baseUrl = `${url.protocol}//${url.host}`;
+            setJiraBaseUrl(baseUrl);
+          } catch (e) {
+            console.warn('[JiraOverview] Could not parse Jira URL from self link');
+          }
+        }
+
+        // Transform Jira issues to our ticket format
+        const issues: JiraIssue[] = data.issues ?? [];
+        const transformedTickets: JiraTicketRow[] = issues.map((issue) => {
+          const status = issue.fields.status?.name || 'Unknown';
+
+          return {
+            log_id: issue.id,
+            issue_key: issue.key,
+            project_name: issue.fields.project?.name || issue.fields.project?.key || '',
+            error: issue.fields.summary || 'No summary',
+            jira_status: status,
+            jira_sync_status: 'synced',
+            jira_sync_detail: '',
+            jira_url: `${jiraBaseUrl}/browse/${issue.key}`,
+            created_by: issue.fields.reporter?.displayName || 'Unknown',
+            updated_at: issue.fields.updated || issue.fields.created || '',
+          };
         });
-        setTickets((data.tickets ?? []) as JiraTicketRow[]);
+
+        // Calculate summary stats
+        const resolved = transformedTickets.filter(t =>
+          ['done', 'resolved', 'closed'].includes(t.jira_status.toLowerCase())
+        ).length;
+        const todo = transformedTickets.length - resolved;
+
+        setSummary({
+          total: transformedTickets.length,
+          resolved,
+          todo,
+        });
+        setTickets(transformedTickets);
       })
       .catch((error) => {
         if (!cancelled) {
           console.error('[JiraOverview] failed to load tickets:', error);
-          setLoadError('Unable to load Jira tickets right now.');
+
+          // Check if it's an auth error
+          if (error.message?.includes('401') || error.message?.includes('Unauthorized')) {
+            setLoadError('Jira not connected. Please connect your Jira account in Settings.');
+          } else {
+            setLoadError('Unable to load Jira tickets. Make sure you have connected your Jira account.');
+          }
+
           setTickets([]);
-          setSummary({ total: 0, resolved: 0, todo: 0, sync_failed: 0 });
+          setSummary({ total: 0, resolved: 0, todo: 0 });
         }
       })
       .finally(() => {
@@ -103,37 +161,14 @@ export function JiraOverview() {
     return () => {
       cancelled = true;
     };
-  }, [projectFilter, statusFilter, syncStatusFilter, reloadTick]);
-
-  async function retrySync(logId: string, issueKey: string) {
-    setRetryMessage(null);
-    setRetryingId(logId);
-
-    try {
-      const response = await apiFetch(`/api/jira/tickets/${encodeURIComponent(logId)}/retry-sync`, {
-        method: 'POST',
-      });
-      const data = await response.json();
-      setRetryMessage(
-        data.success
-          ? `Sync retry triggered for ${issueKey}. Refreshed ${data.log_ids?.length ?? 0} log(s).`
-          : `Retry failed: ${data.detail || 'unknown error'}`,
-      );
-      setReloadTick((tick) => tick + 1);
-    } catch (error) {
-      console.error('[JiraOverview] retry sync failed:', error);
-      setRetryMessage('Retry failed. Please try again.');
-    } finally {
-      setRetryingId(null);
-    }
-  }
+  }, [projectFilter, statusFilter, reloadTick, jiraBaseUrl]);
 
   return (
     <div data-testid="jira-overview">
       <div style={{ marginBottom: 24 }}>
         <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>Jira</h2>
         <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-          Jira tickets linked to Airbrake errors, with sync status and retry controls.
+          All Jira tickets from your connected Jira instance.
         </p>
       </div>
 
@@ -146,9 +181,6 @@ export function JiraOverview() {
         </span>
         <span style={{ padding: '8px 12px', borderRadius: 999, background: 'rgba(248,113,113,0.16)', color: '#f87171', fontSize: 12, fontWeight: 700 }}>
           Todo: {summary.todo}
-        </span>
-        <span style={{ padding: '8px 12px', borderRadius: 999, background: 'rgba(251,191,36,0.16)', color: '#fbbf24', fontSize: 12, fontWeight: 700 }}>
-          Sync failed: {summary.sync_failed}
         </span>
       </div>
 
@@ -177,23 +209,22 @@ export function JiraOverview() {
             <option value="todo">Todo</option>
           </select>
 
-          <select
-            value={syncStatusFilter}
-            onChange={(event) => setSyncStatusFilter(event.target.value)}
-            style={SELECT_STYLE}
+          <button
+            type="button"
+            onClick={() => setReloadTick((tick) => tick + 1)}
+            style={{
+              padding: '8px 16px',
+              borderRadius: 8,
+              border: '1px solid var(--input-border)',
+              background: 'var(--input-bg)',
+              color: 'var(--text)',
+              cursor: 'pointer',
+              fontSize: 13,
+            }}
           >
-            <option value="">All sync statuses</option>
-            <option value="synced">Synced</option>
-            <option value="sync_failed">Sync Failed</option>
-            <option value="skipped">Skipped</option>
-          </select>
+            Refresh
+          </button>
         </div>
-
-        {retryMessage ? (
-          <div style={{ padding: '12px 14px', borderRadius: 8, background: 'rgba(56,189,248,0.12)', color: '#38bdf8' }}>
-            {retryMessage}
-          </div>
-        ) : null}
       </div>
 
       {loading ? (
@@ -232,11 +263,8 @@ export function JiraOverview() {
                   <div style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
                     {ticket.project_name || 'No project'}
                   </div>
-                  <div style={{ padding: '4px 10px', borderRadius: 999, fontSize: 11, fontWeight: 700, background: ticket.jira_status?.toLowerCase() === 'resolved' ? 'rgba(52,211,153,0.12)' : 'rgba(248,113,113,0.12)', color: ticket.jira_status?.toLowerCase() === 'resolved' ? '#34d399' : '#f87171' }}>
+                  <div style={{ padding: '4px 10px', borderRadius: 999, fontSize: 11, fontWeight: 700, background: ['done', 'resolved', 'closed'].includes(ticket.jira_status?.toLowerCase()) ? 'rgba(52,211,153,0.12)' : 'rgba(248,113,113,0.12)', color: ['done', 'resolved', 'closed'].includes(ticket.jira_status?.toLowerCase()) ? '#34d399' : '#f87171' }}>
                     {ticket.jira_status || 'Unknown'}
-                  </div>
-                  <div style={{ padding: '4px 10px', borderRadius: 999, fontSize: 11, fontWeight: 700, background: ticket.jira_sync_status?.toLowerCase() === 'sync_failed' ? 'rgba(248,113,113,0.12)' : 'rgba(99,102,241,0.12)', color: ticket.jira_sync_status?.toLowerCase() === 'sync_failed' ? '#f87171' : '#818cf8' }}>
-                    {ticket.jira_sync_status || 'Unknown sync'}
                   </div>
                 </div>
 
@@ -248,17 +276,11 @@ export function JiraOverview() {
                   <span>Updated {formatDate(ticket.updated_at)}</span>
                   <span>Created by {ticket.created_by || 'unknown'}</span>
                 </div>
-
-                {ticket.jira_sync_detail ? (
-                  <div style={{ padding: '10px 12px', borderRadius: 10, background: 'rgba(255,255,255,0.05)', color: 'var(--text-muted)', fontSize: 12, border: '1px solid rgba(255,255,255,0.08)' }}>
-                    {ticket.jira_sync_detail}
-                  </div>
-                ) : null}
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 10 }}>
                 <a
-                  href={ticket.jira_url || `https://your-domain.atlassian.net/browse/${encodeURIComponent(ticket.issue_key)}`}
+                  href={ticket.jira_url}
                   target="_blank"
                   rel="noreferrer"
                   style={{
@@ -267,19 +289,6 @@ export function JiraOverview() {
                 >
                   View in Jira
                 </a>
-                <button
-                  type="button"
-                  onClick={() => retrySync(ticket.log_id, ticket.issue_key)}
-                  disabled={retryingId === ticket.log_id}
-                  style={{
-                    padding: '10px 14px', borderRadius: 8, border: 'none',
-                    background: retryingId === ticket.log_id ? 'rgba(148,163,184,0.4)' : 'rgba(99,102,241,0.95)',
-                    color: '#fff', cursor: retryingId === ticket.log_id ? 'default' : 'pointer',
-                    fontSize: 13, fontWeight: 700,
-                  }}
-                >
-                  {retryingId === ticket.log_id ? 'Retrying…' : 'Retry sync'}
-                </button>
               </div>
             </div>
           ))}
