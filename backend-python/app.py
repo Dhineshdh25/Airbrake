@@ -3937,18 +3937,14 @@ def breaks_grouped():
 
         where = " AND ".join(conditions)
 
-        # ── One row per raw log record, with stable sequential occurrence numbers ──
-        #
-        # occurrence_number: the permanent sequence number for this log row within
-        #   its error identity (project + error_hash), ordered oldest-first.
-        #   e.g.  10:00 → #1,  10:05 → #2,  10:10 → #3
-        #   This number never changes regardless of pagination or new rows.
-        #
-        # total_for_error: total count of rows sharing this error identity.
-        #   Drives the badge: 1 → New, >1 → Existing, any reopened → Regression.
-        #
-        # Both use window functions which Aurora DSQL supports.
-        # Error identity key: project_name + COALESCE(error_hash, MD5(LOWER(TRIM(error))))
+        # ── One row per raw log record ─────────────────────────────────────────
+        # Each log entry is shown individually on the Breaks page.
+        # occurrence_number: stable sequence number for this row within its error
+        #   group (oldest = 1). Used as the display "occurrence count" per row.
+        # total_for_error: total rows in the same group — drives the status badge.
+        # first_seen / last_seen: this individual row's own timestamp (it is a
+        #   single point-in-time event, not a range).
+
         inner_sql = (
             f"SELECT "
             f"  id AS representative_id, "
@@ -3958,32 +3954,17 @@ def breaks_grouped():
             f"  COALESCE(error_group_id, '') AS error_group_id, "
             f"  error_group_name, "
             f"  error_status, "
-            # first_seen = earliest timestamp across all rows sharing this error identity
-            f"  MIN(timestamp) OVER ("
-            f"    PARTITION BY project_name, COALESCE(error_hash, MD5(LOWER(TRIM(error)))) "
-            f"  ) AS first_seen, "
-            # last_seen = most recent timestamp across all rows sharing this error identity
-            f"  MAX(timestamp) OVER ("
-            f"    PARTITION BY project_name, COALESCE(error_hash, MD5(LOWER(TRIM(error)))) "
-            f"  ) AS last_seen, "
-            # Stable occurrence number within the error identity, oldest first
-            f"  ROW_NUMBER() OVER ("
-            f"    PARTITION BY project_name, COALESCE(error_hash, MD5(LOWER(TRIM(error)))) "
-            f"    ORDER BY timestamp ASC"
-            f"  ) AS occurrence_number, "
-            # Total occurrences for the same error identity (drives badge)
+            f"  timestamp AS first_seen, "
+            f"  timestamp AS last_seen, "
             f"  COUNT(*) OVER ("
             f"    PARTITION BY project_name, COALESCE(error_hash, MD5(LOWER(TRIM(error)))) "
             f"  ) AS total_for_error, "
-            # Any reopened row in this partition → regression badge for all rows
             f"  BOOL_OR(error_status = 'reopened') OVER ("
             f"    PARTITION BY project_name, COALESCE(error_hash, MD5(LOWER(TRIM(error)))) "
             f"  ) AS has_reopened "
             f"FROM {TABLE} WHERE {where}"
         )
 
-        # Outer query computes the badge from window-function results and
-        # exposes occurrence_number as occurrence_count for frontend compat.
         row_sql = (
             f"SELECT "
             f"  representative_id, "
@@ -3993,7 +3974,7 @@ def breaks_grouped():
             f"  error_group_id, "
             f"  error_group_name, "
             f"  error_status, "
-            f"  occurrence_number AS occurrence_count, "
+            f"  total_for_error AS occurrence_count, "
             f"  first_seen, "
             f"  last_seen, "
             f"  CASE "
