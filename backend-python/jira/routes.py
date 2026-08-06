@@ -389,3 +389,141 @@ def jira_disconnect():
     delete_token(user_id)
     logger.info("[Jira Routes] User disconnected Jira user_id=%s", user_id)
     return jsonify({"disconnected": True})
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# POST /api/jira/webhook
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@jira_bp.route("/webhook", methods=["POST"])
+def jira_webhook():
+    """
+    POST /api/jira/webhook
+
+    Receives Jira webhook events and triggers the sync pipeline when
+    an issue reaches a terminal status (Done / Closed / Resolved).
+
+    This endpoint is intentionally unauthenticated — Jira calls it
+    server-to-server, not from a browser. Security is provided by a
+    shared secret in the JIRA_WEBHOOK_SECRET env var (optional but
+    strongly recommended in production).
+
+    Jira sends webhooks for:
+      jira:issue_updated     — field edits, transitions, assignments
+      jira:issue_transitioned
+      comment_created
+      comment_updated
+      jira:issue_deleted
+
+    Only terminal-status events trigger solution extraction.
+    All others are acknowledged immediately and ignored.
+
+    Response: always 200 so Jira does not retry unnecessarily.
+    Errors are logged internally but never surfaced to Jira.
+    """
+    # ── Optional shared secret validation ────────────────────────────────────
+    webhook_secret = os.environ.get("JIRA_WEBHOOK_SECRET", "")
+    if webhook_secret:
+        provided = request.headers.get("X-Jira-Webhook-Secret", "")
+        if provided != webhook_secret:
+            logger.warning("[Jira Webhook] Invalid webhook secret — request rejected")
+            return jsonify({"error": "Forbidden"}), 403
+
+    payload = request.get_json(silent=True) or {}
+    webhook_event = payload.get("webhookEvent", "unknown")
+
+    logger.info(
+        "[Jira Webhook] Received event=%s issue=%s",
+        webhook_event,
+        (payload.get("issue") or {}).get("key", "?"),
+    )
+
+    # ── Parse the event ───────────────────────────────────────────────────────
+    from .webhook_handler import parse_webhook
+    event = parse_webhook(payload)
+
+    if event is None:
+        logger.debug("[Jira Webhook] Event ignored: %s", webhook_event)
+        return jsonify({"status": "ignored", "event": webhook_event}), 200
+
+    logger.info(
+        "[Jira Webhook] Parsed event action=%s issue=%s is_terminal=%s",
+        event.get("action"), event.get("issue_key"), event.get("is_terminal"),
+    )
+
+    # ── Only sync when issue reaches a terminal state ─────────────────────────
+    if not event.get("is_terminal"):
+        return jsonify({
+            "status":    "acknowledged",
+            "action":    event.get("action"),
+            "issue_key": event.get("issue_key"),
+            "reason":    "status_not_terminal",
+        }), 200
+
+    # ── Run sync pipeline asynchronously (best-effort) ────────────────────────
+    # We respond to Jira immediately (within 30s timeout) and run the pipeline
+    # synchronously on Lambda. For high-volume environments this should move
+    # to an SQS queue, but for Phase 2 synchronous is correct and simpler.
+    try:
+        from .sync_pipeline import run_sync_pipeline
+        result = run_sync_pipeline(event)
+        logger.info(
+            "[Jira Webhook] Sync pipeline result: %s",
+            {k: v for k, v in result.items() if k != "raw"},
+        )
+        return jsonify({
+            "status":      "processed",
+            "issue_key":   event.get("issue_key"),
+            "success":     result.get("success"),
+            "solution_id": result.get("solution_id"),
+            "log_ids":     result.get("log_ids", []),
+            "detail":      result.get("detail"),
+        }), 200
+
+    except Exception as exc:
+        import traceback as _tb
+        logger.exception("[Jira Webhook] Sync pipeline raised unexpectedly: %s", exc)
+        # Always return 200 so Jira does not keep retrying
+        return jsonify({
+            "status":    "error",
+            "issue_key": event.get("issue_key"),
+            "error":     str(exc),
+        }), 200
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# POST /api/jira/link
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@jira_bp.route("/link", methods=["POST"])
+def jira_link():
+    """
+    POST /api/jira/link
+
+    Link an Airbrake log row to a Jira issue key.
+    Called automatically after POST /api/jira/create succeeds so the
+    webhook can later find which log row a Jira ticket belongs to.
+
+    Body: { "log_id": str, "issue_key": str }
+    """
+    user_id, err = _require_auth()
+    if err:
+        return err
+
+    body      = request.get_json(silent=True) or {}
+    log_id    = (body.get("log_id") or "").strip()
+    issue_key = (body.get("issue_key") or "").strip()
+
+    if not log_id or not issue_key:
+        return jsonify({"error": "log_id and issue_key are required"}), 400
+
+    try:
+        from .jira_sync import mark_log_jira_key
+        mark_log_jira_key(log_id, issue_key)
+        logger.info(
+            "[Jira Routes] Linked log_id=%s to issue_key=%s by user_id=%s",
+            log_id, issue_key, user_id,
+        )
+        return jsonify({"linked": True, "log_id": log_id, "issue_key": issue_key})
+    except Exception as exc:
+        logger.exception("[Jira Routes] link failed: %s", exc)
+        return jsonify({"error": str(exc)}), 500
