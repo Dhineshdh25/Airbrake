@@ -2,29 +2,104 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.JiraOverview = JiraOverview;
 const jsx_runtime_1 = require("react/jsx-runtime");
+/**
+ * JiraOverview — Jira tickets dashboard.
+ *
+ * Fetches all Jira issues visible to the connected account via
+ * GET /api/jira/search?jql=...
+ * Reuses existing OAuth integration — no new auth logic.
+ *
+ * Columns: Issue Key | Summary | Project | Status | Priority | Assignee | Created | Updated | Actions
+ */
 const react_1 = require("react");
 const api_1 = require("../lib/api");
+const PRIORITY_ORDER = {
+    Highest: 0, Critical: 0,
+    High: 1,
+    Medium: 2,
+    Low: 3,
+    Lowest: 4, Trivial: 4,
+};
+const TERMINAL_STATUSES = new Set(['done', 'closed', 'resolved', 'fixed', 'complete', 'completed']);
+// 30-second in-memory cache — keyed by JQL string
+const _cache = new Map();
+const CACHE_TTL_MS = 30000;
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function fmtDate(iso) {
+    if (!iso)
+        return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime()))
+        return iso;
+    return d.toLocaleString([], {
+        month: 'short', day: 'numeric', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', hour12: true,
+    });
+}
+function statusColor(name) {
+    const n = (name ?? '').toLowerCase();
+    if (TERMINAL_STATUSES.has(n))
+        return '#34d399';
+    if (['in progress', 'in review', 'in development'].some(s => n.includes(s)))
+        return '#fbbf24';
+    return '#818cf8';
+}
+function priorityColor(name) {
+    const n = (name ?? '').toLowerCase();
+    if (n.includes('highest') || n.includes('critical'))
+        return '#ef4444';
+    if (n.includes('high'))
+        return '#f87171';
+    if (n.includes('medium'))
+        return '#fbbf24';
+    if (n.includes('low'))
+        return '#60a5fa';
+    return 'var(--text-muted)';
+}
+function browseUrl(issue, fallback) {
+    if (issue.self) {
+        try {
+            const u = new URL(issue.self);
+            return `${u.protocol}//${u.host}/browse/${issue.key}`;
+        }
+        catch { /* fall through */ }
+    }
+    return fallback ? `${fallback}/browse/${issue.key}` : `#${issue.key}`;
+}
+// ── Shared styles ─────────────────────────────────────────────────────────────
 const SELECT_STYLE = {
     background: 'var(--input-bg)',
     border: '1px solid var(--input-border)',
     borderRadius: 6,
     color: 'var(--text)',
-    padding: '8px 11px',
-    fontSize: 13,
+    padding: '7px 10px',
+    fontSize: 12,
     outline: 'none',
     cursor: 'pointer',
 };
-function formatDate(value) {
-    if (!value)
-        return '—';
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime()))
-        return value;
-    return date.toLocaleString([], {
-        month: 'short', day: 'numeric', year: 'numeric',
-        hour: '2-digit', minute: '2-digit', hour12: true,
-    });
-}
+const INPUT_STYLE = {
+    ...SELECT_STYLE,
+    minWidth: 200,
+};
+const TH_STYLE = {
+    padding: '10px 14px',
+    textAlign: 'left',
+    fontSize: 11,
+    fontWeight: 700,
+    color: 'var(--text-muted)',
+    textTransform: 'uppercase',
+    letterSpacing: '0.06em',
+    whiteSpace: 'nowrap',
+    borderBottom: '1px solid var(--card-border)',
+    background: 'var(--surface)',
+};
+const TD_STYLE = {
+    padding: '10px 14px',
+    fontSize: 13,
+    verticalAlign: 'middle',
+    borderBottom: '1px solid var(--card-border)',
+};
+// ── Component ─────────────────────────────────────────────────────────────────
 function JiraOverview() {
     const [tickets, setTickets] = (0, react_1.useState)([]);
     const [summary, setSummary] = (0, react_1.useState)({
@@ -139,6 +214,24 @@ function JiraOverview() {
                 setTickets([]);
                 setSummary({ total: 0, resolved: 0, todo: 0 });
             }
+            if (data.error) {
+                setLoadError(data.error);
+                setIssues([]);
+                return;
+            }
+            const list = data.issues ?? [];
+            // Extract base URL from first issue's self link
+            for (const issue of list) {
+                if (issue.self) {
+                    try {
+                        const u = new URL(issue.self);
+                        setJiraBase(`${u.protocol}//${u.host}`);
+                        break;
+                    }
+                    catch { /* continue */ }
+                }
+            }
+            setIssues(list);
         })
             .finally(() => {
             if (!cancelled)
