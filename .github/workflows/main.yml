@@ -134,7 +134,11 @@ jobs:
             package/jira/token_store.py \
             package/jira/client.py \
             package/jira/ticket_service.py \
-            package/jira/routes.py; do
+            package/jira/routes.py \
+            package/jira/webhook_handler.py \
+            package/jira/jira_sync.py \
+            package/jira/nova_extractor.py \
+            package/jira/sync_pipeline.py; do
             if [ ! -f "$f" ]; then
               echo "MISSING: $f"
               exit 1
