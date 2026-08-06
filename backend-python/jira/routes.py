@@ -696,6 +696,80 @@ def jira_link():
 # GET /api/jira/ticket-status
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@jira_bp.route("/search", methods=["GET"])
+def jira_search():
+    """
+    GET /api/jira/search?jql=<query>&maxResults=100
+    
+    Search Jira issues directly using JQL.
+    Uses the current user's OAuth token to query their Jira instance.
+    
+    Query parameters:
+      - jql: JQL query string (required)
+      - maxResults: Max results per page (default: 100)
+      - fields: Comma-separated list of fields to return (optional)
+      - nextPageToken: Token for pagination (optional)
+    
+    Response:
+      {
+        "issues": [...],
+        "isLast": bool,
+        "nextPageToken": str or None,
+        "total": int
+      }
+    """
+    user_id, err = _require_auth()
+    if err:
+        return err
+    
+    jql = (request.args.get("jql") or "").strip()
+    if not jql:
+        return jsonify({"error": "jql parameter is required"}), 400
+    
+    max_results = int(request.args.get("maxResults", 100))
+    fields_str = (request.args.get("fields") or "").strip()
+    fields = fields_str.split(",") if fields_str else None
+    next_page_token = (request.args.get("nextPageToken") or "").strip() or None
+    
+    try:
+        token = get_token(user_id)
+        if not token:
+            return jsonify({"error": "Jira not connected", "needs_auth": True}), 401
+        
+        from .client import JiraClient
+        client = JiraClient(
+            access_token=token["access_token"],
+            cloud_id=token["cloud_id"]
+        )
+        
+        result = client.search_issues(
+            jql=jql,
+            fields=fields,
+            max_results=max_results,
+            next_page_token=next_page_token
+        )
+        
+        return jsonify({
+            "issues": result.get("issues", []),
+            "isLast": result.get("isLast", True),
+            "nextPageToken": result.get("nextPageToken"),
+            "total": len(result.get("issues", []))
+        })
+    
+    except requests.HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else 502
+        logger.error("[Jira Routes] search failed status=%s", status_code)
+        return jsonify({
+            "error": "Jira API error",
+            "status": status_code,
+            "needs_auth": status_code == 401
+        }), status_code if status_code in (400, 401, 403) else 502
+    
+    except Exception as exc:
+        logger.exception("[Jira Routes] search failed: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+
 @jira_bp.route("/ticket-status")
 def jira_ticket_status():
     """

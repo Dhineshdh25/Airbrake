@@ -79,6 +79,98 @@ class JiraClient:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
+    def search_issues(self, jql: str, fields: list = None, max_results: int = 100, next_page_token: str = None) -> dict:
+        """
+        Search Jira issues using JQL (POST /rest/api/3/search/jql).
+        
+        Args:
+            jql: JQL query string (e.g., "project = AIRBRAKE AND status = Open")
+            fields: List of fields to return (default: all standard fields)
+            max_results: Max results per page (default: 100)
+            next_page_token: Token for pagination (optional)
+        
+        Returns:
+            {
+                "issues": [...],
+                "isLast": bool,
+                "nextPageToken": str or None
+            }
+        
+        Raises:
+            requests.HTTPError: If the API call fails
+        """
+        payload = {
+            "jql": jql,
+            "maxResults": max_results
+        }
+        
+        if fields:
+            payload["fields"] = fields
+        
+        if next_page_token:
+            payload["nextPageToken"] = next_page_token
+        
+        url = f"{self._base}/search/jql"
+        logger.info("[Jira Client] Searching issues jql=%s maxResults=%d", jql[:100], max_results)
+        
+        resp = requests.post(
+            url, 
+            json=payload, 
+            headers=self._headers, 
+            timeout=_TIMEOUT
+        )
+        
+        if not resp.ok:
+            logger.error(
+                "[Jira Client] search_issues failed status=%s body=%s",
+                resp.status_code, resp.text[:500]
+            )
+            resp.raise_for_status()
+        
+        data = resp.json()
+        logger.info(
+            "[Jira Client] Search returned %d issues, isLast=%s",
+            len(data.get("issues", [])), data.get("isLast", True)
+        )
+        return data
+
+    def get_issue(self, issue_key: str, fields: list = None) -> dict:
+        """
+        Get a single Jira issue by key.
+        
+        Args:
+            issue_key: Issue key (e.g., "PROJ-123")
+            fields: List of fields to return (default: all)
+        
+        Returns:
+            Issue data dict with fields
+        
+        Raises:
+            requests.HTTPError: If the issue doesn't exist or API call fails
+        """
+        url = f"{self._base}/issue/{issue_key}"
+        params = {}
+        if fields:
+            params["fields"] = ",".join(fields)
+        
+        logger.info("[Jira Client] Getting issue key=%s", issue_key)
+        
+        resp = requests.get(
+            url,
+            params=params,
+            headers=self._headers,
+            timeout=_TIMEOUT
+        )
+        
+        if not resp.ok:
+            logger.error(
+                "[Jira Client] get_issue failed status=%s body=%s",
+                resp.status_code, resp.text[:500]
+            )
+            resp.raise_for_status()
+        
+        return resp.json()
+
     def _build_browse_url(self, ticket_key: str) -> str:
         """Build the human-readable browse URL for a ticket key."""
         try:

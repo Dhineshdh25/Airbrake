@@ -189,6 +189,98 @@ def create_jira_ticket(user_id: str, error_data: dict) -> dict:
     return result
 
 
+def search_jira_tickets(user_id: str, jql: str, max_results: int = 100) -> dict:
+    """
+    Search Jira tickets using JQL via the new /rest/api/3/search/jql endpoint.
+
+    Args:
+        user_id: Airbrake user ID to use for OAuth token lookup
+        jql: JQL query string (e.g., "project = AIRBRAKE AND status = Open")
+        max_results: Maximum number of results to return (default: 100)
+
+    Returns:
+        {
+            "issues": [...],
+            "isLast": bool,
+            "nextPageToken": str or None,
+            "total": int
+        }
+
+    Raises RuntimeError if the user has no connected Jira account.
+    Raises requests.HTTPError on Jira API failure.
+    """
+    token = _get_valid_token(user_id)
+
+    client = JiraClient(
+        access_token=token["access_token"],
+        cloud_id=token["cloud_id"],
+    )
+
+    try:
+        result = client.search_issues(
+            jql=jql,
+            fields=["summary", "status", "created", "updated", "assignee", "reporter"],
+            max_results=max_results
+        )
+        
+        logger.info(
+            "[Jira TicketService] Search completed user_id=%s results=%d",
+            user_id, len(result.get("issues", []))
+        )
+        
+        return result
+    except requests.HTTPError as exc:
+        # Handle 401 the same way as create_jira_ticket
+        if exc.response is not None and exc.response.status_code == 401:
+            logger.warning(
+                "[Jira TicketService] Got 401 from Jira search, attempting token refresh for user_id=%s",
+                user_id,
+            )
+            if not token.get("refresh_token"):
+                raise RuntimeError(
+                    "Your Jira session was revoked.  Please reconnect your Jira account."
+                ) from exc
+            try:
+                refreshed = refresh_access_token(token["refresh_token"])
+                save_token(
+                    user_id              = user_id,
+                    access_token         = refreshed["access_token"],
+                    refresh_token        = refreshed.get("refresh_token", token["refresh_token"]),
+                    expires_in           = refreshed.get("expires_in"),
+                    cloud_id             = token["cloud_id"],
+                    atlassian_account_id = token["atlassian_account_id"],
+                    atlassian_email      = token["atlassian_email"],
+                )
+                fresh_token = get_token(user_id)
+                logger.info(
+                    "[Jira TicketService] Token refreshed after 401, retrying search for user_id=%s",
+                    user_id,
+                )
+                client2 = JiraClient(
+                    access_token=fresh_token["access_token"],
+                    cloud_id=fresh_token["cloud_id"],
+                )
+                result = client2.search_issues(
+                    jql=jql,
+                    fields=["summary", "status", "created", "updated", "assignee", "reporter"],
+                    max_results=max_results
+                )
+                return result
+            except RuntimeError:
+                raise
+            except Exception as refresh_exc:
+                logger.error(
+                    "[Jira TicketService] Refresh-and-retry failed for search user_id=%s: %s",
+                    user_id, refresh_exc,
+                )
+                raise RuntimeError(
+                    "Your Jira session was revoked and could not be refreshed.  "
+                    "Please reconnect your Jira account."
+                ) from refresh_exc
+        else:
+            raise  # non-401 Jira errors propagate normally
+
+
 # ── DB helpers for ticket metadata ───────────────────────────────────────────
 try:
     from db import query, execute, execute_returning, try_claim_jira_ticket, update_claimed_jira_ticket, find_jira_ticket_by_hash
