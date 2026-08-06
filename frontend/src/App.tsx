@@ -8,6 +8,7 @@ import { Dashboard } from './dashboard/Dashboard';
 import { LogStream } from './logs/LogStream';
 import { BreaksList } from './breaks/BreaksList';
 import { ErrorDetail } from './breaks/ErrorDetail';
+import { JiraOverview } from './jira/JiraOverview';
 import { Settings } from './settings/Settings';
 import type { Role } from '@portal/shared';
 
@@ -26,6 +27,7 @@ function AppShell() {
         <Route path="/logs" element={<LogStream />} />
         <Route path="/breaks" element={<BreaksList />} />
         <Route path="/breaks/:errorHash" element={<ErrorDetail />} />
+        <Route path="/jira" element={<JiraOverview />} />
         <Route path="/settings" element={<Settings role={role} />} />
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
       </Routes>

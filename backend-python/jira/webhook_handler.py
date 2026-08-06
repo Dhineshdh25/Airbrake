@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 # Jira status names are case-insensitive. We normalise before comparing.
 TERMINAL_STATUSES = {"done", "closed", "resolved", "fixed", "complete", "completed"}
 
+
+def is_terminal(status_name: str) -> bool:
+    return (status_name or "").strip().lower() in TERMINAL_STATUSES
+
+
 # Transition event types that carry a new status
 _TRANSITION_EVENTS = {
     "jira:issue_updated",

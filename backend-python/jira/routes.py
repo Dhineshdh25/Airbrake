@@ -14,11 +14,15 @@ All routes that need an authenticated user require a valid Bearer token in
 the Authorization header (same DEV_SESSIONS pattern used by the rest of app.py).
 """
 
+import json
+import json
 import logging
 import os
 
 import requests
 from flask import Blueprint, jsonify, redirect, request
+from db import query
+from db import execute, query
 
 from .oauth import (
     build_authorization_url,
@@ -29,6 +33,7 @@ from .oauth import (
 )
 from .ticket_service import create_jira_ticket
 from .token_store import delete_token, get_token, save_token
+from .webhook_handler import TERMINAL_STATUSES, is_terminal
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +137,29 @@ def _frontend_url() -> str:
         "FRONTEND_URL",
         "https://airbrake.s3-website-us-east-1.amazonaws.com",
     )
+
+
+def _decode_metadata(raw):
+    if raw is None:
+        return {}
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {}
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+
+def _normalize_reporter(metadata):
+    reporter = metadata.get('created_by')
+    if reporter:
+        return reporter
+    raw_reporter = metadata.get('reporter')
+    if isinstance(raw_reporter, dict):
+        return raw_reporter.get('display_name') or raw_reporter.get('email') or ''
+    return metadata.get('reporter') or ''
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -281,6 +309,121 @@ def jira_status():
             "account_id": token.get("atlassian_account_id", ""),
         })
     return jsonify({"connected": False, "email": "", "account_id": ""})
+
+
+@jira_bp.route("/tickets")
+def jira_tickets():
+    user_id, err = _require_auth()
+    if err:
+        return err
+
+    project = (request.args.get('project') or '').strip()
+    status = (request.args.get('status') or '').strip().lower()
+    sync_status = (request.args.get('sync_status') or '').strip().lower()
+
+    filters = ["row_type = 'log'", "metadata::jsonb->>'jira_issue_key' IS NOT NULL"]
+    params = []
+
+    if project:
+        filters.append("project_name = %s")
+        params.append(project)
+
+    if status:
+        terminal_values = tuple(s.lower() for s in TERMINAL_STATUSES)
+        if status == 'resolved':
+            filters.append("LOWER(COALESCE(metadata::jsonb->>'jira_status', '')) IN %s")
+            params.append(terminal_values)
+        elif status == 'todo':
+            filters.append("LOWER(COALESCE(metadata::jsonb->>'jira_status', '')) NOT IN %s")
+            params.append(terminal_values)
+        else:
+            filters.append("LOWER(metadata::jsonb->>'jira_status') = %s")
+            params.append(status)
+
+    if sync_status:
+        filters.append("LOWER(metadata::jsonb->>'jira_sync_status') = %s")
+        params.append(sync_status)
+
+    try:
+        rows = query(
+            "SELECT id, project_name, error, metadata, created_at, COALESCE(updated_at, created_at) AS updated_at "
+            "FROM projects_data WHERE " + " AND ".join(filters) + " ORDER BY created_at DESC",
+            tuple(params),
+        )
+    except Exception as exc:
+        logger.exception("[Jira Routes] jira_tickets query failed: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+    tickets = []
+    resolved = todo = sync_failed = 0
+
+    for row in rows:
+        metadata = _decode_metadata(row.get('metadata'))
+        jira_status = (metadata.get('jira_status') or '').strip()
+        jira_sync_status = (metadata.get('jira_sync_status') or '').strip()
+        issue_key = (metadata.get('jira_issue_key') or '').strip()
+        created_by = _normalize_reporter(metadata)
+        error = (row.get('error') or '').strip() or (metadata.get('error_message') or '').strip()
+        updated_at = row.get('updated_at')
+
+        if jira_sync_status.lower() == 'sync_failed':
+            sync_failed += 1
+        if jira_status and is_terminal(jira_status):
+            resolved += 1
+        else:
+            todo += 1
+
+        tickets.append({
+            'log_id': row.get('id'),
+            'issue_key': issue_key,
+            'project_name': row.get('project_name') or metadata.get('project_name') or '',
+            'error': error[:220],
+            'jira_status': jira_status,
+            'jira_sync_status': jira_sync_status,
+            'jira_sync_detail': (metadata.get('jira_sync_detail') or '').strip(),
+            'jira_url': (metadata.get('jira_url') or metadata.get('url') or '').strip(),
+            'created_by': created_by,
+            'updated_at': updated_at.isoformat() if hasattr(updated_at, 'isoformat') else (updated_at or ''),
+        })
+
+    return jsonify({
+        'total': len(tickets),
+        'resolved': resolved,
+        'todo': todo,
+        'sync_failed': sync_failed,
+        'tickets': tickets,
+    })
+
+
+@jira_bp.route('/tickets/<log_id>/retry-sync', methods=['POST'])
+def jira_retry_ticket_sync(log_id):
+    user_id, err = _require_auth()
+    if err:
+        return err
+
+    rows = query(
+        "SELECT metadata FROM projects_data WHERE row_type = 'log' AND id = %s",
+        (log_id,),
+    )
+    if not rows:
+        return jsonify({"error": "Ticket log row not found"}), 404
+
+    metadata = _decode_metadata(rows[0].get('metadata'))
+    issue_key = (metadata.get('jira_issue_key') or '').strip()
+    if not issue_key:
+        return jsonify({"error": "No Jira issue linked to this log row"}), 400
+
+    try:
+        from .sync_pipeline import run_sync_pipeline
+        result = run_sync_pipeline({"action": "retry", "issue_key": issue_key})
+        return jsonify({
+            "success": bool(result.get('success')),
+            "detail": result.get('detail', ''),
+            "log_ids": result.get('log_ids', []),
+        })
+    except Exception as exc:
+        logger.exception("[Jira Routes] retry sync failed for log_id=%s issue_key=%s: %s", log_id, issue_key, exc)
+        return jsonify({"error": str(exc)}), 500
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

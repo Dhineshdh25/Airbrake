@@ -8,6 +8,7 @@ const NAV_LINKS = [
     { to: '/dashboard', label: 'Dashboard', icon: '▦' },
     { to: '/logs', label: 'Log Stream', icon: '≡' },
     { to: '/breaks', label: 'Breaks', icon: '⚡' },
+    { to: '/jira', label: 'Jira', icon: '🔗' },
     { to: '/settings', label: 'Settings', icon: '⚙' },
 ];
 function Layout({ children }) {
