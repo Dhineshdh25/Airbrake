@@ -3904,6 +3904,69 @@ def dashboard_errors():
 # BREAKS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@app.route("/api/jira/summary")
+def jira_summary():
+    """Return Jira ticket summary for the breaks page Jira section."""
+    try:
+        rows = query(
+            "SELECT metadata FROM projects_data WHERE row_type = 'jira_ticket' ORDER BY created_at DESC"
+        )
+
+        tickets = []
+        for row in rows:
+            raw = row.get("metadata")
+            try:
+                payload = json.loads(raw) if isinstance(raw, str) else raw or {}
+            except Exception:
+                payload = {}
+
+            error_hash = payload.get("error_hash") or ""
+            project_name = payload.get("project_name") or ""
+            created_by = payload.get("created_by") or ""
+            created_at = payload.get("created_at") or ""
+            jira_key = payload.get("jira_key") or payload.get("key") or ""
+            jira_url = payload.get("jira_url") or payload.get("url") or ""
+
+            status = "Todo"
+            if error_hash:
+                log_rows = query(
+                    "SELECT error_status FROM projects_data WHERE row_type = 'log' AND error_hash = %s AND LOWER(project_name) = LOWER(%s)",
+                    (error_hash, project_name),
+                )
+                if log_rows:
+                    error_status = (log_rows[0].get("error_status") or "").strip().lower()
+                    if error_status == "resolved":
+                        status = "Resolved"
+                    elif error_status == "reopened":
+                        status = "Todo"
+                    else:
+                        status = "Todo"
+
+            tickets.append({
+                "error_hash": error_hash,
+                "project_name": project_name,
+                "error": payload.get("error_message") or payload.get("summary") or "",
+                "jira_key": jira_key,
+                "jira_url": jira_url,
+                "created_by": created_by,
+                "created_at": created_at,
+                "status": status,
+            })
+
+        resolved = sum(1 for t in tickets if t["status"] == "Resolved")
+        todo = sum(1 for t in tickets if t["status"] == "Todo")
+
+        return jsonify({
+            "total": len(tickets),
+            "resolved": resolved,
+            "todo": todo,
+            "tickets": tickets,
+        })
+    except Exception as exc:
+        logger.exception("[Jira Summary] failed: %s", exc)
+        return jsonify({"error": str(exc), "total": 0, "resolved": 0, "todo": 0, "tickets": []}), 500
+
+
 @app.route("/api/breaks/grouped")
 def breaks_grouped():
     page = max(1, int(request.args.get("page", 1) or 1))

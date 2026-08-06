@@ -39,3 +39,120 @@ except Exception as _db_exc:
         raise RuntimeError(f"DB unavailable: {_db_exc}")
     def query(*a, **kw):
         raise RuntimeError(f"DB unavailable: {_db_exc}")
+
+try:
+    from .ticket_service import fetch_full_issue
+    from .jira_sync import (
+        find_airbrake_token_for_webhook,
+        find_log_rows_by_jira_key,
+        mark_sync_status,
+    )
+    from .nova_extractor import extract_solution_from_issue, build_solution_text
+except Exception as _imports_exc:
+    logger.error("[SyncPipeline] jira helper import failed: %s", _imports_exc)
+    def fetch_full_issue(*a, **kw):
+        raise RuntimeError(f"Jira helper unavailable: {_imports_exc}")
+    def find_airbrake_token_for_webhook(*a, **kw):
+        raise RuntimeError(f"Jira helper unavailable: {_imports_exc}")
+    def find_log_rows_by_jira_key(*a, **kw):
+        raise RuntimeError(f"Jira helper unavailable: {_imports_exc}")
+    def mark_sync_status(*a, **kw):
+        raise RuntimeError(f"Jira helper unavailable: {_imports_exc}")
+    def extract_solution_from_issue(*a, **kw):
+        raise RuntimeError(f"Jira helper unavailable: {_imports_exc}")
+    def build_solution_text(*a, **kw):
+        raise RuntimeError(f"Jira helper unavailable: {_imports_exc}")
+
+
+def run_sync_pipeline(event: dict[str, Any]) -> dict[str, Any]:
+    """Run a Jira sync pipeline for a webhook event or manual retry."""
+    issue_key = (event.get("issue_key") or "").strip()
+    if not issue_key:
+        raise ValueError("Missing issue_key")
+
+    token_pair = find_airbrake_token_for_webhook()
+    if not token_pair:
+        return {
+            "success": False,
+            "detail": "No Jira token available to fetch issue details.",
+            "issue_key": issue_key,
+            "log_ids": [],
+        }
+
+    access_token, cloud_id = token_pair
+
+    try:
+        issue = fetch_full_issue(issue_key, access_token, cloud_id)
+    except Exception as exc:
+        logger.exception("[SyncPipeline] Failed to fetch Jira issue %s: %s", issue_key, exc)
+        return {
+            "success": False,
+            "detail": f"Failed to fetch Jira issue {issue_key}: {exc}",
+            "issue_key": issue_key,
+            "log_ids": [],
+        }
+
+    linked_rows = find_log_rows_by_jira_key(issue_key)
+    log_ids = [row.get("id") for row in linked_rows if row.get("id")]
+    if not log_ids:
+        return {
+            "success": False,
+            "detail": "No linked Airbrake log rows found for this Jira issue.",
+            "issue_key": issue_key,
+            "log_ids": [],
+        }
+
+    overall_success = True
+    details: list[str] = []
+
+    for linked_row in linked_rows:
+        log_id = linked_row.get("id")
+        if not log_id:
+            continue
+
+        error_hash = linked_row.get("error_hash") or ""
+        project_name = linked_row.get("project_name") or None
+        jira_status = issue.get("status", "") or ""
+
+        extraction = extract_solution_from_issue(issue)
+        solution_text = build_solution_text(extraction)
+
+        if not solution_text:
+            overall_success = False
+            detail = "No extractable solution found for Jira issue."
+        else:
+            try:
+                insert_solution(
+                    error_hash=error_hash,
+                    solution=solution_text,
+                    created_by="jira_sync",
+                    project_name=project_name,
+                    error_message=issue.get("summary") or "",
+                )
+                detail = "Solution extracted and inserted from Jira issue."
+            except Exception as exc:
+                overall_success = False
+                detail = f"Solution insertion failed: {exc}"
+
+        details.append(detail)
+
+        try:
+            mark_sync_status(log_id, "synced" if solution_text else "sync_failed", detail)
+            execute(
+                "UPDATE projects_data "
+                "SET metadata = COALESCE(metadata::jsonb, '{}'::jsonb) "
+                "           || jsonb_build_object('jira_status', %s, 'jira_last_sync', NOW()) "
+                "WHERE row_type = 'log' AND id = %s",
+                (jira_status, log_id),
+            )
+        except Exception as exc:
+            logger.exception("[SyncPipeline] Failed to update log metadata for %s: %s", log_id, exc)
+            overall_success = False
+            details.append(f"Metadata update failed for {log_id}: {exc}")
+
+    return {
+        "success": overall_success,
+        "detail": "; ".join(details),
+        "issue_key": issue_key,
+        "log_ids": log_ids,
+    }
