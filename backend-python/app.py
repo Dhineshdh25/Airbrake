@@ -4219,11 +4219,19 @@ def get_break_detail(error_hash):
     """
     GET /api/breaks/detail/:error_hash
     Returns full error detail for the Error Details page.
+    
+    PERFORMANCE INSTRUMENTATION: All timing logs use [PERF] prefix for easy filtering.
     """
     request_id = g.get("request_id", "unknown")
     request_start = time.perf_counter()
+    print(f"[PERF] [req:{request_id}] === REQUEST START === error_hash={error_hash}")
     try:
+        parse_params_start = time.perf_counter()
         project_name = (request.args.get('project_name') or '').strip() or None
+        log_id_param = request.args.get('log_id', '').strip() or None
+        parse_params_elapsed = (time.perf_counter() - parse_params_start) * 1000
+        print(f"[PERF] [req:{request_id}] Parse params: {parse_params_elapsed:.3f}ms")
+        
         stage = "route_entered"
         debug_info = {
             "error_hash": error_hash,
@@ -4242,6 +4250,7 @@ def get_break_detail(error_hash):
         debug_info["project_name"] = project_name
 
         # Get grouped error info
+        hash_gen_start = time.perf_counter()
         conditions = [
             "row_type = 'log'",
             "error IS NOT NULL",
@@ -4263,6 +4272,8 @@ def get_break_detail(error_hash):
                 "message": str(exc),
             }
             raise
+        hash_gen_elapsed = (time.perf_counter() - hash_gen_start) * 1000
+        print(f"[PERF] [req:{request_id}] Hash generation: {hash_gen_elapsed:.3f}ms")
 
         print(f"[req:{request_id}] [Breaks:detail] hash_candidates={hash_candidates}")
         
@@ -4315,6 +4326,7 @@ def get_break_detail(error_hash):
             query_end = time.perf_counter()
             debug_info["primary_query_elapsed_ms"] = round((query_end - query_start) * 1000, 3)
             debug_info["primary_row_count"] = len(error_rows) if error_rows else 0
+            print(f"[PERF] [req:{request_id}] Primary query: {debug_info['primary_query_elapsed_ms']:.3f}ms (returned {debug_info['primary_row_count']} rows)")
             print(f"[req:{request_id}] [Breaks:detail] Primary query returned {len(error_rows) if error_rows else 0} rows in {debug_info['primary_query_elapsed_ms']}ms")
 
         if not error_rows:
@@ -4344,6 +4356,7 @@ def get_break_detail(error_hash):
             debug_info["fallback_query_elapsed_ms"] = round((fallback_end - fallback_start) * 1000, 3)
             debug_info["fallback_row_count"] = len(error_rows) if error_rows else 0
             debug_info["used_md5_fallback"] = True
+            print(f"[PERF] [req:{request_id}] Fallback query: {debug_info['fallback_query_elapsed_ms']:.3f}ms (returned {debug_info['fallback_row_count']} rows)")
             print(f"[req:{request_id}] [Breaks:detail] Fallback query returned {len(error_rows) if error_rows else 0} rows in {debug_info['fallback_query_elapsed_ms']}ms")
 
         if not error_rows and not log_query:
@@ -4369,6 +4382,7 @@ def get_break_detail(error_hash):
             debug_info["row_count"] = len(error_rows) if error_rows else 0
             debug_info["first_row"] = serialize_row(error_rows[0]) if error_rows else None
             debug_info["first_row_keys"] = list(error_rows[0].keys()) if error_rows else []
+            print(f"[PERF] [req:{request_id}] Broad query: {debug_info['query_elapsed_ms']:.3f}ms (returned {debug_info['row_count']} rows)")
             print(f"[req:{request_id}] [Breaks:detail] Query returned {len(error_rows) if error_rows else 0} rows in {debug_info['query_elapsed_ms']}ms")
         else:
             debug_info["row_count"] = len(error_rows) if error_rows else 0
@@ -4456,17 +4470,21 @@ def get_break_detail(error_hash):
                         }
                     except Exception:
                         logger.exception('[Breaks:detail] Failed to parse jira_ticket metadata')
-            debug_info['jira_lookup_elapsed_ms'] = round((time.perf_counter() - jira_start) * 1000, 3)
+            jira_elapsed = (time.perf_counter() - jira_start) * 1000
+            debug_info['jira_lookup_elapsed_ms'] = round(jira_elapsed, 3)
+            print(f"[PERF] [req:{request_id}] Jira lookup: {jira_elapsed:.3f}ms")
         except Exception as _jt_exc:
             logger.exception('[Breaks:detail] Jira ticket lookup failed: %s', _jt_exc)
-            debug_info['jira_lookup_elapsed_ms'] = round((time.perf_counter() - jira_start) * 1000, 3)
+            jira_elapsed = (time.perf_counter() - jira_start) * 1000
+            debug_info['jira_lookup_elapsed_ms'] = round(jira_elapsed, 3)
+            print(f"[PERF] [req:{request_id}] Jira lookup FAILED: {jira_elapsed:.3f}ms")
 
         # ── Status: use the SPECIFIC row when log_id supplied, not group aggregate ──
         # This is the critical fix: when the user opens a specific occurrence,
         # its error_status must come from that row alone.  Aggregating with
         # any(... == "resolved") causes one resolved row to make the entire
         # modal appear resolved.
-        log_id_param = request.args.get('log_id', '').strip() or None
+        status_calc_start = time.perf_counter()
         specific_row = None
         if log_id_param:
             specific_row = next((r for r in error_rows if r.get("id") == log_id_param), None)
@@ -4496,10 +4514,13 @@ def get_break_detail(error_hash):
                 status = "new"
             else:
                 status = "existing"
+        status_calc_elapsed = (time.perf_counter() - status_calc_start) * 1000
+        print(f"[PERF] [req:{request_id}] Status calculation: {status_calc_elapsed:.3f}ms")
 
         # Assign stable occurrence_number to each raw row based on chronological order
         # Chronological = oldest first. Compute cumulative counts so rows keep their
         # original sequential occurrence numbers even if paginated later.
+        occur_num_start = time.perf_counter()
         try:
             # Sort ascending by timestamp for numbering
             asc = sorted(error_rows, key=lambda x: x.get("timestamp") or "")
@@ -4528,6 +4549,8 @@ def get_break_detail(error_hash):
                  "failure_count": r.get("failure_count", 1), "occurrence_number": None}
                 for r in error_rows
             ]
+        occur_num_elapsed = (time.perf_counter() - occur_num_start) * 1000
+        print(f"[PERF] [req:{request_id}] Occurrence numbering: {occur_num_elapsed:.3f}ms")
 
         # ── Solution card — semantic-first, three-tier lookup ─────────────────
         # Retrieval is project-scoped at every tier. The frontend receives the
@@ -4545,6 +4568,7 @@ def get_break_detail(error_hash):
         solution_data = None
         solution_error = None
         solution_start = time.perf_counter()
+        print(f"[PERF] [req:{request_id}] === SOLUTION LOOKUP START ===")
         try:
             def _make_solution_data(s):
                 """Convert a DB row dict into the solution_data shape."""
@@ -4745,10 +4769,13 @@ def get_break_detail(error_hash):
             solution_error = f"Failed to load solution: {str(e)}"
             debug_info["solution_error"] = {"type": type(e).__name__, "message": str(e)}
         finally:
-            debug_info['solution_elapsed_ms'] = round((time.perf_counter() - solution_start) * 1000, 3)
+            solution_elapsed = (time.perf_counter() - solution_start) * 1000
+            debug_info['solution_elapsed_ms'] = round(solution_elapsed, 3)
+            print(f"[PERF] [req:{request_id}] === SOLUTION LOOKUP END === {solution_elapsed:.3f}ms")
 
         ai_recommendation = None
         ai_start = time.perf_counter()
+        print(f"[PERF] [req:{request_id}] === AI RECOMMENDATION START ===")
         try:
             debug_info["solution_stage"] = "loading_ai"
             ai_recommendation = get_ai_recommendations(
@@ -4788,12 +4815,15 @@ def get_break_detail(error_hash):
             except Exception:
                 pass
         finally:
-            debug_info['ai_elapsed_ms'] = round((time.perf_counter() - ai_start) * 1000, 3)
+            ai_elapsed = (time.perf_counter() - ai_start) * 1000
+            debug_info['ai_elapsed_ms'] = round(ai_elapsed, 3)
+            print(f"[PERF] [req:{request_id}] === AI RECOMMENDATION END === {ai_elapsed:.3f}ms")
 
         # Parse stack trace to extract structured frame information with source code lines
         parsed_stacktrace = None
         if STACKTRACE_PARSER_AVAILABLE:
             stacktrace_start = time.perf_counter()
+            print(f"[PERF] [req:{request_id}] === STACKTRACE PARSING START ===")
             try:
                 parsed_stacktrace = parse_and_enhance_stacktrace(
                     first["error_message"],
@@ -4806,7 +4836,9 @@ def get_break_detail(error_hash):
                 print(f"[req:{request_id}] [Breaks:detail] Stack trace parsing failed: {e}")
                 debug_info["stacktrace_parse_error"] = str(e)
             finally:
-                debug_info['stacktrace_elapsed_ms'] = round((time.perf_counter() - stacktrace_start) * 1000, 3)
+                stacktrace_elapsed = (time.perf_counter() - stacktrace_start) * 1000
+                debug_info['stacktrace_elapsed_ms'] = round(stacktrace_elapsed, 3)
+                print(f"[PERF] [req:{request_id}] === STACKTRACE PARSING END === {stacktrace_elapsed:.3f}ms")
 
         result = {
             "project_name": first["project_name"],
@@ -4831,7 +4863,15 @@ def get_break_detail(error_hash):
         debug_info["returned_projects"] = [r.get("project_name") for r in error_rows[:3]]
         debug_info["returned_statuses"] = [r.get("error_status") for r in error_rows[:3]]
         request_end = time.perf_counter()
-        debug_info['request_elapsed_ms'] = round((request_end - request_start) * 1000, 3)
+        request_elapsed = (request_end - request_start) * 1000
+        debug_info['request_elapsed_ms'] = round(request_elapsed, 3)
+        print(f"[PERF] [req:{request_id}] === REQUEST END === Total: {request_elapsed:.3f}ms")
+        print(f"[PERF] [req:{request_id}] BREAKDOWN:")
+        print(f"[PERF] [req:{request_id}]   - Primary query: {debug_info.get('primary_query_elapsed_ms', 0):.3f}ms")
+        print(f"[PERF] [req:{request_id}]   - Jira lookup: {debug_info.get('jira_lookup_elapsed_ms', 0):.3f}ms")
+        print(f"[PERF] [req:{request_id}]   - Solution lookup: {debug_info.get('solution_elapsed_ms', 0):.3f}ms")
+        print(f"[PERF] [req:{request_id}]   - AI recommendation: {debug_info.get('ai_elapsed_ms', 0):.3f}ms")
+        print(f"[PERF] [req:{request_id}]   - Stacktrace parsing: {debug_info.get('stacktrace_elapsed_ms', 0):.3f}ms")
         response = jsonify(serialize_row(result))
         if DEBUG_BREAK_DETAIL:
             try:
