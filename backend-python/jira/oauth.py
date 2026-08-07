@@ -44,7 +44,7 @@ def build_authorization_url(state: str) -> str:
     params = {
         "audience":      "api.atlassian.com",
         "client_id":     client_id,
-        "scope":         "read:jira-user write:jira-work offline_access",
+        "scope":         "read:me read:account read:jira-user read:jira-work write:jira-work",
         "redirect_uri":  redirect_uri,
         "state":         state,
         "response_type": "code",
