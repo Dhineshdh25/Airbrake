@@ -9,6 +9,16 @@
  *  - Auth headers can be injected in one place when needed.
  */
 export declare const API_BASE_URL: string;
+/** The Airbrake frontend base URL, baked in at build time.
+ *  Used to generate deep-link URLs that must stay on HTTP (S3 static site)
+ *  and must include the hash prefix for HashRouter compatibility.
+ *  e.g. http://airbrake.s3-website-us-east-1.amazonaws.com
+ */
+export declare const FRONTEND_BASE_URL: string;
+/** Build a deep-link URL to a specific error in Airbrake.
+ *  Uses HashRouter format: <origin>/#/breaks/<hash>?project_name=<project>
+ */
+export declare function buildAirbrakeErrorUrl(errorHash: string, projectName?: string): string;
 export declare function getDeviceId(): string;
 export declare class ApiError extends Error {
     readonly status: number;

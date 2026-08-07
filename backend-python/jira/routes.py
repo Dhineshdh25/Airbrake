@@ -307,10 +307,11 @@ def _get_valid_user_id_with_token():
 
 
 def _frontend_url() -> str:
-    """Return the frontend base URL with a trailing slash stripped.
+    """Return the frontend base URL with trailing slash stripped.
 
-    We always append a path separator ourselves so the result is predictable.
-    e.g. http://airbrake.s3-website-us-east-1.amazonaws.com
+    Read from FRONTEND_URL env var — must be set in Lambda.
+    Default is the HTTP S3 static website URL (NOT https — S3 static
+    hosting only supports http on the s3-website endpoint).
     """
     url = os.environ.get(
         "FRONTEND_URL",
@@ -499,7 +500,6 @@ def jira_callback():
         )
         logger.info("[Jira Callback] Token saved — redirecting to %s", root_url)
         return redirect(f"{root_url}/?jira_connected=true")
-
     except requests.HTTPError as exc:
         status_code = exc.response.status_code if exc.response is not None else 0
         body        = exc.response.text[:300] if exc.response is not None else str(exc)

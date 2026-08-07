@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from 'react';
-import { apiFetch, ApiError } from '../lib/api';
+import { apiFetch, ApiError, buildAirbrakeErrorUrl } from '../lib/api';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -501,7 +501,7 @@ export function ErrorDetailModal({
         timestamp: data?.last_seen,
         file_name: data?.file_name,
         airbrake_url: effectiveErrorHash
-          ? `${window.location.origin}/breaks/${effectiveErrorHash}${projectName ? `?project_name=${encodeURIComponent(projectName)}` : ''}`
+          ? buildAirbrakeErrorUrl(effectiveErrorHash, projectName)
           : undefined,
       };
       sessionStorage.setItem('jira_pending_ticket', JSON.stringify(pendingContext));
@@ -563,7 +563,7 @@ export function ErrorDetailModal({
       timestamp:         data?.last_seen         || undefined,
       file_name:         data?.file_name         || undefined,
       airbrake_url:      effectiveErrorHash
-        ? `${window.location.origin}/breaks/${effectiveErrorHash}${projectName ? `?project_name=${encodeURIComponent(projectName)}` : ''}`
+        ? buildAirbrakeErrorUrl(effectiveErrorHash, projectName)
         : undefined,
     };
 

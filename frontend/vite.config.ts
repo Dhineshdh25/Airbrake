@@ -5,10 +5,12 @@ import path from 'path';
 // tsconfig.json (commonjs) is kept for Jest / ts-jest.
 
 const LAMBDA_URL = 'https://l7xnpjosjvyrlx55dxrwdvx5g40okeyd.lambda-url.us-east-1.on.aws';
+const FRONTEND_URL = 'http://airbrake.s3-website-us-east-1.amazonaws.com';
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
-  const apiTarget = env.VITE_API_BASE_URL || LAMBDA_URL;
+  const apiTarget      = env.VITE_API_BASE_URL  || LAMBDA_URL;
+  const frontendTarget = env.VITE_FRONTEND_URL  || FRONTEND_URL;
 
   return {
     base: '/',
@@ -23,7 +25,8 @@ export default defineConfig(({ mode }) => {
     },
     // Inject API base URL as a build-time constant — works in both Vite and Jest
     define: {
-      __API_BASE_URL__: JSON.stringify(apiTarget),
+      __API_BASE_URL__:      JSON.stringify(apiTarget),
+      __FRONTEND_BASE_URL__: JSON.stringify(frontendTarget),
     },
     // Tell Vite to use the ESNext tsconfig for type-checking
     esbuild: {
