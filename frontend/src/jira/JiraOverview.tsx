@@ -45,6 +45,7 @@ interface SearchResponse {
   total?: number;
   error?: string;
   needs_auth?: boolean;
+  message?: string;
 }
 
 type SortKey = 'updated' | 'created' | 'priority' | 'status';
@@ -144,39 +145,39 @@ const TD_STYLE: React.CSSProperties = {
 
 export function JiraOverview() {
   // ── Remote data ──────────────────────────────────────────────────────────
-  const [issues, setIssues]           = useState<JiraIssue[]>([]);
-  const [loading, setLoading]         = useState(true);
-  const [loadError, setLoadError]     = useState<string | null>(null);
+  const [issues, setIssues] = useState<JiraIssue[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [notConnected, setNotConnected] = useState(false);
-  const [jiraBase, setJiraBase]       = useState('');
-  const [reloadTick, setReloadTick]   = useState(0);
+  const [jiraBase, setJiraBase] = useState('');
+  const [reloadTick, setReloadTick] = useState(0);
   const bypassCache = useRef(false);
 
   // ── Filter / sort / search state ─────────────────────────────────────────
-  const [search,        setSearch]        = useState('');
+  const [search, setSearch] = useState('');
   const [projectFilter, setProjectFilter] = useState('');
-  const [statusFilter,  setStatusFilter]  = useState('');
-  const [priorityFilter,setPriorityFilter] = useState('');
-  const [assigneeFilter,setAssigneeFilter] = useState('');
-  const [sortKey,       setSortKey]       = useState<SortKey>('updated');
-  const [sortDir,       setSortDir]       = useState<SortDir>('desc');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [priorityFilter, setPriorityFilter] = useState('');
+  const [assigneeFilter, setAssigneeFilter] = useState('');
+  const [sortKey, setSortKey] = useState<SortKey>('updated');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
 
   // ── Derived filter options ────────────────────────────────────────────────
   const projectOptions = useMemo(() =>
     [...new Set(issues.map(i => i.fields.project?.name ?? '').filter(Boolean))].sort(),
-  [issues]);
+    [issues]);
 
   const statusOptions = useMemo(() =>
     [...new Set(issues.map(i => i.fields.status?.name ?? '').filter(Boolean))].sort(),
-  [issues]);
+    [issues]);
 
   const priorityOptions = useMemo(() =>
     [...new Set(issues.map(i => i.fields.priority?.name ?? '').filter(Boolean))].sort(),
-  [issues]);
+    [issues]);
 
   const assigneeOptions = useMemo(() =>
     [...new Set(issues.map(i => i.fields.assignee?.displayName ?? '').filter(Boolean))].sort(),
-  [issues]);
+    [issues]);
 
   // ── Filtered + sorted rows ────────────────────────────────────────────────
   const visible = useMemo(() => {
@@ -187,8 +188,8 @@ export function JiraOverview() {
       i.key.toLowerCase().includes(q) ||
       (i.fields.summary ?? '').toLowerCase().includes(q)
     );
-    if (projectFilter)  rows = rows.filter(i => (i.fields.project?.name ?? '') === projectFilter);
-    if (statusFilter)   rows = rows.filter(i => (i.fields.status?.name ?? '') === statusFilter);
+    if (projectFilter) rows = rows.filter(i => (i.fields.project?.name ?? '') === projectFilter);
+    if (statusFilter) rows = rows.filter(i => (i.fields.status?.name ?? '') === statusFilter);
     if (priorityFilter) rows = rows.filter(i => (i.fields.priority?.name ?? '') === priorityFilter);
     if (assigneeFilter) rows = rows.filter(i => (i.fields.assignee?.displayName ?? '') === assigneeFilter);
 
@@ -218,17 +219,16 @@ export function JiraOverview() {
     setLoadError(null);
     setNotConnected(false);
 
-    const jql = 'ORDER BY updated DESC';
-    const cacheKey = jql;
+    const cacheKey = 'default-search';
     const cached = _cache.get(cacheKey);
     const useCache = !bypassCache.current && cached && (Date.now() - cached.ts < CACHE_TTL_MS);
     bypassCache.current = false;
 
     const doFetch = useCache
       ? Promise.resolve(cached!.data)
-      : apiFetch(`/api/jira/search?jql=${encodeURIComponent(jql)}&maxResults=200`)
-          .then(r => r.json() as Promise<SearchResponse>)
-          .then(data => { _cache.set(cacheKey, { ts: Date.now(), data }); return data; });
+      : apiFetch('/api/jira/search?maxResults=200')
+        .then(r => r.json() as Promise<SearchResponse>)
+        .then(data => { _cache.set(cacheKey, { ts: Date.now(), data }); return data; });
 
     doFetch
       .then((data: SearchResponse) => {
@@ -242,6 +242,13 @@ export function JiraOverview() {
 
         if (data.error) {
           setLoadError(data.error);
+          setIssues([]);
+          return;
+        }
+
+        // Handle message (e.g., "no accessible projects")
+        if (data.message && data.issues.length === 0) {
+          setLoadError(data.message);
           setIssues([]);
           return;
         }
@@ -292,7 +299,7 @@ export function JiraOverview() {
   }
 
   const resolved = issues.filter(i => TERMINAL_STATUSES.has((i.fields.status?.name ?? '').toLowerCase())).length;
-  const todo     = issues.length - resolved;
+  const todo = issues.length - resolved;
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (

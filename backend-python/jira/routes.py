@@ -937,15 +937,17 @@ def jira_link():
 @jira_bp.route("/search", methods=["GET"])
 def jira_search():
     """
-    GET /api/jira/search?jql=<query>&maxResults=100
+    GET /api/jira/search
     
-    Search Jira issues directly using JQL.
+    Search Jira issues with automatic project discovery and proper JQL construction.
     Uses the current user's OAuth token to query their Jira instance.
     
     Query parameters:
-      - jql: JQL query string (required)
-      - maxResults: Max results per page (default: 100)
-      - fields: Comma-separated list of fields to return (optional)
+      - status: Filter by status name (optional)
+      - priority: Filter by priority name (optional)
+      - assignee: Filter by assignee display name (optional)
+      - search: Text search in summary and description (optional)
+      - maxResults: Max results per page (default: 200)
       - nextPageToken: Token for pagination (optional)
     
     Response:
@@ -953,33 +955,36 @@ def jira_search():
         "issues": [...],
         "isLast": bool,
         "nextPageToken": str or None,
-        "total": int
+        "total": int,
+        "project_key": str  (the project used in the query)
       }
     """
     user_id, err = _get_valid_user_id_with_token()
     if err:
         return err
     
-    jql = (request.args.get("jql") or "").strip()
-    if not jql:
-        return jsonify({"error": "jql parameter is required"}), 400
-    
-    max_results = int(request.args.get("maxResults", 100))
-    fields_str = (request.args.get("fields") or "").strip()
-    fields = fields_str.split(",") if fields_str else None
+    # Parse query parameters
+    status_filter = (request.args.get("status") or "").strip()
+    priority_filter = (request.args.get("priority") or "").strip()
+    assignee_filter = (request.args.get("assignee") or "").strip()
+    search_text = (request.args.get("search") or "").strip()
+    max_results = int(request.args.get("maxResults", 200))
     next_page_token = (request.args.get("nextPageToken") or "").strip() or None
     
     logger.info(
         "[Jira Routes] /api/jira/search START\n"
         "  user_id: %s\n"
-        "  jql: %s\n"
+        "  status: %s\n"
+        "  priority: %s\n"
+        "  assignee: %s\n"
+        "  search: %s\n"
         "  maxResults: %d\n"
-        "  fields: %s\n"
         "  nextPageToken: %s",
-        user_id, jql, max_results, fields, next_page_token
+        user_id, status_filter, priority_filter, assignee_filter, search_text, max_results, next_page_token
     )
     
     try:
+        # Get the user's token
         session = _get_session()
         candidate_user_ids = [user_id]
         if session and session.get("userId") and session.get("userId") not in candidate_user_ids:
@@ -1003,18 +1008,83 @@ def jira_search():
             cloud_id=token["cloud_id"]
         )
         
+        # Step 1: Get accessible projects
+        logger.info("[Jira Routes] Fetching accessible projects")
+        projects = client.get_accessible_projects()
+        
+        if not projects:
+            logger.warning("[Jira Routes] User has no accessible projects")
+            return jsonify({
+                "issues": [],
+                "isLast": True,
+                "nextPageToken": None,
+                "total": 0,
+                "message": "No accessible Jira projects found. Please ensure you have access to at least one project."
+            })
+        
+        # Step 2: Use the first project as the default
+        default_project = projects[0]
+        project_key = default_project.get("key")
+        
+        logger.info(
+            "[Jira Routes] Using default project: %s (out of %d accessible projects)",
+            project_key, len(projects)
+        )
+        
+        # Step 3: Build JQL query with project restriction
+        jql_parts = [f'project = "{project_key}"']
+        
+        if status_filter:
+            jql_parts.append(f'status = "{status_filter}"')
+        
+        if priority_filter:
+            jql_parts.append(f'priority = "{priority_filter}"')
+        
+        if assignee_filter:
+            # Assignee filter requires accountId, but we have displayName
+            # Use text search to approximate this
+            jql_parts.append(f'assignee in ({assignee_filter})')
+        
+        if search_text:
+            # Escape quotes in search text
+            escaped_search = search_text.replace('"', '\\"')
+            jql_parts.append(f'(summary ~ "{escaped_search}" OR description ~ "{escaped_search}")')
+        
+        # Always sort by updated DESC
+        jql = " AND ".join(jql_parts) + " ORDER BY updated DESC"
+        
+        logger.info(
+            "[Jira Routes] Generated JQL:\n"
+            "  %s\n"
+            "  Accessible projects: %s",
+            jql,
+            [p.get("key") for p in projects]
+        )
+        
+        # Step 4: Execute search
         result = client.search_issues(
             jql=jql,
-            fields=fields,
+            fields=None,  # Get all standard fields
             max_results=max_results,
             next_page_token=next_page_token
+        )
+        
+        logger.info(
+            "[Jira Routes] Search completed successfully\n"
+            "  Returned: %d issues\n"
+            "  isLast: %s\n"
+            "  nextPageToken: %s",
+            len(result.get("issues", [])),
+            result.get("isLast"),
+            result.get("nextPageToken")
         )
         
         return jsonify({
             "issues": result.get("issues", []),
             "isLast": result.get("isLast", True),
             "nextPageToken": result.get("nextPageToken"),
-            "total": len(result.get("issues", []))
+            "total": len(result.get("issues", [])),
+            "project_key": project_key,
         })
     
     except requests.HTTPError as exc:
@@ -1041,10 +1111,8 @@ def jira_search():
         logger.error(
             "[Jira Routes] search FAILED\n"
             "  Status: %s\n"
-            "  Error body: %s\n"
-            "  JQL: %s\n"
-            "  maxResults: %s",
-            status_code, error_body, jql, max_results
+            "  Error body: %s",
+            status_code, error_body
         )
         
         return jsonify({
