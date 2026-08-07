@@ -969,6 +969,16 @@ def jira_search():
     fields = fields_str.split(",") if fields_str else None
     next_page_token = (request.args.get("nextPageToken") or "").strip() or None
     
+    logger.info(
+        "[Jira Routes] /api/jira/search START\n"
+        "  user_id: %s\n"
+        "  jql: %s\n"
+        "  maxResults: %d\n"
+        "  fields: %s\n"
+        "  nextPageToken: %s",
+        user_id, jql, max_results, fields, next_page_token
+    )
+    
     try:
         session = _get_session()
         candidate_user_ids = [user_id]
@@ -1009,16 +1019,50 @@ def jira_search():
     
     except requests.HTTPError as exc:
         status_code = exc.response.status_code if exc.response is not None else 502
-        logger.error("[Jira Routes] search failed status=%s", status_code)
+        error_body = exc.response.text[:1000] if exc.response is not None else str(exc)
+        
+        # Parse Jira's error response for better debugging
+        user_message = "Jira API error"
+        try:
+            if exc.response is not None:
+                jira_error = exc.response.json()
+                error_messages = jira_error.get("errorMessages", [])
+                errors_dict = jira_error.get("errors", {})
+                
+                if error_messages:
+                    user_message = "; ".join(error_messages)
+                elif errors_dict:
+                    user_message = "; ".join(f"{k}: {v}" for k, v in errors_dict.items())
+                else:
+                    user_message = error_body
+        except Exception:
+            user_message = error_body
+        
+        logger.error(
+            "[Jira Routes] search FAILED\n"
+            "  Status: %s\n"
+            "  Error body: %s\n"
+            "  JQL: %s\n"
+            "  maxResults: %s",
+            status_code, error_body, jql, max_results
+        )
+        
         return jsonify({
-            "error": "Jira API error",
+            "error": user_message,
             "status": status_code,
-            "needs_auth": status_code == 401
+            "needs_auth": status_code == 401,
+            "detail": error_body[:500]
         }), status_code if status_code in (400, 401, 403) else 502
     
     except Exception as exc:
-        logger.exception("[Jira Routes] search failed: %s", exc)
-        return jsonify({"error": str(exc)}), 500
+        import traceback
+        tb = traceback.format_exc()
+        logger.exception("[Jira Routes] search failed with exception: %s\n%s", exc, tb)
+        return jsonify({
+            "error": str(exc),
+            "exception_type": type(exc).__name__,
+            "traceback": tb[:1000]
+        }), 500
 
 
 @jira_bp.route("/ticket-status")
