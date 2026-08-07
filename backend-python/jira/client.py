@@ -81,7 +81,7 @@ class JiraClient:
 
     def search_issues(self, jql: str, fields: list = None, max_results: int = 100, next_page_token: str = None) -> dict:
         """
-        Search Jira issues using JQL (POST /rest/api/3/search/jql).
+        Search Jira issues using JQL (POST /rest/api/3/search).
         
         Args:
             jql: JQL query string (e.g., "project = AIRBRAKE AND status = Open")
@@ -99,40 +99,104 @@ class JiraClient:
         Raises:
             requests.HTTPError: If the API call fails
         """
+        # Build the request payload
         payload = {
             "jql": jql,
-            "maxResults": max_results
+            "maxResults": max_results,
+            "startAt": 0
         }
         
         if fields:
             payload["fields"] = fields
         
+        # Note: Jira Cloud REST API v3 uses startAt for pagination, not nextPageToken
         if next_page_token:
-            payload["nextPageToken"] = next_page_token
+            try:
+                payload["startAt"] = int(next_page_token)
+            except (ValueError, TypeError):
+                logger.warning("[Jira Client] Invalid nextPageToken: %s, defaulting to 0", next_page_token)
+                payload["startAt"] = 0
         
-        url = f"{self._base}/search/jql"
-        logger.info("[Jira Client] Searching issues jql=%s maxResults=%d", jql[:100], max_results)
+        # Correct Jira Cloud REST API endpoint is /rest/api/3/search (not /search/jql)
+        url = f"{self._base}/search"
         
-        resp = requests.post(
-            url, 
-            json=payload, 
-            headers=self._headers, 
-            timeout=_TIMEOUT
-        )
-        
-        if not resp.ok:
-            logger.error(
-                "[Jira Client] search_issues failed status=%s body=%s",
-                resp.status_code, resp.text[:500]
-            )
-            resp.raise_for_status()
-        
-        data = resp.json()
+        # Log request details for debugging (mask token)
+        masked_headers = {k: ("Bearer ***" if k == "Authorization" else v) for k, v in self._headers.items()}
         logger.info(
-            "[Jira Client] Search returned %d issues, isLast=%s",
-            len(data.get("issues", [])), data.get("isLast", True)
+            "[Jira Client] Request START\n"
+            "  Base URL: %s\n"
+            "  Endpoint: %s\n"
+            "  Method: POST\n"
+            "  JQL: %s\n"
+            "  maxResults: %d\n"
+            "  startAt: %d\n"
+            "  Headers: %s",
+            self._base, url, jql, max_results, payload.get("startAt", 0), masked_headers
         )
-        return data
+        
+        import time
+        start_time = time.time()
+        
+        try:
+            resp = requests.post(
+                url, 
+                json=payload, 
+                headers=self._headers, 
+                timeout=_TIMEOUT
+            )
+            
+            elapsed = time.time() - start_time
+            
+            logger.info(
+                "[Jira Client] Response received status=%d elapsed=%.2fs",
+                resp.status_code, elapsed
+            )
+            
+            if not resp.ok:
+                # Log the full error response from Jira
+                error_body = resp.text[:1000]
+                logger.error(
+                    "[Jira Client] search_issues FAILED\n"
+                    "  Status: %s\n"
+                    "  Response body: %s\n"
+                    "  JQL: %s\n"
+                    "  Payload: %s",
+                    resp.status_code, error_body, jql, payload
+                )
+                resp.raise_for_status()
+            
+            data = resp.json()
+            total = data.get("total", 0)
+            returned = len(data.get("issues", []))
+            start_at = data.get("startAt", 0)
+            
+            # Calculate if this is the last page
+            is_last = (start_at + returned) >= total
+            
+            # Calculate next page token (startAt for next page)
+            next_token = None
+            if not is_last:
+                next_token = str(start_at + returned)
+            
+            logger.info(
+                "[Jira Client] Search SUCCESS: returned %d issues, total=%d, startAt=%d, isLast=%s, nextPageToken=%s",
+                returned, total, start_at, is_last, next_token
+            )
+            
+            return {
+                "issues": data.get("issues", []),
+                "total": total,
+                "isLast": is_last,
+                "nextPageToken": next_token
+            }
+            
+        except requests.exceptions.RequestException as exc:
+            elapsed = time.time() - start_time
+            logger.exception(
+                "[Jira Client] Request exception elapsed=%.2fs: %s",
+                elapsed, exc
+            )
+            raise
 
     def get_issue(self, issue_key: str, fields: list = None) -> dict:
         """
