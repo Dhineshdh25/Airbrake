@@ -310,11 +310,11 @@ def _frontend_url() -> str:
     """Return the frontend base URL with a trailing slash stripped.
 
     We always append a path separator ourselves so the result is predictable.
-    e.g. https://airbrake.s3-website-us-east-1.amazonaws.com
+    e.g. http://airbrake.s3-website-us-east-1.amazonaws.com
     """
     url = os.environ.get(
         "FRONTEND_URL",
-        "https://airbrake.s3-website-us-east-1.amazonaws.com",
+        "http://airbrake.s3-website-us-east-1.amazonaws.com",
     )
     return url.rstrip("/")
 
@@ -442,7 +442,7 @@ def jira_callback():
     ERR_CONNECTION_CLOSED. The frontend JiraSettings component detects the
     query params and navigates to /settings internally via React Router.
     """
-    root_url = _frontend_url()   # e.g. https://airbrake.s3-website-us-east-1.amazonaws.com
+    root_url = _frontend_url()   # e.g. http://airbrake.s3-website-us-east-1.amazonaws.com
 
     logger.info("[Jira Callback] START — code=%s state=%s error=%s",
                 "present" if request.args.get("code") else "absent",
