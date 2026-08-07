@@ -35,16 +35,58 @@ def get_credentials() -> tuple[str, str, str]:
     return client_id, client_secret, redirect_uri
 
 
+def get_oauth_scopes() -> str:
+    """
+    Return the OAuth scopes to request from Atlassian.
+    
+    Defaults to all required scopes for Jira issue search and creation:
+    - read:jira-user (basic user profile)
+    - read:jira-work (read issues, projects, JQL search)
+    - write:jira-work (create issues, add comments)
+    - read:me (Atlassian account profile)
+    - read:account (account info)
+    
+    Can be overridden via ATLASSIAN_OAUTH_SCOPES environment variable.
+    Space-separated scope list.
+    """
+    default_scopes = (
+        "read:me "
+        "read:account "
+        "read:jira-user "
+        "read:jira-work "
+        "write:jira-work"
+    )
+    return os.environ.get("ATLASSIAN_OAUTH_SCOPES", default_scopes).strip()
+
+
 def build_authorization_url(state: str) -> str:
-    """Return the full Atlassian authorization URL for this OAuth flow."""
+    """
+    Return the full Atlassian authorization URL for this OAuth flow.
+    
+    The scope parameter determines which Jira permissions the access token will have.
+    By default, requests:
+    - read:me, read:account (user profile)
+    - read:jira-user (Jira user info)
+    - read:jira-work (read issues, projects, JQL search)
+    - write:jira-work (create/update issues, add comments)
+    
+    Additional granular scopes are available:
+    - read:issue:jira, read:project:jira, read:jql:jira (granular read)
+    - read:user:jira, read:field:jira, read:comment:jira, read:attachment:jira (additional read)
+    - write:issue:jira (granular write)
+    
+    Configure via ATLASSIAN_OAUTH_SCOPES environment variable if needed.
+    """
     client_id, _, redirect_uri = get_credentials()
     if not client_id:
         raise EnvironmentError("ATLASSIAN_CLIENT_ID is not set in environment")
 
+    scopes = get_oauth_scopes()
+    
     params = {
         "audience":      "api.atlassian.com",
         "client_id":     client_id,
-        "scope":         "read:me read:account read:jira-user read:jira-work write:jira-work",
+        "scope":         scopes,
         "redirect_uri":  redirect_uri,
         "state":         state,
         "response_type": "code",
@@ -52,7 +94,7 @@ def build_authorization_url(state: str) -> str:
     }
     qs = "&".join(f"{k}={requests.utils.quote(str(v))}" for k, v in params.items())
     url = f"{_AUTH_URL}?{qs}"
-    logger.info("[Jira OAuth] Built authorization URL (state=%s)", state)
+    logger.info("[Jira OAuth] Built authorization URL (state=%s, scopes=%s)", state, scopes)
     return url
 
 
