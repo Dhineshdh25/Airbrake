@@ -345,6 +345,40 @@ def jira_initiate():
         return jsonify({"error": str(exc)}), 500
 
 
+@jira_bp.route("/debug-config")
+def jira_debug_config():
+    """
+    GET /api/jira/debug-config
+
+    Returns the exact OAuth configuration the backend is using.
+    Use this to verify what redirect_uri is being sent to Atlassian
+    and compare it against the Atlassian Developer Console.
+
+    Remove this endpoint after the OAuth flow is confirmed working.
+    """
+    from .oauth import get_credentials
+    client_id, _, redirect_uri = get_credentials()
+    frontend = _frontend_url()
+    return jsonify({
+        "atlassian_client_id":      client_id or "(NOT SET)",
+        "atlassian_callback_url":   redirect_uri,
+        "frontend_url":             frontend,
+        "settings_redirect_target": f"{frontend}/settings",
+        "env_vars_present": {
+            "ATLASSIAN_CLIENT_ID":     bool(client_id),
+            "ATLASSIAN_CLIENT_SECRET": bool(os.environ.get("ATLASSIAN_CLIENT_SECRET")),
+            "ATLASSIAN_CALLBACK_URL":  bool(os.environ.get("ATLASSIAN_CALLBACK_URL")),
+            "JIRA_PROJECT_KEY":        bool(os.environ.get("JIRA_PROJECT_KEY")),
+            "FRONTEND_URL":            bool(os.environ.get("FRONTEND_URL")),
+        },
+        "instructions": (
+            "The value of 'atlassian_callback_url' must EXACTLY match "
+            "the Callback URL registered in your Atlassian Developer Console app. "
+            "No trailing slash, same protocol, same host."
+        ),
+    })
+
+
 @jira_bp.route("/login")
 def jira_login():
     """
