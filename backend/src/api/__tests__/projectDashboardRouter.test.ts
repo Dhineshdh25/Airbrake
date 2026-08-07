@@ -1,5 +1,9 @@
 import { Pool } from 'pg';
-import { createGetErrorDetailHandler } from '../projectDashboardRouter';
+import {
+  createGetErrorDetailHandler,
+  createTopProjectsHandler,
+  createTopErrorProjectsHandler,
+} from '../projectDashboardRouter';
 
 function makeRes() {
   const res: any = {
@@ -52,5 +56,39 @@ describe('GET /api/breaks/detail/:errorHash', () => {
       occurrence_count: 2,
       status: 'existing',
     });
+  });
+
+  it('passes from/to range filters to top-projects SQL', async () => {
+    const query = jest.fn()
+      .mockResolvedValueOnce({ rows: [{ table_name: 'toc_extractor' }] })
+      .mockResolvedValueOnce({ rows: [{ project_name: 'toc extractor', total: 42 }] });
+
+    const handler = createTopProjectsHandler({ query } as unknown as Pool);
+    const res = makeRes();
+
+    await handler({ query: { from: '2026-08-01T00:00:00.000Z', to: '2026-08-07T23:59:59.000Z' } } as any, res);
+
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[1][0]).toContain("timestamp >= '2026-08-01T00:00:00.000Z'");
+    expect(query.mock.calls[1][0]).toContain("timestamp <= '2026-08-07T23:59:59.000Z'");
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ projects: [{ project_name: 'toc extractor', total: 42 }] });
+  });
+
+  it('passes from/to range filters to top-error-projects SQL', async () => {
+    const query = jest.fn()
+      .mockResolvedValueOnce({ rows: [{ table_name: 'toc_extractor' }] })
+      .mockResolvedValueOnce({ rows: [{ project_name: 'toc extractor', total: 5 }] });
+
+    const handler = createTopErrorProjectsHandler({ query } as unknown as Pool);
+    const res = makeRes();
+
+    await handler({ query: { from: '2026-08-01T00:00:00.000Z', to: '2026-08-07T23:59:59.000Z' } } as any, res);
+
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[1][0]).toContain("timestamp >= '2026-08-01T00:00:00.000Z'");
+    expect(query.mock.calls[1][0]).toContain("timestamp <= '2026-08-07T23:59:59.000Z'");
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ projects: [{ project_name: 'toc extractor', total: 5 }] });
   });
 });

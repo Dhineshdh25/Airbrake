@@ -490,6 +490,28 @@ export function Dashboard() {
     [selectedProject, projectErrors],
   );
 
+  const displayedSemanticGroups = selectedProject ? projectSemanticGroupData : semanticGroupData;
+
+  function formatPeriodLabel(period: ComparisonPeriod, customFromValue: string, customToValue: string): string {
+    if (period === 'daily') {
+      return 'Today';
+    }
+    if (period === 'weekly') {
+      return 'Last 7 days';
+    }
+    if (customFromValue && customToValue) {
+      const fromDate = new Date(customFromValue);
+      const toDate = new Date(customToValue);
+      const options: Intl.DateTimeFormatOptions = { year: 'numeric', month: 'short', day: 'numeric' };
+      return `${fromDate.toLocaleDateString(undefined, options)} – ${toDate.toLocaleDateString(undefined, options)}`;
+    }
+    return 'Custom range';
+  }
+
+  const semanticGroupLabel = selectedProject
+    ? formatPeriodLabel(comparisonPeriod, customFrom, customTo)
+    : todayDate;
+
   // ── Fetch errors for selected project ──
   useEffect(() => {
     if (!selectedProject) {
@@ -743,15 +765,13 @@ export function Dashboard() {
           <h3 style={{ ...cardTitle, margin: 0 }}>
             {selectedProject ? `Today's Errors by Semantic Group for ${selectedProject}` : "Today's Errors by Semantic Group"}
           </h3>
-          {todayDate && (
-            <span style={{
-              fontSize: 12, fontWeight: 600, padding: '3px 10px', borderRadius: 99,
-              background: 'rgba(56,189,248,0.12)', color: '#7dd3fc',
-              border: '1px solid rgba(56,189,248,0.25)',
-            }}>
-              {todayDate} · {semanticGroupData.reduce((sum, item) => sum + item.value, 0)} grouped
-            </span>
-          )}
+          <span style={{
+            fontSize: 12, fontWeight: 600, padding: '3px 10px', borderRadius: 99,
+            background: 'rgba(56,189,248,0.12)', color: '#7dd3fc',
+            border: '1px solid rgba(56,189,248,0.25)',
+          }}>
+            {semanticGroupLabel} · {displayedSemanticGroups.reduce((sum, item) => sum + item.value, 0)} grouped
+          </span>
         </div>
 
         {todayLoading ? (
@@ -764,11 +784,13 @@ export function Dashboard() {
           }}>
             ⚠ {todayError}
           </div>
-        ) : semanticGroupData.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '36px 0', color: 'var(--text-muted)', fontSize: 13 }}>No semantic group data for today.</div>
+        ) : displayedSemanticGroups.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '36px 0', color: 'var(--text-muted)', fontSize: 13 }}>
+            No semantic group data for {selectedProject ? ` ${selectedProject}` : 'today'}.
+          </div>
         ) : (
           <ResponsiveContainer width="100%" height={280}>
-            <BarChart data={semanticGroupData} margin={{ top: 8, right: 18, left: 8, bottom: 40 }}>
+            <BarChart data={displayedSemanticGroups} margin={{ top: 8, right: 18, left: 8, bottom: 40 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
               <XAxis
                 type="category"
