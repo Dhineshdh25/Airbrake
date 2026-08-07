@@ -4221,6 +4221,7 @@ def get_break_detail(error_hash):
     Returns full error detail for the Error Details page.
     """
     request_id = g.get("request_id", "unknown")
+    request_start = time.perf_counter()
     try:
         project_name = (request.args.get('project_name') or '').strip() or None
         stage = "route_entered"
@@ -4229,6 +4230,7 @@ def get_break_detail(error_hash):
             "project_name": project_name,
             "debug_enabled": DEBUG_BREAK_DETAIL,
             "stage": stage,
+            "request_start_ms": round(request_start * 1000, 3),
         }
 
         print(f"[req:{request_id}] [Breaks:detail] TRACE START")
@@ -4270,53 +4272,111 @@ def get_break_detail(error_hash):
                 print(f"[req:{request_id}] [Breaks:detail] Import error was: {type(_error_matching_import_err).__name__}: {_error_matching_import_err}")
             hash_candidates = []
         
+        primary_params = []
+        primary_conditions = ["row_type = 'log'", "error IS NOT NULL", "error <> ''"]
         if error_hash:
             hash_clauses = []
             for idx, candidate in enumerate(hash_candidates):
                 hash_clauses.append("error_hash = %s")
-                params.append(candidate)
-                print(f"[req:{request_id}] [Breaks:detail] Added hash candidate[{idx}]={repr(candidate)}")
-            # Preserve compatibility with older rows that may not have an error_hash value
-            # but still match via the normalized MD5 of the raw error text.
-            hash_clauses.append("MD5(LOWER(TRIM(error))) = %s")
-            params.append(error_hash)
+                primary_params.append(candidate)
+                print(f"[req:{request_id}] [Breaks:detail] Added primary hash candidate[{idx}]={repr(candidate)}")
             if hash_clauses:
-                conditions.append(f"({' OR '.join(hash_clauses)})")
-                print(f"[req:{request_id}] [Breaks:detail] Added hash condition with {len(hash_clauses)} candidates")
+                primary_conditions.append(f"({' OR '.join(hash_clauses)})")
+                print(f"[req:{request_id}] [Breaks:detail] Added primary hash condition with {len(hash_clauses)} candidates")
 
         if project_name:
-            conditions.insert(0, "LOWER(project_name) = LOWER(%s)")
-            params.insert(0, project_name)
-            print(f"[req:{request_id}] [Breaks:detail] Inserted project_name at params[0]={repr(project_name)}")
+            primary_conditions.insert(0, "LOWER(project_name) = LOWER(%s)")
+            primary_params.insert(0, project_name)
+            print(f"[req:{request_id}] [Breaks:detail] Inserted project_name at primary_params[0]={repr(project_name)}")
 
-        where_clause = ' AND '.join(conditions)
-        debug_info["conditions"] = conditions
-        debug_info["params"] = tuple(params)
-        debug_info["param_count"] = len(params)
+        log_query = None
+        error_rows = []
+        primary_where = ' AND '.join(primary_conditions)
+        debug_info["primary_conditions"] = primary_conditions
+        debug_info["primary_params"] = tuple(primary_params)
+        debug_info["primary_param_count"] = len(primary_params)
         stage = "built_sql"
         debug_info["stage"] = stage
-        print(f"[req:{request_id}] [Breaks:detail] WHERE clause: {where_clause}")
-        print(f"[req:{request_id}] [Breaks:detail] Parameters tuple: {tuple(params)}")
-        print(f"[req:{request_id}] [Breaks:detail] Param count: {len(params)}")
 
-        # Include `id` and `error_group_name` so we can assign stable occurrence numbers
-        # and pass the taxonomy group to solution retrieval for semantic fallback.
-        sql = (
-            "SELECT id, project_name, error AS error_message, error_detail, error_hash, "
-            "failure_count, timestamp, error_status, reopened_at, file_name, "
-            "error_group_name "
-            f"FROM {TABLE} "
-            f"WHERE {where_clause} "
-            "ORDER BY timestamp DESC"
-        )
-        debug_info["sql"] = sql
-        print(f"[req:{request_id}] [Breaks:detail] Full SQL:\n{sql}")
-        debug_info["stage"] = "executing_query"
-        error_rows = query(sql, tuple(params))
-        debug_info["row_count"] = len(error_rows) if error_rows else 0
-        debug_info["first_row"] = serialize_row(error_rows[0]) if error_rows else None
-        debug_info["first_row_keys"] = list(error_rows[0].keys()) if error_rows else []
-        print(f"[req:{request_id}] [Breaks:detail] Query returned {len(error_rows) if error_rows else 0} rows")
+        if error_hash and primary_conditions:
+            log_query = (
+                "SELECT id, project_name, error AS error_message, error_detail, error_hash, "
+                "failure_count, timestamp, error_status, reopened_at, file_name, "
+                "error_group_name "
+                f"FROM {TABLE} "
+                f"WHERE {primary_where} "
+                "ORDER BY timestamp DESC"
+            )
+            debug_info["primary_sql"] = log_query
+            print(f"[req:{request_id}] [Breaks:detail] Primary SQL:\n{log_query}")
+            debug_info["stage"] = "executing_primary_query"
+            query_start = time.perf_counter()
+            error_rows = query(log_query, tuple(primary_params))
+            query_end = time.perf_counter()
+            debug_info["primary_query_elapsed_ms"] = round((query_end - query_start) * 1000, 3)
+            debug_info["primary_row_count"] = len(error_rows) if error_rows else 0
+            print(f"[req:{request_id}] [Breaks:detail] Primary query returned {len(error_rows) if error_rows else 0} rows in {debug_info['primary_query_elapsed_ms']}ms")
+
+        if not error_rows:
+            fallback_params = []
+            fallback_conditions = ["row_type = 'log'", "error IS NOT NULL", "error <> ''"]
+            if project_name:
+                fallback_conditions.insert(0, "LOWER(project_name) = LOWER(%s)")
+                fallback_params.append(project_name)
+            fallback_conditions.append("MD5(LOWER(TRIM(error))) = %s")
+            fallback_params.append(error_hash)
+            fallback_where = ' AND '.join(fallback_conditions)
+            fallback_sql = (
+                "SELECT id, project_name, error AS error_message, error_detail, error_hash, "
+                "failure_count, timestamp, error_status, reopened_at, file_name, "
+                "error_group_name "
+                f"FROM {TABLE} "
+                f"WHERE {fallback_where} "
+                "ORDER BY timestamp DESC"
+            )
+            debug_info["fallback_sql"] = fallback_sql
+            debug_info["fallback_params"] = tuple(fallback_params)
+            debug_info["fallback_param_count"] = len(fallback_params)
+            debug_info["stage"] = "executing_fallback_query"
+            fallback_start = time.perf_counter()
+            error_rows = query(fallback_sql, tuple(fallback_params))
+            fallback_end = time.perf_counter()
+            debug_info["fallback_query_elapsed_ms"] = round((fallback_end - fallback_start) * 1000, 3)
+            debug_info["fallback_row_count"] = len(error_rows) if error_rows else 0
+            debug_info["used_md5_fallback"] = True
+            print(f"[req:{request_id}] [Breaks:detail] Fallback query returned {len(error_rows) if error_rows else 0} rows in {debug_info['fallback_query_elapsed_ms']}ms")
+
+        if not error_rows and not log_query:
+            # Neither primary nor fallback was executed, fall back to original broad query.
+            where_clause = ' AND '.join(conditions)
+            debug_info["conditions"] = conditions
+            debug_info["params"] = tuple(params)
+            debug_info["param_count"] = len(params)
+            sql = (
+                "SELECT id, project_name, error AS error_message, error_detail, error_hash, "
+                "failure_count, timestamp, error_status, reopened_at, file_name, "
+                "error_group_name "
+                f"FROM {TABLE} "
+                f"WHERE {where_clause} "
+                "ORDER BY timestamp DESC"
+            )
+            debug_info["sql"] = sql
+            debug_info["stage"] = "executing_query"
+            query_start = time.perf_counter()
+            error_rows = query(sql, tuple(params))
+            query_end = time.perf_counter()
+            debug_info["query_elapsed_ms"] = round((query_end - query_start) * 1000, 3)
+            debug_info["row_count"] = len(error_rows) if error_rows else 0
+            debug_info["first_row"] = serialize_row(error_rows[0]) if error_rows else None
+            debug_info["first_row_keys"] = list(error_rows[0].keys()) if error_rows else []
+            print(f"[req:{request_id}] [Breaks:detail] Query returned {len(error_rows) if error_rows else 0} rows in {debug_info['query_elapsed_ms']}ms")
+        else:
+            debug_info["row_count"] = len(error_rows) if error_rows else 0
+            debug_info["first_row"] = serialize_row(error_rows[0]) if error_rows else None
+            debug_info["first_row_keys"] = list(error_rows[0].keys()) if error_rows else []
+            if error_rows:
+                for i, row in enumerate(error_rows[:3]):
+                    print(f"[req:{request_id}] [Breaks:detail] Row[{i}]: error_hash={row.get('error_hash')}, project_name={row.get('project_name')}, error={row.get('error_message', '')[:50]}")
         if error_rows:
             for i, row in enumerate(error_rows[:3]):
                 print(f"[req:{request_id}] [Breaks:detail] Row[{i}]: error_hash={row.get('error_hash')}, project_name={row.get('project_name')}, error={row.get('error_message', '')[:50]}")
@@ -4376,6 +4436,7 @@ def get_break_detail(error_hash):
         # the frontend can show the existing ticket and avoid duplicate creation.
         jira_ticket = None
         try:
+            jira_start = time.perf_counter()
             jt_params = list(hash_candidates) if hash_candidates else [error_hash]
             jt_where = ' OR '.join(["metadata::jsonb->>'error_hash' = %s"] * len(jt_params))
             jt_sql = f"SELECT metadata FROM {TABLE} WHERE row_type = 'jira_ticket' AND ({jt_where})"
@@ -4395,8 +4456,10 @@ def get_break_detail(error_hash):
                         }
                     except Exception:
                         logger.exception('[Breaks:detail] Failed to parse jira_ticket metadata')
+            debug_info['jira_lookup_elapsed_ms'] = round((time.perf_counter() - jira_start) * 1000, 3)
         except Exception as _jt_exc:
             logger.exception('[Breaks:detail] Jira ticket lookup failed: %s', _jt_exc)
+            debug_info['jira_lookup_elapsed_ms'] = round((time.perf_counter() - jira_start) * 1000, 3)
 
         # ── Status: use the SPECIFIC row when log_id supplied, not group aggregate ──
         # This is the critical fix: when the user opens a specific occurrence,
@@ -4481,6 +4544,7 @@ def get_break_detail(error_hash):
         # never prevents the rest of Error Details from loading.
         solution_data = None
         solution_error = None
+        solution_start = time.perf_counter()
         try:
             def _make_solution_data(s):
                 """Convert a DB row dict into the solution_data shape."""
@@ -4680,9 +4744,11 @@ def get_break_detail(error_hash):
             debug_info["solution_error"] = {"type": type(e).__name__, "message": str(e)}
             solution_error = f"Failed to load solution: {str(e)}"
             debug_info["solution_error"] = {"type": type(e).__name__, "message": str(e)}
-            solution_error = f"Failed to load solution: {str(e)}"
+        finally:
+            debug_info['solution_elapsed_ms'] = round((time.perf_counter() - solution_start) * 1000, 3)
 
         ai_recommendation = None
+        ai_start = time.perf_counter()
         try:
             debug_info["solution_stage"] = "loading_ai"
             ai_recommendation = get_ai_recommendations(
@@ -4721,10 +4787,13 @@ def get_break_detail(error_hash):
                 }, default=str))
             except Exception:
                 pass
+        finally:
+            debug_info['ai_elapsed_ms'] = round((time.perf_counter() - ai_start) * 1000, 3)
 
         # Parse stack trace to extract structured frame information with source code lines
         parsed_stacktrace = None
         if STACKTRACE_PARSER_AVAILABLE:
+            stacktrace_start = time.perf_counter()
             try:
                 parsed_stacktrace = parse_and_enhance_stacktrace(
                     first["error_message"],
@@ -4736,6 +4805,8 @@ def get_break_detail(error_hash):
             except Exception as e:
                 print(f"[req:{request_id}] [Breaks:detail] Stack trace parsing failed: {e}")
                 debug_info["stacktrace_parse_error"] = str(e)
+            finally:
+                debug_info['stacktrace_elapsed_ms'] = round((time.perf_counter() - stacktrace_start) * 1000, 3)
 
         result = {
             "project_name": first["project_name"],
@@ -4759,6 +4830,8 @@ def get_break_detail(error_hash):
         debug_info["returned_hashes"] = [r.get("error_hash") for r in error_rows[:3]]
         debug_info["returned_projects"] = [r.get("project_name") for r in error_rows[:3]]
         debug_info["returned_statuses"] = [r.get("error_status") for r in error_rows[:3]]
+        request_end = time.perf_counter()
+        debug_info['request_elapsed_ms'] = round((request_end - request_start) * 1000, 3)
         response = jsonify(serialize_row(result))
         if DEBUG_BREAK_DETAIL:
             try:
@@ -4774,9 +4847,11 @@ def get_break_detail(error_hash):
         import traceback as _tb
         tb_str = _tb.format_exc()
         request_id = g.get("request_id", "unknown")
+        request_end = time.perf_counter()
         debug_info["stage"] = "unhandled_exception"
         debug_info["exception"] = {"type": type(e).__name__, "message": str(e)}
         debug_info["traceback"] = tb_str
+        debug_info["request_elapsed_ms"] = round((request_end - request_start) * 1000, 3)
         print(f"[req:{request_id}] [Breaks:detail] ERROR: {type(e).__name__}: {e}")
         print(f"[req:{request_id}] [Breaks:detail] error_hash={error_hash} project_name={project_name}")
         print(f"[req:{request_id}] [Breaks:detail] Traceback:\n{tb_str}")
