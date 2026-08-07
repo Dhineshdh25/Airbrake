@@ -231,6 +231,50 @@ class JiraClient:
         
         return resp.json()
 
+    def get_accessible_projects(self) -> list[dict]:
+        """
+        Get all projects the authenticated user can access.
+        
+        Returns:
+            List of project dicts with keys: id, key, name, projectTypeKey
+            Sorted by project key (ascending)
+        
+        Raises:
+            requests.HTTPError: If the API call fails
+        """
+        url = f"{self._base}/project/search"
+        params = {
+            "maxResults": 100,
+            "orderBy": "key",
+        }
+        
+        logger.info("[Jira Client] Fetching accessible projects")
+        
+        resp = requests.get(
+            url,
+            params=params,
+            headers=self._headers,
+            timeout=_TIMEOUT
+        )
+        
+        if not resp.ok:
+            logger.error(
+                "[Jira Client] get_accessible_projects failed status=%s body=%s",
+                resp.status_code, resp.text[:500]
+            )
+            resp.raise_for_status()
+        
+        data = resp.json()
+        projects = data.get("values", [])
+        
+        logger.info(
+            "[Jira Client] Found %d accessible projects: %s",
+            len(projects),
+            [p.get("key") for p in projects]
+        )
+        
+        return projects
+
     def _build_browse_url(self, ticket_key: str) -> str:
         """Build the human-readable browse URL for a ticket key."""
         try:
