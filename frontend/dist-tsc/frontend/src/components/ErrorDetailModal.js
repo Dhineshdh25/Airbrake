@@ -323,7 +323,7 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
                 timestamp: data?.last_seen,
                 file_name: data?.file_name,
                 airbrake_url: effectiveErrorHash
-                    ? `${window.location.origin}/breaks/${effectiveErrorHash}${projectName ? `?project_name=${encodeURIComponent(projectName)}` : ''}`
+                    ? (0, api_1.buildAirbrakeErrorUrl)(effectiveErrorHash, projectName)
                     : undefined,
             };
             sessionStorage.setItem('jira_pending_ticket', JSON.stringify(pendingContext));
@@ -385,7 +385,7 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
             timestamp: data?.last_seen || undefined,
             file_name: data?.file_name || undefined,
             airbrake_url: effectiveErrorHash
-                ? `${window.location.origin}/breaks/${effectiveErrorHash}${projectName ? `?project_name=${encodeURIComponent(projectName)}` : ''}`
+                ? (0, api_1.buildAirbrakeErrorUrl)(effectiveErrorHash, projectName)
                 : undefined,
         };
         setJiraStatus('creating');
@@ -739,15 +739,13 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
                                         opacity: editorSaving || !editorText.trim() ? 0.45 : 1,
                                         cursor: editorSaving || !editorText.trim() ? 'not-allowed' : 'pointer',
                                     }, children: editorSaving ? 'Saving…' : improveTargetId ? 'Save Improved Version' : 'Save Solution' }), (!jiraTicket && jiraStatus !== 'created') ? ((0, jsx_runtime_1.jsxs)("button", { onClick: handleCreateJiraTicket, disabled: jiraStatus === 'creating', title: jiraConnected === false ? 'Connect your Jira account to create tickets' : 'Create a Jira ticket from this error', style: {
-                                        ...btnSecondary,
+                                        ...btnPrimary,
                                         display: 'inline-flex',
                                         alignItems: 'center',
-                                        gap: 6,
+                                        gap: 8,
                                         opacity: jiraStatus === 'creating' ? 0.6 : 1,
                                         cursor: jiraStatus === 'creating' ? 'not-allowed' : 'pointer',
-                                        borderColor: jiraStatus === 'error' ? 'rgba(239,68,68,0.4)' : undefined,
-                                        color: jiraStatus === 'error' ? '#f87171' : undefined,
-                                    }, children: [(0, jsx_runtime_1.jsx)("span", { style: { fontSize: 13 }, children: "\uD83C\uDFAB" }), jiraStatus === 'creating'
+                                    }, children: [(0, jsx_runtime_1.jsx)("span", { style: { fontSize: 14 }, children: "\uD83C\uDFAB" }), jiraStatus === 'creating'
                                             ? 'Creating…'
                                             : jiraConnected === false
                                                 ? 'Connect Jira'

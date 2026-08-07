@@ -12,9 +12,29 @@
 // __API_BASE_URL__ is injected at build time by vite.config.ts `define`.
 // In Jest (Node/commonjs), it falls back to empty string (tests mock fetch directly).
 declare const __API_BASE_URL__: string | undefined;
+declare const __FRONTEND_BASE_URL__: string | undefined;
 
 export const API_BASE_URL: string =
   typeof __API_BASE_URL__ !== 'undefined' ? __API_BASE_URL__ : '';
+
+/** The Airbrake frontend base URL, baked in at build time.
+ *  Used to generate deep-link URLs that must stay on HTTP (S3 static site)
+ *  and must include the hash prefix for HashRouter compatibility.
+ *  e.g. http://airbrake.s3-website-us-east-1.amazonaws.com
+ */
+export const FRONTEND_BASE_URL: string =
+  typeof __FRONTEND_BASE_URL__ !== 'undefined'
+    ? __FRONTEND_BASE_URL__
+    : window.location.origin;
+
+/** Build a deep-link URL to a specific error in Airbrake.
+ *  Uses HashRouter format: <origin>/#/breaks/<hash>?project_name=<project>
+ */
+export function buildAirbrakeErrorUrl(errorHash: string, projectName?: string): string {
+  const base = FRONTEND_BASE_URL.replace(/\/$/, '');
+  const qs   = projectName ? `?project_name=${encodeURIComponent(projectName)}` : '';
+  return `${base}/#/breaks/${errorHash}${qs}`;
+}
 
 // ─── Stable device identity ───────────────────────────────────────────────────
 // Generated once per browser profile, never rotated.
