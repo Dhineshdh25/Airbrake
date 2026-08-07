@@ -1,5 +1,6 @@
 import React from 'react';
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import React, { useEffect } from 'react';
+import { BrowserRouter, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { ProtectedRoute } from './auth/ProtectedRoute';
 import { LoginPage } from './auth/LoginPage';
 import { ThemeProvider } from './theme/ThemeContext';
@@ -18,10 +19,41 @@ function getRole(): Role {
   return 'viewer';
 }
 
+/**
+ * Handles OAuth callback redirects from the backend.
+ *
+ * S3 static hosting can only serve index.html at the root path. The backend
+ * callback redirects to the root URL with ?redirect=/settings&jira_connected=true
+ * instead of directly to /settings (which S3 would 404).
+ *
+ * This component runs on every page load and immediately navigates to the
+ * intended path, preserving the OAuth result query params for JiraSettings.tsx.
+ */
+function OAuthRedirectHandler() {
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const redirectTo = params.get('redirect');
+    if (!redirectTo) return;
+
+    // Build destination URL with OAuth params preserved, minus the redirect param
+    params.delete('redirect');
+    const qs = params.toString();
+    const destination = redirectTo + (qs ? `?${qs}` : '');
+
+    // Replace current history entry so back button doesn't loop
+    navigate(destination, { replace: true });
+  }, [navigate]);
+
+  return null;
+}
+
 function AppShell() {
   const role = getRole();
   return (
     <Layout>
+      <OAuthRedirectHandler />
       <Routes>
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/logs" element={<LogStream />} />
