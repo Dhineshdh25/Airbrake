@@ -11,6 +11,7 @@ every ticket is created under that user's Jira identity (not a shared bot).
 DO NOT log access_token values.
 """
 
+import json
 import os
 import logging
 import requests
@@ -103,46 +104,41 @@ class JiraClient:
         payload = {
             "jql": jql,
             "maxResults": max_results,
-            "startAt": 0
         }
-        
+
         if fields:
             payload["fields"] = fields
-        
-        # Note: Jira Cloud REST API v3 uses startAt for pagination, not nextPageToken
+
         if next_page_token:
-            try:
-                payload["startAt"] = int(next_page_token)
-            except (ValueError, TypeError):
-                logger.warning("[Jira Client] Invalid nextPageToken: %s, defaulting to 0", next_page_token)
-                payload["startAt"] = 0
-        
+            payload["nextPageToken"] = next_page_token
+
         # Use the new Jira Cloud REST API v3 endpoint: /rest/api/3/search/jql (POST with body)
         url = f"{self._base}/search/jql"
-        
-        # Log request details for debugging (mask token)
+
+        # Explicitly serialize the payload so the outgoing body is logged exactly.
+        request_body = json.dumps(payload)
         masked_headers = {k: ("Bearer ***" if k == "Authorization" else v) for k, v in self._headers.items()}
+
         logger.info(
             "[Jira Client] Request START\n"
-            "  Base URL: %s\n"
-            "  Endpoint: %s\n"
+            "  URL: %s\n"
             "  Method: POST\n"
-            "  JQL: %s\n"
-            "  maxResults: %d\n"
-            "  startAt: %d\n"
-            "  Headers: %s",
-            self._base, url, jql, max_results, payload.get("startAt", 0), masked_headers
+            "  Headers: %s\n"
+            "  Body: %s",
+            url,
+            masked_headers,
+            request_body,
         )
-        
+
         import time
         start_time = time.time()
-        
+
         try:
             resp = requests.post(
-                url, 
-                json=payload, 
-                headers=self._headers, 
-                timeout=_TIMEOUT
+                url,
+                data=request_body,
+                headers=self._headers,
+                timeout=_TIMEOUT,
             )
             
             elapsed = time.time() - start_time
