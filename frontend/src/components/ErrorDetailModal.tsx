@@ -1250,17 +1250,15 @@ export function ErrorDetailModal({
                 disabled={jiraStatus === 'creating'}
                 title={jiraConnected === false ? 'Connect your Jira account to create tickets' : 'Create a Jira ticket from this error'}
                 style={{
-                  ...btnSecondary,
+                  ...btnPrimary,
                   display: 'inline-flex',
                   alignItems: 'center',
-                  gap: 6,
+                  gap: 8,
                   opacity: jiraStatus === 'creating' ? 0.6 : 1,
                   cursor: jiraStatus === 'creating' ? 'not-allowed' : 'pointer',
-                  borderColor: jiraStatus === 'error' ? 'rgba(239,68,68,0.4)' : undefined,
-                  color: jiraStatus === 'error' ? '#f87171' : undefined,
                 }}
               >
-                <span style={{ fontSize: 13 }}>🎫</span>
+                <span style={{ fontSize: 14 }}>🎫</span>
                 {jiraStatus === 'creating'
                   ? 'Creating…'
                   : jiraConnected === false

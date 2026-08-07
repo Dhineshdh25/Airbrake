@@ -3900,6 +3900,107 @@ def dashboard_errors():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/dashboard/project-errors", methods=["GET"])
+def dashboard_project_errors():
+    """
+    GET /api/dashboard/project-errors?project=<name>&from=<iso>&to=<iso>
+    
+    Returns errors for a specific project within a date range.
+    Used by the Project Comparison drill-down for Daily, Weekly, and Custom views.
+    
+    Query Parameters:
+      - project (required): Project name to filter by
+      - from (optional): ISO timestamp for start of range
+      - to (optional): ISO timestamp for end of range
+    
+    Returns:
+      JSON: {"errors": [...]}
+    
+    HTTP Errors:
+      400: Missing required project parameter
+      500: Internal server error
+    """
+    import traceback as _tb_mod
+    
+    # Extract query parameters
+    project_name = request.args.get("project", "").strip()
+    from_ts = request.args.get("from", "").strip()
+    to_ts = request.args.get("to", "").strip()
+    
+    # Log incoming request
+    print(f"[Dashboard] project-errors request:")
+    print(f"  method={request.method}")
+    print(f"  path={request.path}")
+    print(f"  project={repr(project_name)}")
+    print(f"  from={repr(from_ts)}")
+    print(f"  to={repr(to_ts)}")
+    
+    # Validate required parameter
+    if not project_name:
+        print("[Dashboard] project-errors: ERROR - missing project parameter")
+        return jsonify({"error": "project query parameter is required"}), 400
+    
+    try:
+        # Build query conditions
+        conditions = [
+            "row_type = 'log'",
+            "error IS NOT NULL",
+            "error <> ''",
+            "project_name = %s"  # Filter by project
+        ]
+        params = [project_name]
+        
+        # Add date range filters
+        if from_ts:
+            conditions.append("timestamp >= %s")
+            params.append(from_ts)
+            print(f"  applying from filter: {from_ts}")
+        
+        if to_ts:
+            conditions.append("timestamp <= %s")
+            params.append(to_ts)
+            print(f"  applying to filter: {to_ts}")
+        
+        # Build WHERE clause
+        where = " AND ".join(conditions)
+        
+        # Build and log SQL query
+        sql = (
+            f"SELECT project_name AS project, file_name, error, "
+            f"error_detail, error_hash, timestamp, "
+            f"NULLIF(error_group_name, '') AS error_group_name, "
+            f"NULLIF(error_group_id, '') AS error_group_id "
+            f"FROM {TABLE} WHERE {where} "
+            f"ORDER BY timestamp DESC LIMIT 2000"
+        )
+        print(f"[Dashboard] project-errors SQL: {sql}")
+        print(f"[Dashboard] project-errors params: {params}")
+        
+        # Execute query
+        rows = query(sql, params if params else None)
+        
+        # Log results
+        print(f"[Dashboard] project-errors: returned {len(rows)} rows")
+        
+        return jsonify({"errors": serialize_rows(rows)})
+        
+    except Exception as e:
+        # Log full traceback
+        tb_str = _tb_mod.format_exc()
+        print(f"[Dashboard] project-errors ERROR:")
+        print(f"  exception: {type(e).__name__}")
+        print(f"  message: {str(e)}")
+        print(f"  traceback:\n{tb_str}")
+        
+        # Return detailed error response (preserve exception info, don't convert to generic 500)
+        return jsonify({
+            "error": "Internal server error",
+            "exception": type(e).__name__,
+            "message": str(e),
+            "detail": tb_str,
+        }), 500
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # BREAKS
 # ═══════════════════════════════════════════════════════════════════════════════
