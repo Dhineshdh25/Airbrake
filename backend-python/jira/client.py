@@ -81,7 +81,7 @@ class JiraClient:
 
     def search_issues(self, jql: str, fields: list = None, max_results: int = 100, next_page_token: str = None) -> dict:
         """
-        Search Jira issues using JQL (POST /rest/api/3/search).
+        Search Jira issues using JQL (POST /rest/api/3/search/jql).
         
         Args:
             jql: JQL query string (e.g., "project = AIRBRAKE AND status = Open")
@@ -117,8 +117,8 @@ class JiraClient:
                 logger.warning("[Jira Client] Invalid nextPageToken: %s, defaulting to 0", next_page_token)
                 payload["startAt"] = 0
         
-        # Correct Jira Cloud REST API endpoint is /rest/api/3/search (not /search/jql)
-        url = f"{self._base}/search"
+        # Use the new Jira Cloud REST API v3 endpoint: /rest/api/3/search/jql (POST with body)
+        url = f"{self._base}/search/jql"
         
         # Log request details for debugging (mask token)
         masked_headers = {k: ("Bearer ***" if k == "Authorization" else v) for k, v in self._headers.items()}
