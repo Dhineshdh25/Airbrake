@@ -428,41 +428,42 @@ def jira_callback():
     Atlassian redirects here after the user grants/denies consent.
 
     Exchanges the authorization code for tokens, fetches cloud + profile,
-    persists the token, then redirects the browser to the frontend Settings
-    page with ?jira_connected=true (or ?jira_error=...).
+    persists the token, then redirects the browser to the frontend root URL
+    with ?jira_connected=true&redirect=/settings
 
-    State tokens are persisted in the database so this works correctly on
-    Lambda where each invocation may run in a different container.
+    We redirect to ROOT (not /settings) because S3 static hosting only serves
+    index.html for the root path. Any other path (e.g. /settings) returns
+    ERR_CONNECTION_CLOSED. The frontend JiraSettings component detects the
+    query params and navigates to /settings internally via React Router.
     """
-    settings_url = f"{_frontend_url()}/settings"
+    root_url = _frontend_url()   # e.g. https://airbrake.s3-website-us-east-1.amazonaws.com
 
-    logger.info("[Jira Callback] START — args: code=%s state=%s error=%s",
+    logger.info("[Jira Callback] START — code=%s state=%s error=%s",
                 "present" if request.args.get("code") else "absent",
-                request.args.get("state", "")[:8] + "...",
+                (request.args.get("state", "")[:8] + "...") if request.args.get("state") else "absent",
                 request.args.get("error", "none"))
 
     error = request.args.get("error")
     if error:
         logger.warning("[Jira Callback] Atlassian returned error: %s", error)
-        return redirect(f"{settings_url}?jira_error={requests.utils.quote(error)}")
+        return redirect(f"{root_url}?jira_error={requests.utils.quote(error)}&redirect=/settings")
 
     code  = request.args.get("code", "").strip()
     state = request.args.get("state", "").strip()
 
     if not code or not state:
         logger.warning("[Jira Callback] Missing code or state")
-        return redirect(f"{settings_url}?jira_error=missing_params")
+        return redirect(f"{root_url}?jira_error=missing_params&redirect=/settings")
 
     # ── Validate CSRF state — DB-persisted so any Lambda container can read it ─
     matched_user_id = _pop_oauth_state(state)
     if not matched_user_id:
         logger.warning("[Jira Callback] Invalid or expired OAuth state: %s", state[:16])
-        return redirect(f"{settings_url}?jira_error=invalid_state")
+        return redirect(f"{root_url}?jira_error=invalid_state&redirect=/settings")
 
     logger.info("[Jira Callback] State validated for user_id=%s", matched_user_id)
 
     try:
-        # Step 1: exchange code for tokens
         logger.info("[Jira Callback] Exchanging authorization code")
         token_data    = exchange_code_for_tokens(code)
         access_token  = token_data["access_token"]
@@ -470,20 +471,16 @@ def jira_callback():
         expires_in    = token_data.get("expires_in")
         logger.info("[Jira Callback] Token exchange succeeded expires_in=%s", expires_in)
 
-        # Step 2: resolve cloud_id
         logger.info("[Jira Callback] Fetching accessible resources")
         cloud_id = fetch_cloud_id(access_token)
         logger.info("[Jira Callback] cloud_id=%s", cloud_id)
 
-        # Step 3: fetch user profile
         logger.info("[Jira Callback] Fetching user profile")
         profile              = fetch_user_profile(access_token, cloud_id)
         atlassian_account_id = profile.get("accountId", "")
         atlassian_email      = profile.get("emailAddress", "")
-        logger.info("[Jira Callback] Profile fetched email=%s account_id=%s",
-                    atlassian_email, atlassian_account_id)
+        logger.info("[Jira Callback] Profile fetched email=%s", atlassian_email)
 
-        # Step 4: persist token
         logger.info("[Jira Callback] Saving token for user_id=%s", matched_user_id)
         save_token(
             user_id              = matched_user_id,
@@ -494,27 +491,23 @@ def jira_callback():
             atlassian_account_id = atlassian_account_id,
             atlassian_email      = atlassian_email,
         )
-        logger.info("[Jira Callback] Token saved successfully")
-
-        # Step 5: redirect back to Settings
-        logger.info("[Jira Callback] SUCCESS — redirecting to %s", settings_url)
-        return redirect(f"{settings_url}?jira_connected=true")
+        logger.info("[Jira Callback] Token saved — redirecting to %s", root_url)
+        return redirect(f"{root_url}?jira_connected=true&redirect=/settings")
 
     except requests.HTTPError as exc:
         status_code = exc.response.status_code if exc.response is not None else 0
         body        = exc.response.text[:300] if exc.response is not None else str(exc)
         logger.error("[Jira Callback] HTTP error status=%s body=%s", status_code, body)
-        return redirect(f"{settings_url}?jira_error=token_exchange_failed&status={status_code}")
+        return redirect(f"{root_url}?jira_error=token_exchange_failed&redirect=/settings")
 
     except ValueError as exc:
         logger.error("[Jira Callback] Value error: %s", exc)
-        return redirect(f"{settings_url}?jira_error=no_accessible_resources")
+        return redirect(f"{root_url}?jira_error=no_accessible_resources&redirect=/settings")
 
     except Exception as exc:
         import traceback as _tb
         logger.exception("[Jira Callback] Unexpected error: %s", exc)
-        logger.error("[Jira Callback] Traceback: %s", _tb.format_exc())
-        return redirect(f"{settings_url}?jira_error=unexpected")
+        return redirect(f"{root_url}?jira_error=unexpected&redirect=/settings")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

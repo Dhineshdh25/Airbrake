@@ -274,47 +274,7 @@ function Dashboard() {
         return () => clearInterval(interval);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [comparisonPeriod, customApplyTick, fetchTopProjects, fetchTopErrorProjects]);
-    // ── Period errors (for semantic grouping) ──
-    const [periodErrors, setPeriodErrors] = (0, react_1.useState)([]);
-    const [periodLoading, setPeriodLoading] = (0, react_1.useState)(true);
-    const [periodDate, setPeriodDate] = (0, react_1.useState)('');
-    const [periodError, setPeriodError] = (0, react_1.useState)(null);
-    const fetchPeriodErrors = (0, react_1.useCallback)((from, to) => {
-        const params = new URLSearchParams();
-        if (from)
-            params.set('from', from);
-        if (to)
-            params.set('to', to);
-        const qs = params.toString();
-        setPeriodLoading(true);
-        setPeriodError(null);
-        (0, api_1.apiFetch)(`/api/dashboard/today-errors${qs ? `?${qs}` : ''}`)
-            .then(r => r.json())
-            .then((d) => {
-            setPeriodErrors(d.errors ?? []);
-            setPeriodDate(d.date ?? '');
-        })
-            .catch((e) => {
-            console.error('[Dashboard] period-errors failed:', e);
-            setPeriodError("Failed to load errors for the selected period.");
-        })
-            .finally(() => setPeriodLoading(false));
-    }, []);
-    (0, react_1.useEffect)(() => {
-        // For custom, wait until "Apply" is clicked and a from/to is set.
-        if (comparisonPeriod === 'custom' && !(customFrom && customTo))
-            return;
-        const { from, to } = periodToRange(comparisonPeriod, customFrom, customTo);
-        fetchPeriodErrors(from, to);
-        if (comparisonPeriod === 'custom')
-            return; // no polling for a fixed custom range
-        const interval = setInterval(() => {
-            const r = periodToRange(comparisonPeriod, customFrom, customTo);
-            fetchPeriodErrors(r.from, r.to);
-        }, 3600000);
-        return () => clearInterval(interval);
-    }, [comparisonPeriod, customApplyTick, fetchPeriodErrors]);
-    // ── Today's errors (always show today's data in bottom section) ──
+    // ── Today's errors ──
     const [todayErrors, setTodayErrors] = (0, react_1.useState)([]);
     const [todayLoading, setTodayLoading] = (0, react_1.useState)(true);
     const [todayDate, setTodayDate] = (0, react_1.useState)('');
@@ -353,9 +313,28 @@ function Dashboard() {
             shortName: d.name.length > 16 ? d.name.slice(0, 15) + '…' : d.name,
         }));
     }, [topProjects, topErrorProjects]);
-    const semanticGroupData = (0, react_1.useMemo)(() => summarizeSemanticGroupsForToday(periodErrors, selectedProject), [periodErrors, selectedProject]);
+    const semanticGroupData = (0, react_1.useMemo)(() => summarizeSemanticGroupsForToday(todayErrors, selectedProject), [todayErrors, selectedProject]);
     // ── Semantic groups for selected project (drill-down) ──
     const projectSemanticGroupData = (0, react_1.useMemo)(() => selectedProject ? summarizeSemanticGroupsForToday(projectErrors, selectedProject) : [], [selectedProject, projectErrors]);
+    const displayedSemanticGroups = selectedProject ? projectSemanticGroupData : semanticGroupData;
+    function formatPeriodLabel(period, customFromValue, customToValue) {
+        if (period === 'daily') {
+            return 'Today';
+        }
+        if (period === 'weekly') {
+            return 'Last 7 days';
+        }
+        if (customFromValue && customToValue) {
+            const fromDate = new Date(customFromValue);
+            const toDate = new Date(customToValue);
+            const options = { year: 'numeric', month: 'short', day: 'numeric' };
+            return `${fromDate.toLocaleDateString(undefined, options)} – ${toDate.toLocaleDateString(undefined, options)}`;
+        }
+        return 'Custom range';
+    }
+    const semanticGroupLabel = selectedProject
+        ? formatPeriodLabel(comparisonPeriod, customFrom, customTo)
+        : todayDate;
     // ── Fetch errors for selected project ──
     (0, react_1.useEffect)(() => {
         if (!selectedProject) {
@@ -448,17 +427,15 @@ function Dashboard() {
                                                         color: '#94a3b8',
                                                         fontStyle: 'italic'
                                                     }, children: isSelected ? '🔍 Click to collapse' : '🔍 Click to drill down' })] }));
-                                    } }), visibleSeries.mostUsed && ((0, jsx_runtime_1.jsx)(recharts_1.Bar, { dataKey: "mostUsed", fill: "#7c6ff7", radius: [4, 4, 0, 0], maxBarSize: 32, cursor: "pointer", fillOpacity: selectedProject ? 0.7 : 1, stroke: "none", strokeWidth: 0, onClick: handleBarClick })), visibleSeries.errorProducing && ((0, jsx_runtime_1.jsx)(recharts_1.Bar, { dataKey: "errorProducing", fill: "#f97316", radius: [4, 4, 0, 0], maxBarSize: 32, cursor: "pointer", fillOpacity: selectedProject ? 0.7 : 1, stroke: "none", strokeWidth: 0, onClick: handleBarClick }))] }) }))] }), (0, jsx_runtime_1.jsxs)("div", { style: { ...card, marginBottom: 24 }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }, children: [(0, jsx_runtime_1.jsx)("h3", { style: { ...cardTitle, margin: 0 }, children: selectedProject
-                                    ? `Errors by Semantic Group for ${selectedProject}`
-                                    : "Errors by Semantic Group" }), periodDate && ((0, jsx_runtime_1.jsxs)("span", { style: {
+                                    } }), visibleSeries.mostUsed && ((0, jsx_runtime_1.jsx)(recharts_1.Bar, { dataKey: "mostUsed", fill: "#7c6ff7", radius: [4, 4, 0, 0], maxBarSize: 32, cursor: "pointer", fillOpacity: selectedProject ? 0.7 : 1, stroke: "none", strokeWidth: 0, onClick: handleBarClick })), visibleSeries.errorProducing && ((0, jsx_runtime_1.jsx)(recharts_1.Bar, { dataKey: "errorProducing", fill: "#f97316", radius: [4, 4, 0, 0], maxBarSize: 32, cursor: "pointer", fillOpacity: selectedProject ? 0.7 : 1, stroke: "none", strokeWidth: 0, onClick: handleBarClick }))] }) }))] }), (0, jsx_runtime_1.jsxs)("div", { style: { ...card, marginBottom: 24 }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }, children: [(0, jsx_runtime_1.jsx)("h3", { style: { ...cardTitle, margin: 0 }, children: selectedProject ? `Today's Errors by Semantic Group for ${selectedProject}` : "Today's Errors by Semantic Group" }), (0, jsx_runtime_1.jsxs)("span", { style: {
                                     fontSize: 12, fontWeight: 600, padding: '3px 10px', borderRadius: 99,
                                     background: 'rgba(56,189,248,0.12)', color: '#7dd3fc',
                                     border: '1px solid rgba(56,189,248,0.25)',
-                                }, children: [comparisonPeriod === 'daily' && 'Today', comparisonPeriod === 'weekly' && 'Last 7 days', comparisonPeriod === 'custom' && `${customFrom} to ${customTo}`, ' · ', semanticGroupData.reduce((sum, item) => sum + item.value, 0), " grouped"] }))] }), periodLoading ? ((0, jsx_runtime_1.jsx)("div", { style: { textAlign: 'center', padding: '30px 0', color: 'var(--text-muted)', fontSize: 13 }, children: "Loading semantic group totals\u2026" })) : periodError ? ((0, jsx_runtime_1.jsxs)("div", { style: {
+                                }, children: [semanticGroupLabel, " \u00B7 ", displayedSemanticGroups.reduce((sum, item) => sum + item.value, 0), " grouped"] })] }), todayLoading ? ((0, jsx_runtime_1.jsx)("div", { style: { textAlign: 'center', padding: '30px 0', color: 'var(--text-muted)', fontSize: 13 }, children: "Loading semantic group totals\u2026" })) : todayError ? ((0, jsx_runtime_1.jsxs)("div", { style: {
                             padding: '18px 20px', borderRadius: 8, fontSize: 13,
                             background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)',
                             color: '#f87171',
-                        }, children: ["\u26A0 ", periodError] })) : semanticGroupData.length === 0 ? ((0, jsx_runtime_1.jsx)("div", { style: { textAlign: 'center', padding: '36px 0', color: 'var(--text-muted)', fontSize: 13 }, children: "No semantic group data for the selected period." })) : ((0, jsx_runtime_1.jsx)(recharts_1.ResponsiveContainer, { width: "100%", height: 280, children: (0, jsx_runtime_1.jsxs)(recharts_1.BarChart, { data: semanticGroupData, margin: { top: 8, right: 18, left: 8, bottom: 40 }, children: [(0, jsx_runtime_1.jsx)(recharts_1.CartesianGrid, { strokeDasharray: "3 3", stroke: "rgba(255,255,255,0.05)", vertical: false }), (0, jsx_runtime_1.jsx)(recharts_1.XAxis, { type: "category", dataKey: "name", tick: { fill: 'rgba(255,255,255,0.55)', fontSize: 10 }, tickLine: false, axisLine: { stroke: 'rgba(255,255,255,0.08)' }, angle: -20, textAnchor: "end", interval: 0 }), (0, jsx_runtime_1.jsx)(recharts_1.YAxis, { type: "number", tick: { fill: 'rgba(255,255,255,0.45)', fontSize: 10 }, tickLine: false, axisLine: { stroke: 'rgba(255,255,255,0.08)' }, width: 32 }), (0, jsx_runtime_1.jsx)(recharts_1.Tooltip, { cursor: { fill: 'rgba(255,255,255,0.04)' }, content: ({ active, payload }) => {
+                        }, children: ["\u26A0 ", todayError] })) : displayedSemanticGroups.length === 0 ? ((0, jsx_runtime_1.jsxs)("div", { style: { textAlign: 'center', padding: '36px 0', color: 'var(--text-muted)', fontSize: 13 }, children: ["No semantic group data for ", selectedProject ? ` ${selectedProject}` : 'today', "."] })) : ((0, jsx_runtime_1.jsx)(recharts_1.ResponsiveContainer, { width: "100%", height: 280, children: (0, jsx_runtime_1.jsxs)(recharts_1.BarChart, { data: displayedSemanticGroups, margin: { top: 8, right: 18, left: 8, bottom: 40 }, children: [(0, jsx_runtime_1.jsx)(recharts_1.CartesianGrid, { strokeDasharray: "3 3", stroke: "rgba(255,255,255,0.05)", vertical: false }), (0, jsx_runtime_1.jsx)(recharts_1.XAxis, { type: "category", dataKey: "name", tick: { fill: 'rgba(255,255,255,0.55)', fontSize: 10 }, tickLine: false, axisLine: { stroke: 'rgba(255,255,255,0.08)' }, angle: -20, textAnchor: "end", interval: 0 }), (0, jsx_runtime_1.jsx)(recharts_1.YAxis, { type: "number", tick: { fill: 'rgba(255,255,255,0.45)', fontSize: 10 }, tickLine: false, axisLine: { stroke: 'rgba(255,255,255,0.08)' }, width: 32 }), (0, jsx_runtime_1.jsx)(recharts_1.Tooltip, { cursor: { fill: 'rgba(255,255,255,0.04)' }, content: ({ active, payload }) => {
                                         if (!active || !payload?.length)
                                             return null;
                                         const item = payload[0].payload;

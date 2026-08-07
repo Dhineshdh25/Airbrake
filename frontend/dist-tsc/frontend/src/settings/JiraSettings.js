@@ -56,19 +56,17 @@ function JiraSettings() {
     (0, react_1.useEffect)(() => {
         const params = new URLSearchParams(window.location.search);
         if (params.get('jira_connected') === 'true') {
-            // Re-check status after successful OAuth round-trip
             (0, api_1.apiFetch)('/api/jira/status')
                 .then(r => r.json())
                 .then((j) => { setStatus(j); setLoading(false); })
                 .catch(() => { setStatus({ connected: false, email: '', account_id: '' }); setLoading(false); });
-            // Clean up the query param without a page reload
             const clean = window.location.pathname + window.location.hash;
             window.history.replaceState({}, '', clean);
         }
         if (params.get('jira_error')) {
             const code = params.get('jira_error') ?? 'unknown';
             const messages = {
-                invalid_state: 'OAuth session expired or ran in a different server — please try again.',
+                invalid_state: 'OAuth session expired — please try again.',
                 token_exchange_failed: 'Atlassian rejected the token exchange. Check your Client ID and Secret.',
                 no_accessible_resources: 'No Jira sites found on your Atlassian account.',
                 missing_params: 'OAuth callback was missing required parameters.',

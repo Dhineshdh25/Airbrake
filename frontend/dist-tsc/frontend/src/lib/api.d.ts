@@ -13,8 +13,7 @@ export declare function getDeviceId(): string;
 export declare class ApiError extends Error {
     readonly status: number;
     readonly statusText: string;
-    readonly body?: unknown | undefined;
-    constructor(status: number, statusText: string, message?: string, body?: unknown | undefined);
+    constructor(status: number, statusText: string, message?: string);
     /** True for any client-side mistake (400–499). */
     get isClientError(): boolean;
     /** True for any server-side failure (500–599). */
