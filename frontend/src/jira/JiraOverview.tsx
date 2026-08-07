@@ -164,51 +164,54 @@ export function JiraOverview() {
 
   // ── Derived filter options ────────────────────────────────────────────────
   const projectOptions = useMemo(() =>
-    [...new Set(issues.map(i => i.fields.project?.name ?? '').filter(Boolean))].sort(),
+    [...new Set(issues.map(i => i.fields?.project?.name ?? '').filter(Boolean))].sort(),
     [issues]);
 
   const statusOptions = useMemo(() =>
-    [...new Set(issues.map(i => i.fields.status?.name ?? '').filter(Boolean))].sort(),
+    [...new Set(issues.map(i => i.fields?.status?.name ?? '').filter(Boolean))].sort(),
     [issues]);
 
   const priorityOptions = useMemo(() =>
-    [...new Set(issues.map(i => i.fields.priority?.name ?? '').filter(Boolean))].sort(),
+    [...new Set(issues.map(i => i.fields?.priority?.name ?? '').filter(Boolean))].sort(),
     [issues]);
 
   const assigneeOptions = useMemo(() =>
-    [...new Set(issues.map(i => i.fields.assignee?.displayName ?? '').filter(Boolean))].sort(),
+    [...new Set(issues.map(i => i.fields?.assignee?.displayName ?? '').filter(Boolean))].sort(),
     [issues]);
 
   // ── Filtered + sorted rows ────────────────────────────────────────────────
   const visible = useMemo(() => {
-    let rows = issues;
+    console.log('[Jira useMemo] Computing visible rows from', issues.length, 'issues');
+
+    let rows = [...issues]; // Create a copy to avoid mutating original
     const q = search.toLowerCase().trim();
 
     if (q) rows = rows.filter(i =>
       i.key.toLowerCase().includes(q) ||
-      (i.fields.summary ?? '').toLowerCase().includes(q)
+      (i.fields?.summary ?? '').toLowerCase().includes(q)
     );
-    if (projectFilter) rows = rows.filter(i => (i.fields.project?.name ?? '') === projectFilter);
-    if (statusFilter) rows = rows.filter(i => (i.fields.status?.name ?? '') === statusFilter);
-    if (priorityFilter) rows = rows.filter(i => (i.fields.priority?.name ?? '') === priorityFilter);
-    if (assigneeFilter) rows = rows.filter(i => (i.fields.assignee?.displayName ?? '') === assigneeFilter);
+    if (projectFilter) rows = rows.filter(i => (i.fields?.project?.name ?? '') === projectFilter);
+    if (statusFilter) rows = rows.filter(i => (i.fields?.status?.name ?? '') === statusFilter);
+    if (priorityFilter) rows = rows.filter(i => (i.fields?.priority?.name ?? '') === priorityFilter);
+    if (assigneeFilter) rows = rows.filter(i => (i.fields?.assignee?.displayName ?? '') === assigneeFilter);
 
-    rows = [...rows].sort((a, b) => {
+    rows = rows.sort((a, b) => {
       let cmp = 0;
       if (sortKey === 'updated') {
-        cmp = (a.fields.updated ?? '') < (b.fields.updated ?? '') ? -1 : 1;
+        cmp = (a.fields?.updated ?? '') < (b.fields?.updated ?? '') ? -1 : 1;
       } else if (sortKey === 'created') {
-        cmp = (a.fields.created ?? '') < (b.fields.created ?? '') ? -1 : 1;
+        cmp = (a.fields?.created ?? '') < (b.fields?.created ?? '') ? -1 : 1;
       } else if (sortKey === 'status') {
-        cmp = (a.fields.status?.name ?? '') < (b.fields.status?.name ?? '') ? -1 : 1;
+        cmp = (a.fields?.status?.name ?? '') < (b.fields?.status?.name ?? '') ? -1 : 1;
       } else if (sortKey === 'priority') {
-        const pa = PRIORITY_ORDER[a.fields.priority?.name ?? ''] ?? 99;
-        const pb = PRIORITY_ORDER[b.fields.priority?.name ?? ''] ?? 99;
+        const pa = PRIORITY_ORDER[a.fields?.priority?.name ?? ''] ?? 99;
+        const pb = PRIORITY_ORDER[b.fields?.priority?.name ?? ''] ?? 99;
         cmp = pa - pb;
       }
       return sortDir === 'asc' ? cmp : -cmp;
     });
 
+    console.log('[Jira useMemo] Visible rows computed:', rows.length);
     return rows;
   }, [issues, search, projectFilter, statusFilter, priorityFilter, assigneeFilter, sortKey, sortDir]);
 
@@ -232,28 +235,36 @@ export function JiraOverview() {
 
     doFetch
       .then((data: SearchResponse) => {
+        console.log('[Jira] Raw API response:', data);
+
         if (cancelled) return;
 
         if (data.needs_auth || data.error?.toLowerCase().includes('not connected')) {
+          console.log('[Jira] Auth required or not connected');
           setNotConnected(true);
           setIssues([]);
           return;
         }
 
         if (data.error) {
+          console.log('[Jira] Error in response:', data.error);
           setLoadError(data.error);
           setIssues([]);
           return;
         }
 
         // Handle message (e.g., "no accessible projects")
-        if (data.message && data.issues.length === 0) {
+        const issuesArray = data.issues ?? [];
+        if (data.message && issuesArray.length === 0) {
+          console.log('[Jira] Message with no issues:', data.message);
           setLoadError(data.message);
           setIssues([]);
           return;
         }
 
-        const list: JiraIssue[] = data.issues ?? [];
+        const list: JiraIssue[] = issuesArray;
+        console.log('[Jira] Setting issues state:', list.length, 'issues');
+        console.log('[Jira] First issue sample:', list[0]);
 
         // Extract base URL from first issue's self link
         for (const issue of list) {
@@ -261,11 +272,13 @@ export function JiraOverview() {
             try {
               const u = new URL(issue.self);
               setJiraBase(`${u.protocol}//${u.host}`);
+              console.log('[Jira] Jira base URL set:', `${u.protocol}//${u.host}`);
               break;
             } catch { /* continue */ }
           }
         }
 
+        console.log('[Jira] About to call setIssues with', list.length, 'issues');
         setIssues(list);
       })
       .catch((err: unknown) => {
@@ -298,8 +311,18 @@ export function JiraOverview() {
     return <span style={{ color: '#818cf8' }}>{sortDir === 'asc' ? ' ↑' : ' ↓'}</span>;
   }
 
-  const resolved = issues.filter(i => TERMINAL_STATUSES.has((i.fields.status?.name ?? '').toLowerCase())).length;
+  const resolved = issues.filter(i => TERMINAL_STATUSES.has((i.fields?.status?.name ?? '').toLowerCase())).length;
   const todo = issues.length - resolved;
+
+  console.log('[Jira Render] State check:', {
+    issuesLength: issues.length,
+    loading,
+    loadError,
+    notConnected,
+    visibleLength: visible.length,
+    resolved,
+    todo,
+  });
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -438,8 +461,8 @@ export function JiraOverview() {
                   borderBottom: isLast ? 'none' : '1px solid var(--card-border)',
                 };
                 const url = browseUrl(issue, jiraBase);
-                const sName = issue.fields.status?.name ?? '—';
-                const pName = issue.fields.priority?.name;
+                const sName = issue.fields?.status?.name ?? '—';
+                const pName = issue.fields?.priority?.name;
 
                 return (
                   <tr key={issue.id} style={{ transition: 'background 0.1s' }}
@@ -461,13 +484,13 @@ export function JiraOverview() {
                     {/* Summary */}
                     <td style={{ ...tdStyle, maxWidth: 340 }}>
                       <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text)' }}>
-                        {issue.fields.summary ?? '—'}
+                        {issue.fields?.summary ?? '—'}
                       </div>
                     </td>
 
                     {/* Project */}
                     <td style={{ ...tdStyle, color: 'var(--text-muted)', fontSize: 12 }}>
-                      {issue.fields.project?.name ?? issue.fields.project?.key ?? '—'}
+                      {issue.fields?.project?.name ?? issue.fields?.project?.key ?? '—'}
                     </td>
 
                     {/* Status */}
@@ -493,19 +516,19 @@ export function JiraOverview() {
 
                     {/* Assignee */}
                     <td style={{ ...tdStyle, color: 'var(--text-muted)', fontSize: 12 }}>
-                      {issue.fields.assignee?.displayName ?? (
+                      {issue.fields?.assignee?.displayName ?? (
                         <span style={{ fontStyle: 'italic', opacity: 0.5 }}>Unassigned</span>
                       )}
                     </td>
 
                     {/* Created */}
                     <td style={{ ...tdStyle, color: 'var(--text-muted)', fontSize: 12, whiteSpace: 'nowrap' }}>
-                      {fmtDate(issue.fields.created)}
+                      {fmtDate(issue.fields?.created)}
                     </td>
 
                     {/* Updated */}
                     <td style={{ ...tdStyle, color: 'var(--text-muted)', fontSize: 12, whiteSpace: 'nowrap' }}>
-                      {fmtDate(issue.fields.updated)}
+                      {fmtDate(issue.fields?.updated)}
                     </td>
 
                     {/* Actions */}
