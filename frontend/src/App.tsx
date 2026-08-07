@@ -1,6 +1,5 @@
-import React from 'react';
 import React, { useEffect } from 'react';
-import { BrowserRouter, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
+import { HashRouter, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { ProtectedRoute } from './auth/ProtectedRoute';
 import { LoginPage } from './auth/LoginPage';
 import { ThemeProvider } from './theme/ThemeContext';
@@ -22,28 +21,35 @@ function getRole(): Role {
 /**
  * Handles OAuth callback redirects from the backend.
  *
- * S3 static hosting can only serve index.html at the root path. The backend
- * callback redirects to the root URL with ?redirect=/settings&jira_connected=true
- * instead of directly to /settings (which S3 would 404).
+ * With HashRouter all routes are under the hash (e.g. /#/settings) so S3
+ * always serves index.html for the root path and the hash never reaches S3.
  *
- * This component runs on every page load and immediately navigates to the
- * intended path, preserving the OAuth result query params for JiraSettings.tsx.
+ * The backend redirects to:
+ *   https://airbrake.s3-website.../  ?jira_connected=true
+ *
+ * The SPA loads at root, this handler reads the query params, then
+ * navigates to /#/settings?jira_connected=true via React Router.
  */
 function OAuthRedirectHandler() {
   const navigate = useNavigate();
 
   useEffect(() => {
+    // Read params from the real URL query string (before the hash)
     const params = new URLSearchParams(window.location.search);
-    const redirectTo = params.get('redirect');
-    if (!redirectTo) return;
+    const jiraConnected = params.get('jira_connected');
+    const jiraError     = params.get('jira_error');
 
-    // Build destination URL with OAuth params preserved, minus the redirect param
-    params.delete('redirect');
-    const qs = params.toString();
-    const destination = redirectTo + (qs ? `?${qs}` : '');
+    if (!jiraConnected && !jiraError) return;
 
-    // Replace current history entry so back button doesn't loop
-    navigate(destination, { replace: true });
+    // Clean the real URL (remove query params — they're now handled by React)
+    window.history.replaceState({}, '', window.location.pathname);
+
+    // Navigate to settings within the SPA, preserving the OAuth result param
+    if (jiraConnected) {
+      navigate('/settings?jira_connected=true', { replace: true });
+    } else if (jiraError) {
+      navigate(`/settings?jira_error=${jiraError}`, { replace: true });
+    }
   }, [navigate]);
 
   return null;
@@ -70,7 +76,7 @@ function AppShell() {
 export default function App() {
   return (
     <ThemeProvider>
-      <BrowserRouter>
+      <HashRouter>
         <Routes>
           <Route path="/auth/login" element={<LoginPage />} />
           <Route
@@ -82,7 +88,7 @@ export default function App() {
             }
           />
         </Routes>
-      </BrowserRouter>
+      </HashRouter>
     </ThemeProvider>
   );
 }

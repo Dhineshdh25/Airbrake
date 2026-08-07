@@ -307,10 +307,16 @@ def _get_valid_user_id_with_token():
 
 
 def _frontend_url() -> str:
-    return os.environ.get(
+    """Return the frontend base URL with a trailing slash stripped.
+
+    We always append a path separator ourselves so the result is predictable.
+    e.g. https://airbrake.s3-website-us-east-1.amazonaws.com
+    """
+    url = os.environ.get(
         "FRONTEND_URL",
         "https://airbrake.s3-website-us-east-1.amazonaws.com",
     )
+    return url.rstrip("/")
 
 
 def _decode_metadata(raw):
@@ -446,20 +452,20 @@ def jira_callback():
     error = request.args.get("error")
     if error:
         logger.warning("[Jira Callback] Atlassian returned error: %s", error)
-        return redirect(f"{root_url}?jira_error={requests.utils.quote(error)}&redirect=/settings")
+        return redirect(f"{root_url}/?jira_error={requests.utils.quote(error)}")
 
     code  = request.args.get("code", "").strip()
     state = request.args.get("state", "").strip()
 
     if not code or not state:
         logger.warning("[Jira Callback] Missing code or state")
-        return redirect(f"{root_url}?jira_error=missing_params&redirect=/settings")
+        return redirect(f"{root_url}/?jira_error=missing_params")
 
     # ── Validate CSRF state — DB-persisted so any Lambda container can read it ─
     matched_user_id = _pop_oauth_state(state)
     if not matched_user_id:
         logger.warning("[Jira Callback] Invalid or expired OAuth state: %s", state[:16])
-        return redirect(f"{root_url}?jira_error=invalid_state&redirect=/settings")
+        return redirect(f"{root_url}/?jira_error=invalid_state")
 
     logger.info("[Jira Callback] State validated for user_id=%s", matched_user_id)
 
@@ -492,22 +498,22 @@ def jira_callback():
             atlassian_email      = atlassian_email,
         )
         logger.info("[Jira Callback] Token saved — redirecting to %s", root_url)
-        return redirect(f"{root_url}?jira_connected=true&redirect=/settings")
+        return redirect(f"{root_url}/?jira_connected=true")
 
     except requests.HTTPError as exc:
         status_code = exc.response.status_code if exc.response is not None else 0
         body        = exc.response.text[:300] if exc.response is not None else str(exc)
         logger.error("[Jira Callback] HTTP error status=%s body=%s", status_code, body)
-        return redirect(f"{root_url}?jira_error=token_exchange_failed&redirect=/settings")
+        return redirect(f"{root_url}/?jira_error=token_exchange_failed")
 
     except ValueError as exc:
         logger.error("[Jira Callback] Value error: %s", exc)
-        return redirect(f"{root_url}?jira_error=no_accessible_resources&redirect=/settings")
+        return redirect(f"{root_url}/?jira_error=no_accessible_resources")
 
     except Exception as exc:
         import traceback as _tb
         logger.exception("[Jira Callback] Unexpected error: %s", exc)
-        return redirect(f"{root_url}?jira_error=unexpected&redirect=/settings")
+        return redirect(f"{root_url}/?jira_error=unexpected")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
