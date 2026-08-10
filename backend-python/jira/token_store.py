@@ -59,6 +59,7 @@ def save_token(
     cloud_id: str,
     atlassian_account_id: str,
     atlassian_email: str,
+    site_url: str = "",
 ) -> None:
     """
     Upsert the Jira OAuth token for the given Airbrake user_id.
@@ -83,6 +84,7 @@ def save_token(
         "cloud_id":              cloud_id,
         "atlassian_account_id":  atlassian_account_id,
         "atlassian_email":       atlassian_email,
+        "site_url":              site_url,
     }
 
     # Remove any existing token row for this user first
