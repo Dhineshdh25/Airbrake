@@ -1061,10 +1061,18 @@ def jira_search():
             [p.get("key") for p in projects]
         )
         
-        # Step 4: Execute search
+        # Step 4: Execute search with explicit fields required by frontend
         result = client.search_issues(
             jql=jql,
-            fields=None,  # Get all standard fields
+            fields=[
+                "summary",
+                "project",
+                "status",
+                "priority",
+                "assignee",
+                "created",
+                "updated"
+            ],
             max_results=max_results,
             next_page_token=next_page_token
         )
