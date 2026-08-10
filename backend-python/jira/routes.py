@@ -481,6 +481,11 @@ def jira_callback():
         logger.info("[Jira Callback] Fetching accessible resources")
         cloud_id = fetch_cloud_id(access_token)
         logger.info("[Jira Callback] cloud_id=%s", cloud_id)
+        
+        # Fetch the Jira site URL for browser navigation
+        from .oauth import fetch_site_url
+        site_url = fetch_site_url(access_token)
+        logger.info("[Jira Callback] site_url=%s", site_url)
 
         logger.info("[Jira Callback] Fetching user profile")
         profile              = fetch_user_profile(access_token, cloud_id)
@@ -497,6 +502,7 @@ def jira_callback():
             cloud_id             = cloud_id,
             atlassian_account_id = atlassian_account_id,
             atlassian_email      = atlassian_email,
+            site_url             = site_url,
         )
         logger.info("[Jira Callback] Token saved — redirecting to %s", root_url)
         return redirect(f"{root_url}/?jira_connected=true")
@@ -525,7 +531,7 @@ def jira_status():
     """
     Return whether the current user has a connected Jira account.
 
-    Response: { connected: bool, email: str, account_id: str }
+    Response: { connected: bool, email: str, account_id: str, site_url: str }
     Never returns token values.
     """
     user_id, err = _require_auth()
@@ -545,8 +551,9 @@ def jira_status():
             "connected":  True,
             "email":      token.get("atlassian_email", ""),
             "account_id": token.get("atlassian_account_id", ""),
+            "site_url":   token.get("site_url", ""),
         })
-    return jsonify({"connected": False, "email": "", "account_id": ""})
+    return jsonify({"connected": False, "email": "", "account_id": "", "site_url": ""})
 
 
 @jira_bp.route("/tickets")
@@ -1087,12 +1094,16 @@ def jira_search():
             result.get("nextPageToken")
         )
         
+        # Get the Jira site URL for browser navigation
+        site_url = token.get("site_url", "")
+        
         return jsonify({
             "issues": result.get("issues", []),
             "isLast": result.get("isLast", True),
             "nextPageToken": result.get("nextPageToken"),
             "total": len(result.get("issues", [])),
             "project_key": project_key,
+            "site_url": site_url,
         })
     
     except requests.HTTPError as exc:

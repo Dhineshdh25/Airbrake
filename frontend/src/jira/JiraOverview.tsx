@@ -46,6 +46,7 @@ interface SearchResponse {
   error?: string;
   needs_auth?: boolean;
   message?: string;
+  site_url?: string;
 }
 
 type SortKey = 'updated' | 'created' | 'priority' | 'status';
@@ -93,14 +94,14 @@ function priorityColor(name: string | undefined): string {
   return 'var(--text-muted)';
 }
 
-function browseUrl(issue: JiraIssue, fallback: string): string {
-  if (issue.self) {
-    try {
-      const u = new URL(issue.self);
-      return `${u.protocol}//${u.host}/browse/${issue.key}`;
-    } catch { /* fall through */ }
+function browseUrl(issue: JiraIssue, siteUrl: string): string {
+  if (!siteUrl || !issue.key) {
+    console.warn('[Jira] Missing siteUrl or issue.key:', { siteUrl, key: issue.key });
+    return `#${issue.key || 'unknown'}`;
   }
-  return fallback ? `${fallback}/browse/${issue.key}` : `#${issue.key}`;
+  // Remove trailing slash from siteUrl if present
+  const baseUrl = siteUrl.replace(/\/$/, '');
+  return `${baseUrl}/browse/${issue.key}`;
 }
 
 // ── Shared styles ─────────────────────────────────────────────────────────────
@@ -149,7 +150,7 @@ export function JiraOverview() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notConnected, setNotConnected] = useState(false);
-  const [jiraBase, setJiraBase] = useState('');
+  const [jiraSiteUrl, setJiraSiteUrl] = useState('');
   const [reloadTick, setReloadTick] = useState(0);
   const bypassCache = useRef(false);
 
@@ -266,16 +267,12 @@ export function JiraOverview() {
         console.log('[Jira] Setting issues state:', list.length, 'issues');
         console.log('[Jira] First issue sample:', list[0]);
 
-        // Extract base URL from first issue's self link
-        for (const issue of list) {
-          if (issue.self) {
-            try {
-              const u = new URL(issue.self);
-              setJiraBase(`${u.protocol}//${u.host}`);
-              console.log('[Jira] Jira base URL set:', `${u.protocol}//${u.host}`);
-              break;
-            } catch { /* continue */ }
-          }
+        // Store Jira site URL from API response
+        if (data.site_url) {
+          setJiraSiteUrl(data.site_url);
+          console.log('[Jira] Jira site URL from API:', data.site_url);
+        } else {
+          console.warn('[Jira] No site_url in API response');
         }
 
         console.log('[Jira] About to call setIssues with', list.length, 'issues');
@@ -460,7 +457,7 @@ export function JiraOverview() {
                   ...TD_STYLE,
                   borderBottom: isLast ? 'none' : '1px solid var(--card-border)',
                 };
-                const url = browseUrl(issue, jiraBase);
+                const url = browseUrl(issue, jiraSiteUrl);
                 const sName = issue.fields?.status?.name ?? '—';
                 const pName = issue.fields?.priority?.name;
 
