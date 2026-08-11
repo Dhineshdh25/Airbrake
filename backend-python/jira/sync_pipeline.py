@@ -118,6 +118,7 @@ def run_sync_pipeline(event: dict[str, Any]) -> dict[str, Any]:
 
         error_hash = linked_row.get("error_hash") or ""
         project_name = linked_row.get("project_name") or None
+        error_message = linked_row.get("error") or issue.get("summary") or ""
         jira_status = issue.get("status", "") or ""
 
         extraction = extract_solution_from_issue(issue)
@@ -133,7 +134,10 @@ def run_sync_pipeline(event: dict[str, Any]) -> dict[str, Any]:
                     solution=solution_text,
                     created_by="jira_sync",
                     project_name=project_name,
-                    error_message=issue.get("summary") or "",
+                    # Pass actual error text so _get_log_row() finds the row by text.
+                    # Fall back to error_hash if text lookup fails — insert_solution
+                    # uses occurrence_error_hash as the last-resort lookup key.
+                    error_message=error_message,
                 )
                 detail = "Solution extracted and inserted from Jira issue."
             except Exception as exc:
