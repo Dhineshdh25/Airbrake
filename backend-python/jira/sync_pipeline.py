@@ -48,20 +48,26 @@ try:
         mark_sync_status,
     )
     from .nova_extractor import extract_solution_from_issue, build_solution_text
-except Exception as _imports_exc:
-    logger.error("[SyncPipeline] jira helper import failed: %s", _imports_exc)
+    _JIRA_HELPERS_OK = True
+except Exception as _exc:
+    _JIRA_HELPERS_OK = False
+    # Capture into a module-level variable so the stubs can reference it
+    # after the except block exits (Python drops the 'as' name on exit).
+    _JIRA_HELPERS_ERR = str(_exc)
+    logger.error("[SyncPipeline] jira helper import failed: %s", _exc)
+
     def fetch_full_issue(*a, **kw):
-        raise RuntimeError(f"Jira helper unavailable: {_imports_exc}")
+        raise RuntimeError(f"Jira helper unavailable: {_JIRA_HELPERS_ERR}")
     def find_airbrake_token_for_webhook(*a, **kw):
-        raise RuntimeError(f"Jira helper unavailable: {_imports_exc}")
+        raise RuntimeError(f"Jira helper unavailable: {_JIRA_HELPERS_ERR}")
     def find_log_rows_by_jira_key(*a, **kw):
-        raise RuntimeError(f"Jira helper unavailable: {_imports_exc}")
+        raise RuntimeError(f"Jira helper unavailable: {_JIRA_HELPERS_ERR}")
     def mark_sync_status(*a, **kw):
-        raise RuntimeError(f"Jira helper unavailable: {_imports_exc}")
+        raise RuntimeError(f"Jira helper unavailable: {_JIRA_HELPERS_ERR}")
     def extract_solution_from_issue(*a, **kw):
-        raise RuntimeError(f"Jira helper unavailable: {_imports_exc}")
+        raise RuntimeError(f"Jira helper unavailable: {_JIRA_HELPERS_ERR}")
     def build_solution_text(*a, **kw):
-        raise RuntimeError(f"Jira helper unavailable: {_imports_exc}")
+        raise RuntimeError(f"Jira helper unavailable: {_JIRA_HELPERS_ERR}")
 
 
 def run_sync_pipeline(event: dict[str, Any]) -> dict[str, Any]:
