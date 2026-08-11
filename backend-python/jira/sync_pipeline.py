@@ -41,8 +41,8 @@ except Exception as _db_exc:
         raise RuntimeError(f"DB unavailable: {_db_exc}")
 
 try:
-    from .ticket_service import fetch_full_issue
     from .jira_sync import (
+        fetch_full_issue,
         find_airbrake_token_for_webhook,
         find_log_rows_by_jira_key,
         mark_sync_status,
