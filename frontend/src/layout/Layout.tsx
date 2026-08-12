@@ -1,6 +1,7 @@
 import React from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useTheme } from '../theme/ThemeContext';
+import { useAuth } from '../auth/AuthContext';
 
 const NAV_LINKS = [
   { to: '/dashboard', label: 'Dashboard', icon: '▦' },
@@ -16,8 +17,15 @@ interface Props {
 
 export function Layout({ children }: Props) {
   const { theme, setTheme } = useTheme();
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
   const location = useLocation();
   const isDark = theme === 'dark';
+
+  const handleLogout = async () => {
+    await logout();
+    navigate('/auth/login', { replace: true });
+  };
 
   return (
     <div style={{ display: 'flex', minHeight: '100vh', background: 'var(--bg)', color: 'var(--text)', fontFamily: 'var(--font)' }}>
@@ -90,6 +98,40 @@ export function Layout({ children }: Props) {
 
         {/* Theme toggle */}
         <div style={{ padding: '14px 10px', borderTop: '1px solid var(--sidebar-border)' }}>
+          {user && (
+            <div style={{
+              marginBottom: 8,
+              padding: '6px 12px',
+              fontSize: 11.5,
+              color: 'rgba(255,255,255,0.5)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}>
+              {user.email}
+            </div>
+          )}
+          <button
+            onClick={handleLogout}
+            style={{
+              width: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '8px 12px',
+              marginBottom: 6,
+              background: 'rgba(239,68,68,0.08)',
+              border: '1px solid rgba(239,68,68,0.15)',
+              borderRadius: 'var(--radius-sm)',
+              color: 'rgba(255,255,255,0.6)',
+              cursor: 'pointer',
+              fontSize: 12.5,
+              transition: 'all var(--transition)',
+            }}
+          >
+            <span>↪</span>
+            Sign out
+          </button>
           <button
             onClick={() => setTheme(isDark ? 'light' : 'dark')}
             style={{

@@ -2,30 +2,18 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.LoginPage = LoginPage;
 const jsx_runtime_1 = require("react/jsx-runtime");
-const react_1 = require("react");
 const react_router_dom_1 = require("react-router-dom");
-const uuid_1 = require("../lib/uuid");
-const ROLES = ['admin', 'developer', 'viewer'];
+const api_1 = require("../lib/api");
 function LoginPage() {
-    const [role, setRole] = (0, react_1.useState)('admin');
-    const navigate = (0, react_router_dom_1.useNavigate)();
     const [params] = (0, react_router_dom_1.useSearchParams)();
-    const handleLogin = () => {
-        // Session token identifies the role for this session.
-        // Kept as a fixed pattern so the backend can resolve it.
-        const token = `dev-token-${role}`;
-        localStorage.setItem('session_token', token);
-        localStorage.setItem('session_role', role);
-        // device_id is a stable, permanent identity for this browser profile.
-        // It is generated once and never rotated — survives logout/login cycles.
-        // This is what the backend uses as the Jira token store key, so the
-        // user only needs to connect Jira once regardless of how many times
-        // they log out and back in.
-        if (!localStorage.getItem('device_id')) {
-            localStorage.setItem('device_id', (0, uuid_1.getSafeUUID)().replace(/-/g, '').slice(0, 16));
-        }
-        const redirect = params.get('redirect_uri') ?? '/dashboard';
-        navigate(decodeURIComponent(redirect), { replace: true });
+    const authError = params.get('auth_error');
+    const handleGoogleLogin = () => {
+        // Redirect to the backend Google OAuth endpoint.
+        // The backend will redirect to Google, then back to /api/auth/google/callback,
+        // which sets the session cookie and redirects to the frontend.
+        const redirectUri = params.get('redirect_uri') ?? '/dashboard';
+        const url = `${api_1.API_BASE_URL}/api/auth/google?redirect_uri=${encodeURIComponent(redirectUri)}`;
+        window.location.href = url;
     };
     return ((0, jsx_runtime_1.jsx)("div", { style: {
             minHeight: '100vh',
@@ -41,17 +29,17 @@ function LoginPage() {
                 borderRadius: 'var(--radius-lg)',
                 padding: '36px 32px',
                 boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
-            }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { textAlign: 'center', marginBottom: 28 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 36, marginBottom: 10 }, children: "\uD83D\uDD25" }), (0, jsx_runtime_1.jsx)("h1", { style: { fontSize: 20, fontWeight: 700, color: 'var(--text)', marginBottom: 6 }, children: "Airbrake Portal" }), (0, jsx_runtime_1.jsx)("p", { style: { fontSize: 13, color: 'var(--text-muted)' }, children: "Dev login \u2014 pick a role to continue" })] }), (0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 16 }, children: [(0, jsx_runtime_1.jsx)("label", { htmlFor: "role-select", style: { display: 'block', fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }, children: "Role" }), (0, jsx_runtime_1.jsx)("select", { id: "role-select", value: role, onChange: (e) => setRole(e.target.value), style: {
-                                width: '100%',
-                                padding: '10px 12px',
-                                background: 'var(--input-bg)',
-                                border: '1px solid var(--input-border)',
-                                borderRadius: 'var(--radius-sm)',
-                                color: 'var(--text)',
-                                fontSize: 14,
-                                outline: 'none',
-                                cursor: 'pointer',
-                            }, children: ROLES.map((r) => ((0, jsx_runtime_1.jsx)("option", { value: r, children: r.charAt(0).toUpperCase() + r.slice(1) }, r))) })] }), (0, jsx_runtime_1.jsx)("button", { onClick: handleLogin, style: {
+            }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { textAlign: 'center', marginBottom: 28 }, children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 36, marginBottom: 10 }, children: "\uD83D\uDD25" }), (0, jsx_runtime_1.jsx)("h1", { style: { fontSize: 20, fontWeight: 700, color: 'var(--text)', marginBottom: 6 }, children: "Airbrake Portal" }), (0, jsx_runtime_1.jsx)("p", { style: { fontSize: 13, color: 'var(--text-muted)' }, children: "Sign in to continue" })] }), authError && ((0, jsx_runtime_1.jsx)("div", { style: {
+                        marginBottom: 16,
+                        padding: '10px 14px',
+                        background: 'rgba(239,68,68,0.1)',
+                        border: '1px solid rgba(239,68,68,0.3)',
+                        borderRadius: 'var(--radius-sm)',
+                        fontSize: 13,
+                        color: '#ef4444',
+                    }, children: authError === 'access_denied'
+                        ? 'Access denied. Your account is not provisioned for this application.'
+                        : `Authentication failed: ${authError.replace(/_/g, ' ')}` })), (0, jsx_runtime_1.jsxs)("button", { onClick: handleGoogleLogin, style: {
                         width: '100%',
                         padding: '11px',
                         background: 'var(--accent)',
@@ -62,6 +50,10 @@ function LoginPage() {
                         fontWeight: 600,
                         cursor: 'pointer',
                         transition: 'background var(--transition)',
-                    }, children: "Sign in" })] }) }));
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 8,
+                    }, children: [(0, jsx_runtime_1.jsxs)("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", children: [(0, jsx_runtime_1.jsx)("path", { d: "M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z", fill: "#4285F4" }), (0, jsx_runtime_1.jsx)("path", { d: "M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z", fill: "#34A853" }), (0, jsx_runtime_1.jsx)("path", { d: "M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z", fill: "#FBBC05" }), (0, jsx_runtime_1.jsx)("path", { d: "M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z", fill: "#EA4335" })] }), "Continue with Google"] })] }) }));
 }
 //# sourceMappingURL=LoginPage.js.map

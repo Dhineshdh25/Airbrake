@@ -6,7 +6,8 @@
  *    local Vite-proxy dev mode).
  *  - HTTP error codes (4xx / 5xx) are turned into typed ApiError instances
  *    instead of silently returning bad JSON.
- *  - Auth headers can be injected in one place when needed.
+ *  - Session cookies are included automatically (credentials: 'include').
+ *  - CSRF token is attached for state-changing methods.
  */
 export declare const API_BASE_URL: string;
 /** The Airbrake frontend base URL, baked in at build time.
@@ -20,6 +21,8 @@ export declare const FRONTEND_BASE_URL: string;
  */
 export declare function buildAirbrakeErrorUrl(errorHash: string, projectName?: string): string;
 export declare function getDeviceId(): string;
+/** Register the 401 handler. Called once by AuthProvider on mount. */
+export declare function setOnUnauthorized(handler: () => void): void;
 export declare class ApiError extends Error {
     readonly status: number;
     readonly statusText: string;
@@ -34,8 +37,10 @@ export declare class ApiError extends Error {
 /**
  * Drop-in replacement for `fetch()` that:
  *  1. Prepends API_BASE_URL to every relative path.
- *  2. Throws `ApiError` for non-2xx responses.
- *  3. Forwards all other fetch options unchanged.
+ *  2. Includes credentials (cookies) for cross-origin requests.
+ *  3. Attaches CSRF token for state-changing methods.
+ *  4. Throws `ApiError` for non-2xx responses.
+ *  5. Notifies the auth layer on 401.
  */
 export declare function apiFetch(path: string, init?: RequestInit): Promise<Response>;
 /** GET and parse JSON. */
