@@ -4,10 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Airbrake Monitoring Portal</title>
+    <script>
+      // SPA redirect for S3 static hosting with HashRouter.
+      (function () {
+        var path = window.location.pathname;
+        if (path && path !== '/' && !window.location.hash) {
+          var search = window.location.search || '';
+          window.location.replace('/' + search + '#' + path);
+        }
+      })();
+    </script>
     <script type="module" crossorigin src="/assets/index-B3J4ZS_H.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-nvZxixTX.css">
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"></div>
+
   </body>
 </html>
