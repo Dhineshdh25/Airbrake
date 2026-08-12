@@ -4,6 +4,7 @@ exports.Layout = Layout;
 const jsx_runtime_1 = require("react/jsx-runtime");
 const react_router_dom_1 = require("react-router-dom");
 const ThemeContext_1 = require("../theme/ThemeContext");
+const AuthContext_1 = require("../auth/AuthContext");
 const NAV_LINKS = [
     { to: '/dashboard', label: 'Dashboard', icon: '▦' },
     { to: '/logs', label: 'Log Stream', icon: '≡' },
@@ -13,8 +14,14 @@ const NAV_LINKS = [
 ];
 function Layout({ children }) {
     const { theme, setTheme } = (0, ThemeContext_1.useTheme)();
+    const { user, logout } = (0, AuthContext_1.useAuth)();
+    const navigate = (0, react_router_dom_1.useNavigate)();
     const location = (0, react_router_dom_1.useLocation)();
     const isDark = theme === 'dark';
+    const handleLogout = async () => {
+        await logout();
+        navigate('/auth/login', { replace: true });
+    };
     return ((0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', minHeight: '100vh', background: 'var(--bg)', color: 'var(--text)', fontFamily: 'var(--font)' }, children: [(0, jsx_runtime_1.jsxs)("nav", { style: {
                     width: 220,
                     background: 'var(--sidebar-bg)',
@@ -54,19 +61,41 @@ function Layout({ children }) {
                                             background: 'var(--accent)',
                                             boxShadow: '0 0 6px var(--accent)',
                                         } }))] }, to));
-                        }) }), (0, jsx_runtime_1.jsx)("div", { style: { padding: '14px 10px', borderTop: '1px solid var(--sidebar-border)' }, children: (0, jsx_runtime_1.jsxs)("button", { onClick: () => setTheme(isDark ? 'light' : 'dark'), style: {
-                                width: '100%',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: 8,
-                                padding: '8px 12px',
-                                background: 'rgba(255,255,255,0.05)',
-                                border: '1px solid rgba(255,255,255,0.08)',
-                                borderRadius: 'var(--radius-sm)',
-                                color: 'rgba(255,255,255,0.6)',
-                                cursor: 'pointer',
-                                fontSize: 12.5,
-                                transition: 'all var(--transition)',
-                            }, children: [(0, jsx_runtime_1.jsx)("span", { children: isDark ? '☀️' : '🌙' }), isDark ? 'Light mode' : 'Dark mode'] }) })] }), (0, jsx_runtime_1.jsx)("main", { style: { flex: 1, padding: '32px 36px', overflowY: 'auto', minWidth: 0 }, children: children })] }));
+                        }) }), (0, jsx_runtime_1.jsxs)("div", { style: { padding: '14px 10px', borderTop: '1px solid var(--sidebar-border)' }, children: [user && ((0, jsx_runtime_1.jsx)("div", { style: {
+                                    marginBottom: 8,
+                                    padding: '6px 12px',
+                                    fontSize: 11.5,
+                                    color: 'rgba(255,255,255,0.5)',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                }, children: user.email })), (0, jsx_runtime_1.jsxs)("button", { onClick: handleLogout, style: {
+                                    width: '100%',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 8,
+                                    padding: '8px 12px',
+                                    marginBottom: 6,
+                                    background: 'rgba(239,68,68,0.08)',
+                                    border: '1px solid rgba(239,68,68,0.15)',
+                                    borderRadius: 'var(--radius-sm)',
+                                    color: 'rgba(255,255,255,0.6)',
+                                    cursor: 'pointer',
+                                    fontSize: 12.5,
+                                    transition: 'all var(--transition)',
+                                }, children: [(0, jsx_runtime_1.jsx)("span", { children: "\u21AA" }), "Sign out"] }), (0, jsx_runtime_1.jsxs)("button", { onClick: () => setTheme(isDark ? 'light' : 'dark'), style: {
+                                    width: '100%',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 8,
+                                    padding: '8px 12px',
+                                    background: 'rgba(255,255,255,0.05)',
+                                    border: '1px solid rgba(255,255,255,0.08)',
+                                    borderRadius: 'var(--radius-sm)',
+                                    color: 'rgba(255,255,255,0.6)',
+                                    cursor: 'pointer',
+                                    fontSize: 12.5,
+                                    transition: 'all var(--transition)',
+                                }, children: [(0, jsx_runtime_1.jsx)("span", { children: isDark ? '☀️' : '🌙' }), isDark ? 'Light mode' : 'Dark mode'] })] })] }), (0, jsx_runtime_1.jsx)("main", { style: { flex: 1, padding: '32px 36px', overflowY: 'auto', minWidth: 0 }, children: children })] }));
 }
 //# sourceMappingURL=Layout.js.map

@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
-import { HashRouter, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
+import { HashRouter, Navigate, Route, Routes, useNavigate, useSearchParams } from 'react-router-dom';
+import { AuthProvider, useAuth } from './auth/AuthContext';
 import { ProtectedRoute } from './auth/ProtectedRoute';
 import { LoginPage } from './auth/LoginPage';
 import { ThemeProvider } from './theme/ThemeContext';
@@ -10,13 +11,7 @@ import { BreaksList } from './breaks/BreaksList';
 import { ErrorDetail } from './breaks/ErrorDetail';
 import { JiraOverview } from './jira/JiraOverview';
 import { Settings } from './settings/Settings';
-import type { Role } from '@portal/shared';
-
-function getRole(): Role {
-  const stored = localStorage.getItem('session_role');
-  if (stored === 'admin' || stored === 'developer' || stored === 'viewer') return stored;
-  return 'viewer';
-}
+import { setOnUnauthorized } from './lib/api';
 
 /**
  * Handles OAuth callback redirects from the backend.
@@ -26,37 +21,69 @@ function getRole(): Role {
  *
  * The backend redirects to:
  *   https://airbrake.s3-website.../  ?jira_connected=true
+ *   https://airbrake.s3-website.../  ?auth_success=true&redirect=/dashboard
  *
  * The SPA loads at root, this handler reads the query params, then
- * navigates to /#/settings?jira_connected=true via React Router.
+ * navigates within React Router.
  */
 function OAuthRedirectHandler() {
   const navigate = useNavigate();
+  const { refresh } = useAuth();
 
   useEffect(() => {
     // Read params from the real URL query string (before the hash)
     const params = new URLSearchParams(window.location.search);
     const jiraConnected = params.get('jira_connected');
     const jiraError     = params.get('jira_error');
+    const authSuccess   = params.get('auth_success');
+    const authError     = params.get('auth_error');
+    const authRedirect  = params.get('redirect');
 
-    if (!jiraConnected && !jiraError) return;
+    if (!jiraConnected && !jiraError && !authSuccess && !authError) return;
 
     // Clean the real URL (remove query params — they're now handled by React)
     window.history.replaceState({}, '', window.location.pathname);
 
-    // Navigate to settings within the SPA, preserving the OAuth result param
+    // Handle auth success — refresh the session state
+    if (authSuccess) {
+      refresh();
+      const target = authRedirect ?? '/dashboard';
+      navigate(target, { replace: true });
+      return;
+    }
+
+    // Handle auth error — redirect to login with error
+    if (authError) {
+      navigate(`/auth/login?auth_error=${authError}`, { replace: true });
+      return;
+    }
+
+    // Handle Jira OAuth result
     if (jiraConnected) {
       navigate('/settings?jira_connected=true', { replace: true });
     } else if (jiraError) {
       navigate(`/settings?jira_error=${jiraError}`, { replace: true });
     }
-  }, [navigate]);
+  }, [navigate, refresh]);
 
   return null;
 }
 
+/**
+ * Wires the API layer's 401 handler to the auth context.
+ */
+function AuthApiWiring() {
+  const { onUnauthorized } = useAuth();
+  useEffect(() => {
+    setOnUnauthorized(onUnauthorized);
+  }, [onUnauthorized]);
+  return null;
+}
+
 function AppShell() {
-  const role = getRole();
+  const { user } = useAuth();
+  const role = user?.role ?? 'viewer';
+
   return (
     <Layout>
       <OAuthRedirectHandler />
@@ -73,22 +100,31 @@ function AppShell() {
   );
 }
 
+function LoginWithError() {
+  const [params] = useSearchParams();
+  // Forward auth_error from the real URL into the login page
+  return <LoginPage />;
+}
+
 export default function App() {
   return (
     <ThemeProvider>
-      <HashRouter>
-        <Routes>
-          <Route path="/auth/login" element={<LoginPage />} />
-          <Route
-            path="/*"
-            element={
-              <ProtectedRoute>
-                <AppShell />
-              </ProtectedRoute>
-            }
-          />
-        </Routes>
-      </HashRouter>
+      <AuthProvider>
+        <HashRouter>
+          <AuthApiWiring />
+          <Routes>
+            <Route path="/auth/login" element={<LoginWithError />} />
+            <Route
+              path="/*"
+              element={
+                <ProtectedRoute>
+                  <AppShell />
+                </ProtectedRoute>
+              }
+            />
+          </Routes>
+        </HashRouter>
+      </AuthProvider>
     </ThemeProvider>
   );
 }

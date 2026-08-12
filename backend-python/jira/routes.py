@@ -10,8 +10,8 @@ Routes:
   POST /api/jira/create     — create a Jira ticket from error data
   POST /api/jira/disconnect — remove the current user's stored token
 
-All routes that need an authenticated user require a valid Bearer token in
-the Authorization header (same DEV_SESSIONS pattern used by the rest of app.py).
+All routes that need an authenticated user require a valid server-side session
+(cookie-based authentication via the auth middleware).
 """
 
 import json
@@ -42,6 +42,8 @@ jira_bp = Blueprint("jira", __name__, url_prefix="/api/jira")
 # ── Legacy shared userIds that must never hold Jira tokens ───────────────────
 # These were the old role-based keys used before per-device isolation.
 # Any token stored under these keys is visible to ALL users on that role.
+# Device-based tokens (device-*) are migrated transparently on first access
+# by _get_valid_user_id_with_token() — no bulk cleanup needed for those.
 _LEGACY_SHARED_USER_IDS = {"dev-admin", "dev-developer", "dev-viewer"}
 
 
@@ -173,12 +175,10 @@ def _pop_oauth_state(state: str) -> str | None:
         logger.exception("[Jira State] DB lookup failed: %s", exc)
         return None
 
-# ── Helpers (inline — avoids importing from app.py to keep isolation) ─────────
-_DEV_SESSIONS = {
-    "dev-token-admin":     {"userId": "dev-admin",     "role": "admin"},
-    "dev-token-developer": {"userId": "dev-developer", "role": "developer"},
-    "dev-token-viewer":    {"userId": "dev-viewer",    "role": "viewer"},
-}
+# ── Helpers — delegates to central auth middleware ────────────────────────────
+# Import the shared auth system so Jira routes use the same session resolution
+# (real sessions via cookie OR dev tokens when DEV_AUTH=1).
+from auth.middleware import get_current_user as _auth_get_current_user, _is_dev_auth_enabled
 
 
 def _is_production_environment() -> bool:
@@ -189,64 +189,40 @@ def _is_production_environment() -> bool:
 def _get_session() -> dict | None:
     """Return the session dict for the current request, or None.
 
-    Checks (in order):
-    1. Bearer token in Authorization header
-    2. Token as query parameter (for browser redirects that lose headers)
+    Uses the shared auth middleware for session resolution.
+    Falls back to query parameter token for browser redirects (OAuth callback).
     """
-    auth = request.headers.get("Authorization", "")
-    logger.info('[Jira Routes] Authorization header present=%s', bool(auth))
+    user = _auth_get_current_user()
+    if user:
+        return {"userId": user["id"], "role": user["role"]}
 
-    token = None
-    if auth.startswith("Bearer "):
-        token = auth[7:].strip()
-        logger.info('[Jira Routes] Extracted bearer token=%s', token[:20] + ('...' if len(token) > 20 else ''))
-    elif auth:
-        logger.warning('[Jira Routes] Authorization header was present but not in Bearer format')
+    # Fallback for browser redirects that cannot attach headers/cookies
+    token_param = (request.args.get("token") or "").strip()
+    if token_param and _is_dev_auth_enabled():
+        from auth.middleware import _DEV_SESSIONS, _resolve_dev_session
+        dev_user = _resolve_dev_session(token_param)
+        if dev_user:
+            return {"userId": dev_user["id"], "role": dev_user["role"]}
 
-    if not token:
-        # Fallback for browser redirects (no headers preserved)
-        token = (request.args.get("token") or "").strip()
-        logger.info('[Jira Routes] Query token present=%s', bool(token))
-
-    if not token:
-        logger.warning('[Jira Routes] No auth token supplied for Jira request')
-        return None
-
-    ses = _DEV_SESSIONS.get(token)
-    if ses:
-        if _is_production_environment():
-            logger.warning('[Jira Routes] Dev auth token rejected in production environment token=%s', token[:20] + ('...' if len(token) > 20 else ''))
-            return None
-        logger.info('[Jira Routes] Auth session resolved userId=%s role=%s', ses.get('userId'), ses.get('role'))
-        return ses
-
-    logger.warning('[Jira Routes] Unknown or invalid auth token supplied token=%s', token[:20] + ('...' if len(token) > 20 else ''))
     return None
 
 
 def _require_auth():
     """Return (user_id, None) or (None, error_response).
 
-    user_id is the stable identity used as the Jira token store key.
-    It is derived from X-Device-ID when present (stable across logouts),
-    otherwise falls back to the role-based userId from the session token.
+    user_id is the authenticated Airbrake user's ID from the server session.
+    This is the stable identity used as the Jira token store key.
+
+    The user_id is ALWAYS resolved from the server-side session — never from
+    X-Device-ID or frontend-supplied data.
     """
     session = _get_session()
     if not session:
         logger.warning('[Jira Routes] _require_auth failed: missing or invalid session/token')
         return None, (jsonify({"error": "Unauthorized", "reason": "missing_or_invalid_token"}), 401)
 
-    # X-Device-ID is a permanent per-browser identifier set by LoginPage.tsx.
-    # Using it means the Jira token survives logout/login cycles on the same
-    # browser — the user only needs to connect Jira once per device.
-    device_id = request.headers.get("X-Device-ID", "").strip()
-    if device_id:
-        user_id = f"device-{device_id}"
-        logger.info('[Jira Routes] Authenticated user_id=%s role=%s device_id=%s', user_id, session.get('role'), device_id)
-    else:
-        user_id = session["userId"]
-        logger.info('[Jira Routes] Authenticated user_id=%s role=%s device_id=<none>', user_id, session.get('role'))
-
+    user_id = session["userId"]
+    logger.info('[Jira Routes] Authenticated user_id=%s role=%s', user_id, session.get('role'))
     return user_id, None
 
 
@@ -256,54 +232,81 @@ def _get_valid_user_id_with_token():
     or (None, error_response).
 
     Tries in order:
-      1. device-<X-Device-ID>  — the normal per-device stable key
-      2. session role userId   — fallback for requests where X-Device-ID was stripped
-      3. Any token in the DB   — last resort so the Jira page always works for a
-                                 connected user regardless of header stripping
+      1. Authenticated Airbrake user_id from session
+      2. Legacy device-<X-Device-ID> key (migration compatibility)
 
-    This prevents 401 on the Jira search page when the user is connected in
-    Settings but X-Device-ID is absent from the request (e.g. stripped by a
-    proxy or CORS preflight issue).
+    If the user has a token under the legacy device-based key but not
+    under their real user_id, we transparently migrate it.
     """
     session = _get_session()
     if not session:
         return None, (jsonify({"error": "Unauthorized"}), 401)
 
+    user_id = session["userId"]
+
+    # Primary: check for token under the authenticated user_id
+    token = get_token(user_id)
+    if token:
+        return user_id, None
+
+    # Migration path: check legacy device-based key and migrate if found
     device_id = request.headers.get("X-Device-ID", "").strip()
-
-    # Candidates to try in priority order
-    candidates = []
     if device_id:
-        candidates.append(f"device-{device_id}")
-    candidates.append(session["userId"])
+        legacy_key = f"device-{device_id}"
+        legacy_token = get_token(legacy_key)
+        if legacy_token:
+            logger.info(
+                "[Jira Routes] Migrating Jira token from legacy key=%s to user_id=%s",
+                legacy_key, user_id,
+            )
+            _migrate_token(legacy_key, user_id, legacy_token)
+            return user_id, None
 
-    for uid in candidates:
-        token = get_token(uid)
-        if token:
-            return uid, None
+    return user_id, None  # let caller handle missing token
 
-    # Last resort: use any connected token in the DB (read-only Jira page use)
+
+def _migrate_token(old_key: str, new_key: str, token_data: dict) -> None:
+    """
+    Migrate a Jira token from a legacy key to the new authenticated user_id.
+
+    Copies the token data under the new key, then deletes the old row.
+    Preserves all token credentials (access_token, refresh_token, etc.).
+    """
     try:
-        from db import query as _q
-        rows = _q(
-            "SELECT metadata FROM projects_data "
-            "WHERE row_type = 'jira_token' "
-            "ORDER BY created_at DESC LIMIT 1"
+        save_token(
+            user_id=new_key,
+            access_token=token_data.get("access_token", ""),
+            refresh_token=token_data.get("refresh_token", ""),
+            expires_in=None,  # preserve existing expires_at via direct copy below
+            cloud_id=token_data.get("cloud_id", ""),
+            atlassian_account_id=token_data.get("atlassian_account_id", ""),
+            atlassian_email=token_data.get("atlassian_email", ""),
+            site_url=token_data.get("site_url", ""),
         )
-        if rows:
-            import json as _j
-            raw = rows[0].get("metadata")
-            meta = _j.loads(raw) if isinstance(raw, str) else (raw or {})
-            uid = meta.get("user_id", "")
-            if uid:
-                return uid, None
-    except Exception:
-        pass
+        # If the original had a specific expires_at, update the new row
+        if token_data.get("expires_at"):
+            from db import query as _q
+            rows = _q(
+                "SELECT id, metadata FROM projects_data "
+                "WHERE row_type = 'jira_token' AND metadata::jsonb->>'user_id' = %s "
+                "ORDER BY created_at DESC LIMIT 1",
+                (new_key,),
+            )
+            if rows:
+                import json as _j
+                raw = rows[0].get("metadata")
+                meta = _j.loads(raw) if isinstance(raw, str) else (raw or {})
+                meta["expires_at"] = token_data["expires_at"]
+                execute(
+                    "UPDATE projects_data SET metadata = %s WHERE id = %s",
+                    (_j.dumps(meta), rows[0]["id"]),
+                )
 
-    # No token found at all
-    if device_id:
-        return f"device-{device_id}", None  # let caller handle missing token
-    return session["userId"], None
+        # Delete the old key
+        delete_token(old_key)
+        logger.info("[Jira Routes] Token migrated from %s to %s", old_key, new_key)
+    except Exception as exc:
+        logger.warning("[Jira Routes] Token migration failed (non-fatal): %s", exc)
 
 
 def _frontend_url() -> str:
@@ -991,21 +994,20 @@ def jira_search():
     )
     
     try:
-        # Get the user's token
-        session = _get_session()
-        candidate_user_ids = [user_id]
-        if session and session.get("userId") and session.get("userId") not in candidate_user_ids:
-            candidate_user_ids.append(session["userId"])
+        # Get the user's token using the authenticated user_id
+        token = get_token(user_id)
 
-        token = None
-        token_user_id = None
-        for candidate_id in candidate_user_ids:
-            token = get_token(candidate_id)
-            if token:
-                token_user_id = candidate_id
-                break
+        # Migration path: check legacy device-based key
+        if not token:
+            device_id = request.headers.get("X-Device-ID", "").strip()
+            if device_id:
+                legacy_key = f"device-{device_id}"
+                token = get_token(legacy_key)
+                if token:
+                    logger.info("[Jira Routes] search: migrating token from %s to %s", legacy_key, user_id)
+                    _migrate_token(legacy_key, user_id, token)
 
-        logger.info('[Jira Routes] Jira token lookup for user_id=%s candidates=%s', user_id, candidate_user_ids)
+        logger.info('[Jira Routes] Jira token lookup for user_id=%s', user_id)
         if not token:
             return jsonify({"error": "Jira not connected. Please connect your Jira account in Settings.", "needs_auth": True}), 401
         

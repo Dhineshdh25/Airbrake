@@ -390,6 +390,10 @@ except Exception as exc:
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 
+# ── Authentication (Google OAuth 2.0 / OIDC) ─────────────────────────────────
+from auth import auth_bp, csrf_protect, get_current_user  # noqa: E402
+app.register_blueprint(auth_bp)   # registers all /api/auth/* routes
+
 # ── Jira OAuth integration (Phase 1) ─────────────────────────────────────────
 from jira import jira_bp          # noqa: E402
 app.register_blueprint(jira_bp)   # registers all /api/jira/* routes
@@ -482,18 +486,29 @@ def attach_request_context():
     g.request_started_at = time.monotonic()
     print(f"[req:{request_id}] {request.method} {request.path}")
 
+    # CSRF protection — Double-Submit Cookie
+    csrf_result = csrf_protect()
+    if csrf_result is not None:
+        return csrf_result
+
 
 @app.errorhandler(Exception)
 def handle_unexpected_error(exc):
     import traceback as _tb_mod
+    from werkzeug.exceptions import HTTPException
+
+    # HTTP exceptions (4xx, 5xx) — return proper status code, no traceback
+    if isinstance(exc, HTTPException):
+        logger.warning("[app] HTTPException — %s %s → %d %s",
+                       request.method, request.path, exc.code, exc.name)
+        return jsonify({"error": exc.name}), exc.code
+
+    # Unexpected exceptions — log traceback server-side, return safe 500
     tb_str = _tb_mod.format_exc()
     print(f"[app] Unhandled exception — {type(exc).__name__}: {exc}")
     print(tb_str)
     return jsonify({
         "error": "Internal server error",
-        "exception": type(exc).__name__,
-        "message": str(exc),
-        "traceback": tb_str,
     }), 500
 
 # The single DSQL table used for ALL data
@@ -533,28 +548,43 @@ def _configure_debug_logging() -> None:
 _configure_debug_logging()
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
-ALLOWED_ORIGINS = {
-    "http://airbrake.s3-website-us-east-1.amazonaws.com",
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "http://localhost:3002",
-    "http://localhost:3003",
-    "http://localhost:3004",
-    "http://localhost:3005",
-}
+# Origins allowed to make credentialed requests (cookies).
+# Configurable via ALLOWED_ORIGINS env var (comma-separated).
+# Falls back to a safe default set for this project.
+_DEFAULT_ORIGINS = (
+    "http://airbrake.s3-website-us-east-1.amazonaws.com,"
+    "http://localhost:3000"
+)
+
+ALLOWED_ORIGINS: set[str] = set(
+    origin.strip()
+    for origin in os.environ.get("ALLOWED_ORIGINS", _DEFAULT_ORIGINS).split(",")
+    if origin.strip()
+)
+
+# Headers the frontend is allowed to send
+_ALLOWED_HEADERS = "Content-Type, X-CSRF-Token, X-Device-ID"
 
 
-#new version check
 @app.after_request
 def add_cors_headers(response):
     origin = request.headers.get("Origin", "")
-    allow_origin = origin if origin in ALLOWED_ORIGINS else "*"
-    response.headers["Access-Control-Allow-Origin"] = allow_origin
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-API-Key, X-Device-ID"
-    response.headers["Access-Control-Max-Age"] = "86400"
+
     if origin in ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Vary"] = "Origin"
+    else:
+        # Unknown origin — no CORS headers at all.
+        # This blocks credentialed cross-origin requests from untrusted sites.
+        # Direct (non-browser) requests still work — they don't send an Origin header.
+        pass
+
+    # These are safe to set unconditionally (they only matter when Allow-Origin is present)
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = _ALLOWED_HEADERS
+    response.headers["Access-Control-Max-Age"] = "86400"
+
     if hasattr(g, "request_started_at"):
         elapsed_ms = (time.monotonic() - g.request_started_at) * 1000
         print(f"[req:{getattr(g, 'request_id', 'n/a')}] completed status={response.status_code} elapsed_ms={elapsed_ms:.2f}")
@@ -568,18 +598,20 @@ def options_handler(p=""):
 
 
 # ── Auth helpers ──────────────────────────────────────────────────────────────
-DEV_SESSIONS = {
-    "dev-token-admin":     {"userId": "dev-admin",     "role": "admin"},
-    "dev-token-developer": {"userId": "dev-developer", "role": "developer"},
-    "dev-token-viewer":    {"userId": "dev-viewer",    "role": "viewer"},
-}
+# DEV_SESSIONS is only active when DEV_AUTH=1 and NOT in production.
+# In production, only real sessions (cookie-based) are accepted.
+from auth.middleware import get_current_user as _get_current_user_middleware, _is_dev_auth_enabled, _DEV_SESSIONS
 
 
 def get_session():
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        token = auth[7:].strip()
-        return DEV_SESSIONS.get(token)
+    """Resolve the current session from cookie or Bearer token.
+
+    Returns {"userId": str, "role": str} or None.
+    Compatible with existing require_role() callers.
+    """
+    user = _get_current_user_middleware()
+    if user:
+        return {"userId": user["id"], "role": user["role"]}
     return None
 
 
@@ -591,6 +623,11 @@ def require_role(*roles):
     if session["role"] not in roles:
         return None, (jsonify({"error": "Forbidden"}), 403)
     return session, None
+
+
+# Keep DEV_SESSIONS available for backward compatibility in tests,
+# but it is only consulted via auth.middleware when DEV_AUTH=1
+DEV_SESSIONS = _DEV_SESSIONS if _is_dev_auth_enabled() else {}
 
 
 # ── Serialization helper ──────────────────────────────────────────────────────

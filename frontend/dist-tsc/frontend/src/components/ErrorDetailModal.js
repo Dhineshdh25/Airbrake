@@ -410,6 +410,7 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
             const j = await r.json();
             setJiraTicket({ key: j.key, url: j.url });
             setJiraStatus('created');
+<<<<<<< Updated upstream
             // Link this specific occurrence to the Jira ticket.
             // resolvedLogId is always a specific row UUID — never an error_hash.
             // This ensures the ticket badge shows only on THIS occurrence.
@@ -422,6 +423,31 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
                         issue_key: j.key,
                         issue_url: j.url ?? '',
                     }),
+=======
+            // Link the Jira ticket to the log row so the global ticket-status
+            // endpoint can find it when any other user opens this error,
+            // and so the webhook pipeline can resolve it when the ticket is Done.
+            if (j.key) {
+                // Use targetLogId if available (set when opened from BreaksList).
+                // If not available, use the error hash as a stable identifier — the
+                // backend will find the most recent log row for that hash.
+                const linkBody = {
+                    issue_key: j.key,
+                    issue_url: j.url ?? '',
+                };
+                if (targetLogId) {
+                    linkBody.log_id = targetLogId;
+                }
+                else if (effectiveErrorHash) {
+                    linkBody.error_hash = effectiveErrorHash;
+                    if (projectName)
+                        linkBody.project_name = projectName;
+                }
+                (0, api_1.apiFetch)('/api/jira/link', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(linkBody),
+>>>>>>> Stashed changes
                 }).catch(() => { });
             }
         }

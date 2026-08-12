@@ -6,7 +6,8 @@
  *    local Vite-proxy dev mode).
  *  - HTTP error codes (4xx / 5xx) are turned into typed ApiError instances
  *    instead of silently returning bad JSON.
- *  - Auth headers can be injected in one place when needed.
+ *  - Session cookies are included automatically (credentials: 'include').
+ *  - CSRF token is attached for state-changing methods.
  */
 
 // __API_BASE_URL__ is injected at build time by vite.config.ts `define`.
@@ -58,6 +59,29 @@ export function getDeviceId(): string {
   return _deviceId || _ensureDeviceId();
 }
 
+// ─── CSRF helper ──────────────────────────────────────────────────────────────
+
+/** Read the csrf_token cookie (not HttpOnly, so JS can access it). */
+function getCsrfToken(): string {
+  const match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]*)/);
+  return match ? decodeURIComponent(match[1]) : '';
+}
+
+/** Methods that require CSRF token. */
+const CSRF_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+// ─── 401 handler ──────────────────────────────────────────────────────────────
+
+/** Callback invoked when a 401 is received. Set by AuthContext. */
+let _onUnauthorized: (() => void) | null = null;
+
+/** Register the 401 handler. Called once by AuthProvider on mount. */
+export function setOnUnauthorized(handler: () => void): void {
+  _onUnauthorized = handler;
+}
+
+// ─── ApiError ─────────────────────────────────────────────────────────────────
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -94,8 +118,10 @@ export class ApiError extends Error {
 /**
  * Drop-in replacement for `fetch()` that:
  *  1. Prepends API_BASE_URL to every relative path.
- *  2. Throws `ApiError` for non-2xx responses.
- *  3. Forwards all other fetch options unchanged.
+ *  2. Includes credentials (cookies) for cross-origin requests.
+ *  3. Attaches CSRF token for state-changing methods.
+ *  4. Throws `ApiError` for non-2xx responses.
+ *  5. Notifies the auth layer on 401.
  */
 export async function apiFetch(
   path: string,
@@ -104,20 +130,36 @@ export async function apiFetch(
   // Absolute URLs (e.g. external services) are passed through unchanged.
   const url = path.startsWith('http') ? path : `${API_BASE_URL}${path}`;
 
+  const method = (init?.method ?? 'GET').toUpperCase();
+
+  // Build headers
+  const headers: Record<string, string> = {
+    // Stable device identity — always present, seeded at module load time.
+    'X-Device-ID': getDeviceId(),
+  };
+
+  // Attach CSRF token for state-changing methods
+  if (CSRF_METHODS.has(method)) {
+    const csrf = getCsrfToken();
+    if (csrf) {
+      headers['X-CSRF-Token'] = csrf;
+    }
+  }
+
   const response = await fetch(url, {
     ...init,
+    credentials: 'include',
     headers: {
-      // Attach auth token when present (dev token or real JWT).
-      ...(localStorage.getItem('session_token')
-        ? { Authorization: `Bearer ${localStorage.getItem('session_token')}` }
-        : {}),
-      // Stable device identity — always present, seeded at module load time.
-      'X-Device-ID': getDeviceId(),
+      ...headers,
       ...(init?.headers ?? {}),
     },
   });
 
   if (!response.ok) {
+    // Notify auth layer on 401 so it can redirect to login
+    if (response.status === 401 && _onUnauthorized) {
+      _onUnauthorized();
+    }
     throw new ApiError(response.status, response.statusText);
   }
 
