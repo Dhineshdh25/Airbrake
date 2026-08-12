@@ -16,6 +16,7 @@ export interface ErrorRow {
 }
 
 interface Occurrence {
+  id?: string | null;
   file_name: string | null;
   timestamp: string | null;
   failure_count: number;
@@ -317,14 +318,20 @@ export function ErrorDetailModal({
 
   // ── The specific log row id to target for resolve/reopen ─────────────────
   // When opened from BreaksList, row.representative_id is the most-recent
-  // open log row id from the grouped query. We send it on every resolve/reopen
-  // call so only THAT row changes status, not every row sharing the hash.
+  // open log row id from the grouped query.
   const targetLogId: string | null = row?.representative_id ?? null;
 
   // ── Derived ──────────────────────────────────────────────────────────────
   const projectName = data?.project_name ?? row?.project ?? projectNameProp ?? '';
   const errorMessage = data?.error_message ?? row?.error ?? '';
   const errorStatus = data?.error_status ?? null;
+
+  // The resolved log ID for Jira operations — always a specific row UUID,
+  // never an error_hash. This ensures tickets link to exactly the occurrence
+  // the user is looking at, not all occurrences sharing the error text.
+  const resolvedLogId: string | null =
+    targetLogId
+    ?? (data?.occurrences?.[0]?.id ?? null);
 
   const isResolved = errorStatus === 'resolved';
   const isReopened = errorStatus === 'reopened';
@@ -528,7 +535,11 @@ export function ErrorDetailModal({
   // user created it. Both User A and User B see the same ticket info.
   useEffect(() => {
     if (!effectiveErrorHash) return;
-    apiFetch(`/api/jira/ticket-status?error_hash=${encodeURIComponent(effectiveErrorHash)}`)
+    // Pass log_id (the specific occurrence) so only THIS occurrence shows a
+    // ticket badge — not all occurrences sharing the same error_hash.
+    // Fire after data loads so resolvedLogId is available.
+    if (!resolvedLogId) return;
+    apiFetch(`/api/jira/ticket-status?log_id=${encodeURIComponent(resolvedLogId)}`)
       .then(r => r.json())
       .then((j: { has_ticket: boolean; issue_key?: string; issue_url?: string }) => {
         if (j.has_ticket && j.issue_key) {
@@ -537,7 +548,7 @@ export function ErrorDetailModal({
         }
       })
       .catch(() => {/* non-fatal — button stays in default state */});
-  }, [effectiveErrorHash]);
+  }, [effectiveErrorHash, resolvedLogId]);
 
   // ── Jira: check OAuth connection status when modal opens ──────────────────
   useEffect(() => {
@@ -581,27 +592,18 @@ export function ErrorDetailModal({
       setJiraTicket({ key: j.key, url: j.url });
       setJiraStatus('created');
 
-      // Link the Jira ticket to the log row so the global ticket-status
-      // endpoint can find it when any other user opens this error,
-      // and so the webhook pipeline can resolve it when the ticket is Done.
-      if (j.key) {
-        // Use targetLogId if available (set when opened from BreaksList).
-        // If not available, use the error hash as a stable identifier — the
-        // backend will find the most recent log row for that hash.
-        const linkBody: Record<string, string> = {
-          issue_key: j.key,
-          issue_url: j.url ?? '',
-        };
-        if (targetLogId) {
-          linkBody.log_id = targetLogId;
-        } else if (effectiveErrorHash) {
-          linkBody.error_hash = effectiveErrorHash;
-          if (projectName) linkBody.project_name = projectName;
-        }
+      // Link this specific occurrence to the Jira ticket.
+      // resolvedLogId is always a specific row UUID — never an error_hash.
+      // This ensures the ticket badge shows only on THIS occurrence.
+      if (j.key && resolvedLogId) {
         apiFetch('/api/jira/link', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(linkBody),
+          body: JSON.stringify({
+            log_id:    resolvedLogId,
+            issue_key: j.key,
+            issue_url: j.url ?? '',
+          }),
         }).catch(() => {/* non-fatal */});
       }
     } catch (e: unknown) {

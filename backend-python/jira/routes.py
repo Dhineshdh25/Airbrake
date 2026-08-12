@@ -920,39 +920,12 @@ def jira_link():
     log_id    = (body.get("log_id") or "").strip()
     issue_key = (body.get("issue_key") or "").strip()
     issue_url = (body.get("issue_url") or "").strip()
-    error_hash   = (body.get("error_hash") or "").strip()
-    project_name = (body.get("project_name") or "").strip() or None
 
-    if not issue_key:
-        return jsonify({"error": "issue_key is required"}), 400
-
-    if not log_id and not error_hash:
-        return jsonify({"error": "log_id or error_hash is required"}), 400
+    if not log_id or not issue_key:
+        return jsonify({"error": "log_id and issue_key are required"}), 400
 
     try:
         from .jira_sync import mark_log_jira_key
-
-        # If no specific log_id, find the most recent log row for this error_hash
-        if not log_id and error_hash:
-            from db import query as _q
-            conditions = [
-                "row_type = 'log'",
-                "COALESCE(error_hash, MD5(LOWER(TRIM(error)))) = %s",
-            ]
-            params: list = [error_hash]
-            if project_name:
-                conditions.append("LOWER(project_name) = LOWER(%s)")
-                params.append(project_name)
-            rows = _q(
-                f"SELECT id FROM projects_data WHERE {' AND '.join(conditions)} "
-                f"ORDER BY timestamp DESC LIMIT 1",
-                tuple(params),
-            )
-            if rows:
-                log_id = rows[0]["id"]
-            else:
-                return jsonify({"error": f"No log row found for error_hash={error_hash}"}), 404
-
         mark_log_jira_key(log_id, issue_key, issue_url=issue_url)
         logger.info(
             "[Jira Routes] Linked log_id=%s to issue_key=%s by user_id=%s",
@@ -1201,23 +1174,21 @@ def jira_ticket_status():
     if err:
         return err
 
-    error_hash = (request.args.get("error_hash") or "").strip()
-    if not error_hash:
-        return jsonify({"error": "error_hash is required"}), 400
+    log_id = (request.args.get("log_id") or "").strip()
+    if not log_id:
+        return jsonify({"has_ticket": False})  # no log_id = no ticket to check
 
     try:
         from db import query as _query
-        # Look for any log row with this error_hash that has a jira_issue_key
         rows = _query(
             "SELECT metadata "
             "FROM projects_data "
             "WHERE row_type = 'log' "
-            "  AND error_hash = %s "
+            "  AND id = %s "
             "  AND metadata::jsonb ? 'jira_issue_key' "
             "  AND metadata::jsonb->>'jira_issue_key' IS NOT NULL "
-            "  AND metadata::jsonb->>'jira_issue_key' != '' "
-            "ORDER BY created_at DESC LIMIT 1",
-            (error_hash,),
+            "  AND metadata::jsonb->>'jira_issue_key' != '' ",
+            (log_id,),
         )
 
         if not rows:

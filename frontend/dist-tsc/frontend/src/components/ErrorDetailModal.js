@@ -132,13 +132,18 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
     const [jiraConnected, setJiraConnected] = (0, react_1.useState)(null); // null = unknown
     // ── The specific log row id to target for resolve/reopen ─────────────────
     // When opened from BreaksList, row.representative_id is the most-recent
-    // open log row id from the grouped query. We send it on every resolve/reopen
-    // call so only THAT row changes status, not every row sharing the hash.
+    // open log row id from the grouped query.
     const targetLogId = row?.representative_id ?? null;
     // ── Derived ──────────────────────────────────────────────────────────────
     const projectName = data?.project_name ?? row?.project ?? projectNameProp ?? '';
     const errorMessage = data?.error_message ?? row?.error ?? '';
     const errorStatus = data?.error_status ?? null;
+    // The resolved log ID for Jira operations — always a specific row UUID,
+    // never an error_hash. This ensures tickets link to exactly the occurrence
+    // the user is looking at, not all occurrences sharing the error text.
+    const resolvedLogId = targetLogId
+        ?? data?.occurrences?.[0]?.id
+        ?? null;
     const isResolved = errorStatus === 'resolved';
     const isReopened = errorStatus === 'reopened';
     // The solution stored on the error row (used/previously used)
@@ -351,7 +356,12 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
     (0, react_1.useEffect)(() => {
         if (!effectiveErrorHash)
             return;
-        (0, api_1.apiFetch)(`/api/jira/ticket-status?error_hash=${encodeURIComponent(effectiveErrorHash)}`)
+        // Pass log_id (the specific occurrence) so only THIS occurrence shows a
+        // ticket badge — not all occurrences sharing the same error_hash.
+        // Fire after data loads so resolvedLogId is available.
+        if (!resolvedLogId)
+            return;
+        (0, api_1.apiFetch)(`/api/jira/ticket-status?log_id=${encodeURIComponent(resolvedLogId)}`)
             .then(r => r.json())
             .then((j) => {
             if (j.has_ticket && j.issue_key) {
@@ -360,7 +370,7 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
             }
         })
             .catch(() => { });
-    }, [effectiveErrorHash]);
+    }, [effectiveErrorHash, resolvedLogId]);
     // ── Jira: check OAuth connection status when modal opens ──────────────────
     (0, react_1.useEffect)(() => {
         if (!effectiveErrorHash)
@@ -400,16 +410,17 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
             const j = await r.json();
             setJiraTicket({ key: j.key, url: j.url });
             setJiraStatus('created');
-            // Link the Jira ticket to the log row so the global ticket-status
-            // endpoint can find it when any other user opens this error.
-            if (j.key && targetLogId) {
+            // Link this specific occurrence to the Jira ticket.
+            // resolvedLogId is always a specific row UUID — never an error_hash.
+            // This ensures the ticket badge shows only on THIS occurrence.
+            if (j.key && resolvedLogId) {
                 (0, api_1.apiFetch)('/api/jira/link', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        log_id: targetLogId,
+                        log_id: resolvedLogId,
                         issue_key: j.key,
-                        issue_url: j.url,
+                        issue_url: j.url ?? '',
                     }),
                 }).catch(() => { });
             }
