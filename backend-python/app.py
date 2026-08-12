@@ -391,11 +391,24 @@ app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 
 # ── Authentication (Google OAuth 2.0 / OIDC) ─────────────────────────────────
-from auth import auth_bp, csrf_protect, get_current_user  # noqa: E402
+try:
+    from auth import auth_bp, csrf_protect, get_current_user  # noqa: E402
+except Exception as _auth_import_exc:
+    import traceback as _auth_tb
+    print(f"[app] CRITICAL: auth package import FAILED — {type(_auth_import_exc).__name__}: {_auth_import_exc}")
+    print(_auth_tb.format_exc())
+    # Re-raise — without auth the app cannot function correctly
+    raise
 app.register_blueprint(auth_bp)   # registers all /api/auth/* routes
 
 # ── Jira OAuth integration (Phase 1) ─────────────────────────────────────────
-from jira import jira_bp          # noqa: E402
+try:
+    from jira import jira_bp          # noqa: E402
+except Exception as _jira_import_exc:
+    import traceback as _jira_tb
+    print(f"[app] CRITICAL: jira package import FAILED — {type(_jira_import_exc).__name__}: {_jira_import_exc}")
+    print(_jira_tb.format_exc())
+    raise
 app.register_blueprint(jira_bp)   # registers all /api/jira/* routes
 
 # ── SSE (Server-Sent Events) Infrastructure ──────────────────────────────────

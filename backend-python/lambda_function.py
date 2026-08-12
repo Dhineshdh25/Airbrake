@@ -75,6 +75,11 @@ except Exception as exc:
     print(f"exception message: {exc}")
     print("full traceback:")
     print(_tb.format_exc())
+    print("--- Diagnostic: checking for critical packages on sys.path ---")
+    _base = os.path.dirname(__file__)
+    for _pkg in ("auth", "jira", "ai", "db.py", "app.py"):
+        _path = os.path.join(_base, _pkg)
+        print(f"  {_pkg}: {'EXISTS' if os.path.exists(_path) else 'MISSING'} ({_path})")
     print("Fallback app will be created.")
     print("========================================")
     app = _build_fallback_app()
@@ -82,11 +87,16 @@ else:
     print("========================================")
     print("REAL Flask app imported successfully.")
     try:
-        routes = sorted([f"{rule.rule} {sorted(rule.methods)}" for rule in _flask_app.url_map.iter_rules()])
-        print("Loaded Flask app routes:")
+        routes = sorted([f"{rule.rule} [{','.join(sorted(rule.methods - {'HEAD', 'OPTIONS'}))}]" for rule in _flask_app.url_map.iter_rules() if rule.rule != '/static/<path:filename>'])
+        print(f"Registered {len(routes)} Flask routes:")
         for route in routes:
             print(f"  {route}")
-        print("app.url_map:", _flask_app.url_map)
+        # Verify critical auth routes are registered
+        _route_paths = {rule.rule for rule in _flask_app.url_map.iter_rules()}
+        _required_routes = ["/api/auth/google", "/api/auth/google/callback", "/api/auth/me", "/api/auth/logout", "/api/health"]
+        for _r in _required_routes:
+            status = "OK" if _r in _route_paths else "MISSING"
+            print(f"  [VERIFY] {_r}: {status}")
     except Exception as route_exc:
         import traceback as _tb
         print("Failed to inspect app.url_map")
