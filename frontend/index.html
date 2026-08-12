@@ -4,6 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Airbrake Monitoring Portal</title>
+    <script>
+      // SPA redirect for S3 static hosting with HashRouter.
+      // If someone navigates to a bare path like /dashboard (no hash),
+      // S3 serves this index.html as the 404 error document.
+      // Convert the path to a hash route so React Router handles it.
+      (function () {
+        var path = window.location.pathname;
+        if (path && path !== '/' && !window.location.hash) {
+          // Preserve query string
+          var search = window.location.search || '';
+          window.location.replace('/' + search + '#' + path);
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
