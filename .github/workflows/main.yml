@@ -218,5 +218,40 @@ jobs:
           aws lambda wait function-updated \
             --function-name ${{ env.LAMBDA_FUNCTION_NAME }}
 
+      # ── Configure Lambda environment variables ─────────────────────────────────
+      # Secrets are stored in GitHub → Settings → Secrets and variables → Actions.
+      # This step ensures the Lambda always has the correct env vars after deploy.
+      # Non-secret values (endpoints, URLs) are set inline.
+      # Secret values come from GitHub Secrets — never exposed in logs.
+      - name: Configure Lambda environment variables
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          ATLASSIAN_CLIENT_ID: ${{ secrets.ATLASSIAN_CLIENT_ID }}
+          ATLASSIAN_CLIENT_SECRET: ${{ secrets.ATLASSIAN_CLIENT_SECRET }}
+        run: |
+          aws lambda update-function-configuration \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --environment '{
+              "Variables": {
+                "DSQL_ENDPOINT": "ezt2bkam5s4kjre73r25easkcu.dsql.us-east-1.on.aws",
+                "DSQL_REGION": "us-east-1",
+                "APP_ENV": "production",
+                "GOOGLE_CLIENT_ID": "'"$GOOGLE_CLIENT_ID"'",
+                "GOOGLE_CLIENT_SECRET": "'"$GOOGLE_CLIENT_SECRET"'",
+                "GOOGLE_CALLBACK_URL": "https://l7xnpjosjvyrlx55dxrwdvx5g40okeyd.lambda-url.us-east-1.on.aws/api/auth/google/callback",
+                "FRONTEND_URL": "http://airbrake.s3-website-us-east-1.amazonaws.com",
+                "ALLOWED_ORIGINS": "http://airbrake.s3-website-us-east-1.amazonaws.com",
+                "ATLASSIAN_CLIENT_ID": "'"$ATLASSIAN_CLIENT_ID"'",
+                "ATLASSIAN_CLIENT_SECRET": "'"$ATLASSIAN_CLIENT_SECRET"'",
+                "ATLASSIAN_CALLBACK_URL": "https://l7xnpjosjvyrlx55dxrwdvx5g40okeyd.lambda-url.us-east-1.on.aws/api/jira/callback"
+              }
+            }'
+
+      - name: Wait for Lambda configuration update
+        run: |
+          aws lambda wait function-updated \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }}
+
       - name: Done
         run: echo "Backend deployed successfully to Lambda!"
