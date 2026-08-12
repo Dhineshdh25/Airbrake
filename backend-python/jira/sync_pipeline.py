@@ -128,21 +128,43 @@ def run_sync_pipeline(event: dict[str, Any]) -> dict[str, Any]:
             overall_success = False
             detail = "No extractable solution found for Jira issue."
         else:
+            solution_ok = False
             try:
-                insert_solution(
+                sol_result = insert_solution(
                     error_hash=error_hash,
                     solution=solution_text,
-                    created_by="jira_sync",
+                    created_by=f"jira:{issue.get('reporter', {}).get('display_name') or 'sync'}",
                     project_name=project_name,
-                    # Pass actual error text so _get_log_row() finds the row by text.
-                    # Fall back to error_hash if text lookup fails — insert_solution
-                    # uses occurrence_error_hash as the last-resort lookup key.
                     error_message=error_message,
                 )
+                solution_ok = True
                 detail = "Solution extracted and inserted from Jira issue."
             except Exception as exc:
-                overall_success = False
-                detail = f"Solution insertion failed: {exc}"
+                exc_str = str(exc)
+                if "unique constraint" in exc_str.lower() or "duplicate key" in exc_str.lower():
+                    # Solution already in KB — still resolve the error
+                    solution_ok = True
+                    detail = "Solution already in knowledge base; resolving error."
+                    logger.info("[SyncPipeline] Duplicate solution for error_hash=%s — resolving anyway", error_hash)
+                else:
+                    overall_success = False
+                    detail = f"Solution insertion failed: {exc}"
+
+            # Resolve the log row whenever a solution exists (new or existing)
+            if solution_ok:
+                try:
+                    execute(
+                        "UPDATE projects_data "
+                        "SET error_status = 'resolved', resolved_at = NOW() "
+                        "WHERE row_type = 'log' AND id = %s "
+                        "  AND (error_status IS NULL OR error_status NOT IN ('resolved'))",
+                        (log_id,),
+                    )
+                    logger.info("[SyncPipeline] Resolved log_id=%s via Jira issue=%s", log_id, issue_key)
+                except Exception as exc:
+                    logger.exception("[SyncPipeline] Failed to resolve log_id=%s: %s", log_id, exc)
+                    overall_success = False
+                    detail += f" (resolve step failed: {exc})"
 
         details.append(detail)
 

@@ -169,7 +169,10 @@ def find_log_rows_by_jira_key(issue_key: str) -> list[dict]:
     """
     Find all Airbrake log rows linked to a Jira issue key.
 
-    Looks in the metadata JSON column for jira_issue_key = issue_key.
+    Primary: looks for metadata::jsonb->>'jira_issue_key' = issue_key.
+    Fallback: if none found, searches for rows where the error_hash of
+    any row with this jira_issue_key was stored (handles cases where the
+    link was stored on a different row than the one being queried).
     Returns list of { id, project_name, error, error_hash, error_status }.
     """
     try:

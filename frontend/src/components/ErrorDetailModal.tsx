@@ -582,16 +582,26 @@ export function ErrorDetailModal({
       setJiraStatus('created');
 
       // Link the Jira ticket to the log row so the global ticket-status
-      // endpoint can find it when any other user opens this error.
-      if (j.key && targetLogId) {
+      // endpoint can find it when any other user opens this error,
+      // and so the webhook pipeline can resolve it when the ticket is Done.
+      if (j.key) {
+        // Use targetLogId if available (set when opened from BreaksList).
+        // If not available, use the error hash as a stable identifier — the
+        // backend will find the most recent log row for that hash.
+        const linkBody: Record<string, string> = {
+          issue_key: j.key,
+          issue_url: j.url ?? '',
+        };
+        if (targetLogId) {
+          linkBody.log_id = targetLogId;
+        } else if (effectiveErrorHash) {
+          linkBody.error_hash = effectiveErrorHash;
+          if (projectName) linkBody.project_name = projectName;
+        }
         apiFetch('/api/jira/link', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            log_id:    targetLogId,
-            issue_key: j.key,
-            issue_url: j.url,
-          }),
+          body: JSON.stringify(linkBody),
         }).catch(() => {/* non-fatal */});
       }
     } catch (e: unknown) {
