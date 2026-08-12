@@ -107,6 +107,9 @@ jobs:
           # Jira OAuth integration package (Phase 1)
           cp -r jira/ package/jira/
 
+          # Auth package (Google OAuth 2.0 / session management)
+          cp -r auth/ package/auth/
+
           # Verify ai/ made it in with all expected modules
           echo "--- Contents of package/ai/ ---"
           ls -la package/ai/
@@ -114,6 +117,10 @@ jobs:
           # Verify jira/ made it in
           echo "--- Contents of package/jira/ ---"
           ls -la package/jira/
+
+          # Verify auth/ made it in
+          echo "--- Contents of package/auth/ ---"
+          ls -la package/auth/
 
           # Fail explicitly if any critical file is missing
           for f in \
@@ -138,7 +145,13 @@ jobs:
             package/jira/webhook_handler.py \
             package/jira/jira_sync.py \
             package/jira/nova_extractor.py \
-            package/jira/sync_pipeline.py; do
+            package/jira/sync_pipeline.py \
+            package/auth/__init__.py \
+            package/auth/google_oauth.py \
+            package/auth/middleware.py \
+            package/auth/routes.py \
+            package/auth/session_store.py \
+            package/auth/user_store.py; do
             if [ ! -f "$f" ]; then
               echo "MISSING: $f"
               exit 1
@@ -173,6 +186,17 @@ jobs:
           fi
 
           echo "--- ai/ verified inside lambda.zip ---"
+
+          echo "--- Verifying auth/ exists inside lambda.zip ---"
+          unzip -l ../lambda.zip | grep "^.*auth/" | head -20
+
+          # Fail if auth/ directory is not present in the zip
+          if ! unzip -l ../lambda.zip | grep -q "auth/"; then
+            echo "ERROR: auth/ directory not found in lambda.zip"
+            exit 1
+          fi
+
+          echo "--- auth/ verified inside lambda.zip ---"
 
       # ── Configure AWS credentials ─────────────────────────────────────────────
       - name: Configure AWS credentials
