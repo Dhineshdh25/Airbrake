@@ -5371,6 +5371,90 @@ def delete_error_solution(error_hash):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# BOOTSTRAP — One-time admin user creation (works only when no admin exists)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/auth/bootstrap", methods=["POST"])
+def bootstrap_admin():
+    """
+    POST /api/auth/bootstrap
+
+    Create the FIRST admin user. Only works when no admin users exist in the DB.
+    Once an admin exists, this endpoint returns 403.
+
+    Body:
+      {
+        "email": "you@example.com",
+        "oauth_provider": "google",
+        "oauth_subject": "google-sub-id"
+      }
+
+    After calling this once, the user can log in via Google OAuth.
+    Remove this endpoint after initial setup if desired.
+    """
+    # Safety check: only works if no admin users exist
+    existing_admins = query(
+        f"SELECT id FROM {TABLE} WHERE row_type = 'user' AND role = 'admin' LIMIT 1"
+    )
+    if existing_admins:
+        return jsonify({"error": "Admin user already exists. Bootstrap disabled."}), 403
+
+    body = request.get_json() or {}
+    email = (body.get("email") or "").strip()
+    oauth_provider = (body.get("oauth_provider") or "google").strip()
+    oauth_subject = (body.get("oauth_subject") or "").strip()
+
+    if not email:
+        return jsonify({"error": "email is required"}), 400
+    if not oauth_subject:
+        return jsonify({"error": "oauth_subject is required. Use /api/auth/bootstrap/google-id to find it."}), 400
+
+    user_id = str(uuid.uuid4())
+    try:
+        execute(
+            f"INSERT INTO {TABLE} (id, row_type, email, role, oauth_provider, oauth_subject, created_at) "
+            f"VALUES (%s, 'user', %s, 'admin', %s, %s, NOW())",
+            (user_id, email, oauth_provider, oauth_subject),
+        )
+        return jsonify({
+            "success": True,
+            "user_id": user_id,
+            "email": email,
+            "role": "admin",
+            "oauth_provider": oauth_provider,
+            "oauth_subject": oauth_subject,
+            "message": "Admin user created. You can now log in with Google OAuth.",
+        }), 201
+    except Exception as e:
+        return jsonify({"error": f"Failed to create user: {e}"}), 500
+
+
+@app.route("/api/auth/bootstrap/google-id")
+def bootstrap_google_id():
+    """
+    GET /api/auth/bootstrap/google-id
+
+    Helper: Shows the Google OAuth subject (sub) from the most recent
+    failed login attempt (stored as oauth state). This helps you find
+    your Google 'sub' claim for the bootstrap call.
+
+    Alternative: Use https://www.googleapis.com/oauth2/v3/userinfo
+    with your Google access token to find your 'sub' value.
+    """
+    return jsonify({
+        "instructions": "To find your Google OAuth subject ID, do the following:",
+        "steps": [
+            "1. Click 'Continue with Google' on the login page",
+            "2. Complete the Google sign-in (it will redirect back with 'access_denied')",
+            "3. Check Lambda CloudWatch logs for: '[Auth Callback] Unknown user rejected: provider=google sub=XXXX email=your@email'",
+            "4. The 'sub' value (a numeric string like '117234567890123456789') is your oauth_subject",
+            "5. Call POST /api/auth/bootstrap with that sub value",
+        ],
+        "example_curl": 'curl -X POST https://l7xnpjosjvyrlx55dxrwdvx5g40okeyd.lambda-url.us-east-1.on.aws/api/auth/bootstrap -H "Content-Type: application/json" -d \'{"email":"dhinesh.a@mpslimited.com","oauth_provider":"google","oauth_subject":"YOUR_GOOGLE_SUB_HERE"}\''
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ADMIN (users) — requires admin token
 # ═══════════════════════════════════════════════════════════════════════════════
 
