@@ -37,7 +37,7 @@ from .session_store import (
     create_session,
     delete_session,
 )
-from .user_store import find_by_oauth_subject
+from .user_store import find_by_oauth_subject, create_user
 
 logger = logging.getLogger(__name__)
 
@@ -286,16 +286,25 @@ def google_callback():
         logger.warning("[Auth Callback] Email not verified for sub=%s", subject)
         return redirect(f"{frontend_url}?auth_error=email_not_verified")
 
-    # 5. Look up user in Aurora DSQL
+    # 5. Look up user in Aurora DSQL — auto-create if not found
     user = find_by_oauth_subject(provider, subject)
 
     if not user:
-        # Unknown user — reject with 403
-        logger.warning(
-            "[Auth Callback] Unknown user rejected: provider=%s sub=%s email=%s",
+        # Auto-register: create a new user with 'viewer' role
+        # (first user ever gets 'admin' role automatically)
+        logger.info(
+            "[Auth Callback] New user — auto-registering: provider=%s sub=%s email=%s",
             provider, subject, email,
         )
-        return redirect(f"{frontend_url}?auth_error=access_denied")
+        user = create_user(
+            email=email,
+            provider=provider,
+            subject=subject,
+            role="viewer",
+        )
+        if not user:
+            logger.error("[Auth Callback] Auto-registration failed for email=%s", email)
+            return redirect(f"{frontend_url}?auth_error=registration_failed")
 
     # 6. Create server-side session
     try:

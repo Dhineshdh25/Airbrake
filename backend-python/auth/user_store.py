@@ -121,3 +121,46 @@ def find_by_email(email: str) -> Optional[dict]:
         "oauth_provider": row.get("oauth_provider", ""),
         "oauth_subject": row.get("oauth_subject", ""),
     }
+
+
+def create_user(email: str, provider: str, subject: str, role: str = "viewer") -> Optional[dict]:
+    """
+    Create a new user record in the database.
+
+    Used for auto-registration on first Google OAuth login.
+    The first user ever created gets 'admin' role; subsequent users get 'viewer'.
+
+    Returns the created user dict or None on failure.
+    """
+    import uuid
+
+    if not email or not provider or not subject:
+        logger.error("[user_store] create_user called with missing fields")
+        return None
+
+    # Check if this is the first user — if so, make them admin
+    existing_users = query(
+        f"SELECT id FROM {TABLE} WHERE row_type = 'user' LIMIT 1"
+    )
+    if not existing_users:
+        role = "admin"
+        logger.info("[user_store] First user — assigning admin role to %s", email)
+
+    user_id = str(uuid.uuid4())
+    try:
+        execute(
+            f"INSERT INTO {TABLE} (id, row_type, email, role, oauth_provider, oauth_subject, created_at) "
+            f"VALUES (%s, 'user', %s, %s, %s, %s, NOW())",
+            (user_id, email, role, provider, subject),
+        )
+        logger.info("[user_store] Created user: id=%s email=%s role=%s", user_id, email, role)
+        return {
+            "id": user_id,
+            "email": email,
+            "role": role,
+            "oauth_provider": provider,
+            "oauth_subject": subject,
+        }
+    except Exception as exc:
+        logger.error("[user_store] Failed to create user: %s", exc)
+        return None
