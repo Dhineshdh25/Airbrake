@@ -141,13 +141,19 @@ def _set_session_cookies(response, session_token: str, csrf_token: str):
     """Set the session and CSRF cookies on the response."""
     is_prod = _is_production()
 
+    # Cross-origin setup: frontend (S3 HTTP) ↔ backend (Lambda HTTPS)
+    # requires SameSite=None + Secure=True for cookies to be sent cross-origin.
+    # SameSite=Lax would block cookies on cross-origin fetch() requests.
+    samesite_value = "None" if is_prod else "Lax"
+    secure_value = True if is_prod else False
+
     # Session cookie — HttpOnly, not accessible to JavaScript
     response.set_cookie(
         SESSION_COOKIE_NAME,
         value=session_token,
         httponly=True,
-        secure=is_prod,
-        samesite="Lax",
+        secure=secure_value,
+        samesite=samesite_value,
         path="/",
         max_age=24 * 60 * 60,  # 24 hours
     )
@@ -157,8 +163,8 @@ def _set_session_cookies(response, session_token: str, csrf_token: str):
         CSRF_COOKIE_NAME,
         value=csrf_token,
         httponly=False,
-        secure=is_prod,
-        samesite="Lax",
+        secure=secure_value,
+        samesite=samesite_value,
         path="/",
         max_age=24 * 60 * 60,
     )
