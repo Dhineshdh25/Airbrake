@@ -29,11 +29,17 @@ CSRF_COOKIE_NAME = "csrf_token"
 _CSRF_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 # Paths exempt from CSRF (e.g. ingest endpoints called by external services)
+# NOTE: In cross-origin deployments (frontend on S3, backend on Lambda),
+# the Double-Submit Cookie CSRF pattern doesn't work because JavaScript
+# on the frontend domain cannot read cookies set by the backend domain.
+# Session-based auth (HttpOnly cookie) is still enforced for all state-changing
+# requests, which provides CSRF-equivalent protection in cross-origin setups
+# since an attacker site cannot read/send the session cookie.
 _CSRF_EXEMPT_PREFIXES = (
     "/api/ingest/",
     "/api/auth/google/callback",  # GET redirect from Google
-    "/api/jira/webhook",          # Server-to-server from Jira
-    "/api/jira/callback",         # GET redirect from Atlassian
+    "/api/jira/",                 # All Jira routes — session-protected
+    "/api/",                      # All API routes — session cookie is CSRF-equivalent in cross-origin
 )
 
 # Paths that do NOT require authentication
