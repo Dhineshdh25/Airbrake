@@ -59,27 +59,41 @@ def create_jira_ticket(user_id: str, error_data: dict) -> dict:
         cloud_id=token["cloud_id"],
     )
 
-    # Check if a ticket already exists for this error to prevent duplicates
-    error_hash = error_data.get("error_hash")
+    # Deduplication: check if THIS SPECIFIC OCCURRENCE already has a ticket.
+    # We check by log_id (specific row UUID), NOT by error_hash.
+    # Two different occurrences of the same error can each have their own ticket.
+    log_id = error_data.get("log_id")
     project_name = error_data.get("project_name")
-    existing = None
-    
-    if error_hash:
+    error_hash = error_data.get("error_hash")
+
+    if log_id:
         try:
-            existing = find_jira_ticket_by_hash(error_hash, project_name)
-        except Exception:
-            logger.exception("[Jira TicketService] Failed to lookup existing ticket")
-            # Continue anyway - better to create a potential duplicate than fail
-    
-    if existing:
-        jira_key = existing.get("jira_key") or existing.get("key")
-        jira_id = existing.get("jira_id") or existing.get("id")
-        jira_url = existing.get("jira_url") or existing.get("url")
-        logger.info(
-            "[Jira TicketService] Reusing existing ticket for error_hash=%s key=%s",
-            error_hash, jira_key,
-        )
-        return {"key": jira_key, "id": jira_id, "url": jira_url}
+            from db import query as _q
+            rows = _q(
+                "SELECT metadata FROM projects_data "
+                "WHERE row_type = 'log' AND id = %s "
+                "  AND metadata::jsonb ? 'jira_issue_key' "
+                "  AND metadata::jsonb->>'jira_issue_key' IS NOT NULL "
+                "  AND metadata::jsonb->>'jira_issue_key' != '' ",
+                (log_id,),
+            )
+            if rows:
+                import json as _j
+                raw  = rows[0].get("metadata")
+                meta = _j.loads(raw) if isinstance(raw, str) else (raw or {})
+                existing_key = meta.get("jira_issue_key", "")
+                if existing_key:
+                    logger.info(
+                        "[Jira TicketService] Occurrence already has ticket log_id=%s key=%s",
+                        log_id, existing_key,
+                    )
+                    return {
+                        "key": existing_key,
+                        "id":  meta.get("jira_issue_id", ""),
+                        "url": meta.get("jira_issue_url", ""),
+                    }
+        except Exception as exc:
+            logger.warning("[Jira TicketService] log_id dedup check failed: %s", exc)
 
     try:
         result = client.create_issue(project_key, summary, description_adf)
