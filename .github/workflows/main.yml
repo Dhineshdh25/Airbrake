@@ -244,7 +244,8 @@ jobs:
                 "ALLOWED_ORIGINS": "http://airbrake.s3-website-us-east-1.amazonaws.com",
                 "ATLASSIAN_CLIENT_ID": "'"$ATLASSIAN_CLIENT_ID"'",
                 "ATLASSIAN_CLIENT_SECRET": "'"$ATLASSIAN_CLIENT_SECRET"'",
-                "ATLASSIAN_CALLBACK_URL": "https://l7xnpjosjvyrlx55dxrwdvx5g40okeyd.lambda-url.us-east-1.on.aws/api/jira/callback"
+                "ATLASSIAN_CALLBACK_URL": "https://l7xnpjosjvyrlx55dxrwdvx5g40okeyd.lambda-url.us-east-1.on.aws/api/jira/callback",
+                "JIRA_PROJECT_KEY": "ARGUS"
               }
             }'
 
