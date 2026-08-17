@@ -85,7 +85,8 @@ interface ErrorDetailData {
   parsed_stacktrace?: ParsedStackTrace | null;
   error_hash: string;
   error_group_name?: string | null;
-  occurrence_count: number;
+  occurrence_count: number;      // sequence number of THIS specific occurrence
+  total_occurrences?: number;    // total rows sharing this error (shown in Error Details only)
   first_seen: string | null;
   last_seen: string | null;
   status: 'new' | 'existing' | 'regression';
@@ -326,12 +327,11 @@ export function ErrorDetailModal({
   const errorMessage = data?.error_message ?? row?.error ?? '';
   const errorStatus = data?.error_status ?? null;
 
-  // The resolved log ID for Jira operations — always a specific row UUID,
-  // never an error_hash. This ensures tickets link to exactly the occurrence
-  // the user is looking at, not all occurrences sharing the error text.
-  const resolvedLogId: string | null =
-    targetLogId
-    ?? (data?.occurrences?.[0]?.id ?? null);
+  // The resolved log ID for Jira operations — only set when a specific
+  // occurrence was selected (navigated from BreaksList).
+  // If null, "Create Jira Ticket" is disabled — you must open a specific
+  // occurrence from the Breaks list to create a ticket for it.
+  const resolvedLogId: string | null = targetLogId;
 
   const isResolved = errorStatus === 'resolved';
   const isReopened = errorStatus === 'reopened';
@@ -567,6 +567,7 @@ export function ErrorDetailModal({
       error_message:     errorMessage  || undefined,
       error_detail:      data?.error_detail     || undefined,
       error_hash:        effectiveErrorHash      || undefined,
+      log_id:            resolvedLogId           || undefined,
       occurrence_count:  data?.occurrence_count  ?? undefined,
       status:            data?.error_status      || undefined,
       solution:          data?.solution?.solution || undefined,
@@ -1259,23 +1260,31 @@ export function ErrorDetailModal({
             {(!jiraTicket && jiraStatus !== 'created') ? (
               <button
                 onClick={handleCreateJiraTicket}
-                disabled={jiraStatus === 'creating'}
-                title={jiraConnected === false ? 'Connect your Jira account to create tickets' : 'Create a Jira ticket from this error'}
+                disabled={jiraStatus === 'creating' || !resolvedLogId}
+                title={
+                  !resolvedLogId
+                    ? 'Open a specific occurrence from the Breaks list to create a ticket'
+                    : jiraConnected === false
+                      ? 'Connect your Jira account to create tickets'
+                      : 'Create a Jira ticket from this error'
+                }
                 style={{
                   ...btnPrimary,
                   display: 'inline-flex',
                   alignItems: 'center',
                   gap: 8,
-                  opacity: jiraStatus === 'creating' ? 0.6 : 1,
-                  cursor: jiraStatus === 'creating' ? 'not-allowed' : 'pointer',
+                  opacity: (jiraStatus === 'creating' || !resolvedLogId) ? 0.45 : 1,
+                  cursor: (jiraStatus === 'creating' || !resolvedLogId) ? 'not-allowed' : 'pointer',
                 }}
               >
                 <span style={{ fontSize: 14 }}>🎫</span>
                 {jiraStatus === 'creating'
                   ? 'Creating…'
-                  : jiraConnected === false
-                    ? 'Connect Jira'
-                    : 'Create Jira Ticket'}
+                  : !resolvedLogId
+                    ? 'Select an occurrence'
+                    : jiraConnected === false
+                      ? 'Connect Jira'
+                      : 'Create Jira Ticket'}
               </button>
             ) : (
               /* ── Ticket created confirmation ───────────────────────────── */
@@ -1403,8 +1412,15 @@ export function ErrorDetailModal({
             )}
             {data?.occurrence_count != null && (
               <div>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2 }}>Occurrences</div>
-                <div style={{ fontSize: 13, color: 'var(--text)' }}>{data.occurrence_count}</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2 }}>Occurrence</div>
+                <div style={{ fontSize: 13, color: 'var(--text)' }}>
+                  #{data.occurrence_count}
+                  {data.total_occurrences != null && data.total_occurrences !== data.occurrence_count && (
+                    <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+                      {' '}of {data.total_occurrences}
+                    </span>
+                  )}
+                </div>
               </div>
             )}
           </div>

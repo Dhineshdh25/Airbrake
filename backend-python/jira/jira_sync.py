@@ -153,10 +153,12 @@ def find_airbrake_token_for_webhook() -> Optional[tuple[str, str]]:
                     logger.info("[JiraSync] Webhook token refreshed successfully")
                 except Exception as exc:
                     logger.error("[JiraSync] Webhook token refresh failed: %s", exc)
-                    return None
+                    # Fall through and try with the existing token anyway —
+                    # Atlassian tokens often remain valid past their declared expiry.
+                    logger.warning("[JiraSync] Attempting webhook fetch with potentially expired token")
             else:
-                logger.warning("[JiraSync] Webhook token expired and no refresh token available")
-                return None
+                # No refresh token — try the access token anyway, it may still be valid.
+                logger.warning("[JiraSync] Token flagged expired but no refresh token — trying anyway")
 
         return access_token, cloud_id
 

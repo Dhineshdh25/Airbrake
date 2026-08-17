@@ -15,13 +15,11 @@ All routes that need an authenticated user require a valid server-side session
 """
 
 import json
-import json
 import logging
 import os
 
 import requests
 from flask import Blueprint, jsonify, redirect, request
-from db import query
 from db import execute, query
 
 from .oauth import (
@@ -175,54 +173,72 @@ def _pop_oauth_state(state: str) -> str | None:
         logger.exception("[Jira State] DB lookup failed: %s", exc)
         return None
 
-# ── Helpers — delegates to central auth middleware ────────────────────────────
-# Import the shared auth system so Jira routes use the same session resolution
-# (real sessions via cookie OR dev tokens when DEV_AUTH=1).
-from auth.middleware import get_current_user as _auth_get_current_user, _is_dev_auth_enabled
+# ── Helpers — unified auth using the shared auth.middleware package ───────────
+# auth/ is deployed to Lambda alongside jira/.
+# In production (APP_ENV=production), only real Google OAuth sessions work.
+# In dev (DEV_AUTH=1 and APP_ENV!=production), dev tokens also work.
+from auth.middleware import get_current_user as _get_current_user, _is_dev_auth_enabled
+from auth.middleware import _DEV_SESSIONS
 
 
 def _is_production_environment() -> bool:
-    env_name = (os.getenv("NODE_ENV") or os.getenv("FLASK_ENV") or os.getenv("ENVIRONMENT") or "").strip().lower()
+    env_name = (os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or os.getenv("FLASK_ENV") or "").strip().lower()
     return env_name in {"production", "prod", "staging"}
 
 
 def _get_session() -> dict | None:
-    """Return the session dict for the current request, or None.
-
-    Uses the shared auth middleware for session resolution.
-    Falls back to query parameter token for browser redirects (OAuth callback).
-    """
-    user = _auth_get_current_user()
+    """Resolve the current session using the shared auth middleware."""
+    user = _get_current_user()
     if user:
-        return {"userId": user["id"], "role": user["role"]}
-
-    # Fallback for browser redirects that cannot attach headers/cookies
-    token_param = (request.args.get("token") or "").strip()
-    if token_param and _is_dev_auth_enabled():
-        from auth.middleware import _DEV_SESSIONS, _resolve_dev_session
-        dev_user = _resolve_dev_session(token_param)
-        if dev_user:
-            return {"userId": dev_user["id"], "role": dev_user["role"]}
-
+        return {"userId": user["id"], "role": user.get("role", "viewer")}
     return None
 
 
 def _require_auth():
     """Return (user_id, None) or (None, error_response).
 
-    user_id is the authenticated Airbrake user's ID from the server session.
-    This is the stable identity used as the Jira token store key.
+    user_id is stable across logouts — derived from:
+    1. Real Google OAuth session (production)
+    2. Dev session token (DEV_AUTH=1, non-production only)
 
-    The user_id is ALWAYS resolved from the server-side session — never from
-    X-Device-ID or frontend-supplied data.
+    X-Device-ID is used as a migration key for Jira tokens stored before
+    the unified auth was introduced. The real user_id from the session is
+    always the primary key.
     """
     session = _get_session()
     if not session:
-        logger.warning('[Jira Routes] _require_auth failed: missing or invalid session/token')
-        return None, (jsonify({"error": "Unauthorized", "reason": "missing_or_invalid_token"}), 401)
+        return None, (jsonify({"error": "Unauthorized"}), 401)
 
     user_id = session["userId"]
-    logger.info('[Jira Routes] Authenticated user_id=%s role=%s', user_id, session.get('role'))
+
+    # X-Device-ID migration: if no token under user_id, check legacy device key
+    device_id = request.headers.get("X-Device-ID", "").strip()
+    if device_id:
+        token = get_token(user_id)
+        if not token:
+            # Check legacy device-based key and migrate if found
+            legacy_key = f"device-{device_id}"
+            legacy_token = get_token(legacy_key)
+            if legacy_token:
+                logger.info(
+                    "[Jira Routes] Migrating token from legacy device key=%s to user_id=%s",
+                    legacy_key, user_id,
+                )
+                try:
+                    save_token(
+                        user_id=user_id,
+                        access_token=legacy_token.get("access_token", ""),
+                        refresh_token=legacy_token.get("refresh_token", ""),
+                        expires_in=None,
+                        cloud_id=legacy_token.get("cloud_id", ""),
+                        atlassian_account_id=legacy_token.get("atlassian_account_id", ""),
+                        atlassian_email=legacy_token.get("atlassian_email", ""),
+                        site_url=legacy_token.get("site_url", ""),
+                    )
+                    delete_token(legacy_key)
+                except Exception as exc:
+                    logger.warning("[Jira Routes] Token migration failed: %s", exc)
+
     return user_id, None
 
 
@@ -1242,8 +1258,8 @@ def jira_ticket_status():
                         pass
 
         logger.info(
-            "[Jira Routes] ticket-status hit error_hash=%s issue_key=%s",
-            error_hash, issue_key,
+            "[Jira Routes] ticket-status log_id=%s issue_key=%s",
+            log_id, issue_key,
         )
         return jsonify({
             "has_ticket": True,
