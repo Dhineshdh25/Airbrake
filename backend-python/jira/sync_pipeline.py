@@ -124,6 +124,20 @@ def run_sync_pipeline(event: dict[str, Any]) -> dict[str, Any]:
         extraction = extract_solution_from_issue(issue)
         solution_text = build_solution_text(extraction)
 
+        # Fallback: if Nova found nothing, use the last comment directly.
+        # A human wrote it to explain the fix — it's better than nothing.
+        if not solution_text:
+            comments = issue.get("comments") or []
+            for c in reversed(comments):
+                body = (c.get("body") or "").strip()
+                if body and len(body) > 10:
+                    solution_text = body
+                    logger.info(
+                        "[SyncPipeline] Nova found nothing — using last comment as solution for %s",
+                        issue_key,
+                    )
+                    break
+
         if not solution_text:
             overall_success = False
             detail = "No extractable solution found for Jira issue."
@@ -133,7 +147,7 @@ def run_sync_pipeline(event: dict[str, Any]) -> dict[str, Any]:
                 sol_result = insert_solution(
                     error_hash=error_hash,
                     solution=solution_text,
-                    created_by=f"jira:{issue.get('reporter', {}).get('display_name') or 'sync'}",
+                    created_by=f"jira:{issue.get('reporter', {}).get('displayName') or issue.get('assignee', {}).get('displayName') or 'sync'}",
                     project_name=project_name,
                     error_message=error_message,
                 )
@@ -150,7 +164,10 @@ def run_sync_pipeline(event: dict[str, Any]) -> dict[str, Any]:
                     overall_success = False
                     detail = f"Solution insertion failed: {exc}"
 
-            # Resolve the log row whenever a solution exists (new or existing)
+            # Resolve ONLY the specific log row linked to this Jira ticket.
+            # Do NOT bulk-resolve by error_hash — other occurrences with the
+            # same error message may be separate issues with different causes,
+            # or may have their own Jira tickets in progress.
             if solution_ok:
                 try:
                     execute(
@@ -160,9 +177,14 @@ def run_sync_pipeline(event: dict[str, Any]) -> dict[str, Any]:
                         "  AND (error_status IS NULL OR error_status NOT IN ('resolved'))",
                         (log_id,),
                     )
-                    logger.info("[SyncPipeline] Resolved log_id=%s via Jira issue=%s", log_id, issue_key)
+                    logger.info(
+                        "[SyncPipeline] Resolved log_id=%s via Jira issue=%s",
+                        log_id, issue_key,
+                    )
                 except Exception as exc:
-                    logger.exception("[SyncPipeline] Failed to resolve log_id=%s: %s", log_id, exc)
+                    logger.exception(
+                        "[SyncPipeline] Failed to resolve log_id=%s: %s", log_id, exc
+                    )
                     overall_success = False
                     detail += f" (resolve step failed: {exc})"
 

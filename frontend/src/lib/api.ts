@@ -28,13 +28,21 @@ export const FRONTEND_BASE_URL: string =
     ? __FRONTEND_BASE_URL__
     : window.location.origin;
 
-/** Build a deep-link URL to a specific error in Airbrake.
- *  Uses HashRouter format: <origin>/#/breaks/<hash>?project_name=<project>
+/** Build a deep-link URL to a specific error occurrence in Airbrake.
+ *  Uses HashRouter format: <origin>/#/breaks/<hash>?project_name=<project>&log_id=<id>
+ *  log_id targets the exact occurrence so the modal opens that specific row.
  */
-export function buildAirbrakeErrorUrl(errorHash: string, projectName?: string): string {
+export function buildAirbrakeErrorUrl(
+  errorHash: string,
+  projectName?: string,
+  logId?: string | null,
+): string {
   const base = FRONTEND_BASE_URL.replace(/\/$/, '');
-  const qs   = projectName ? `?project_name=${encodeURIComponent(projectName)}` : '';
-  return `${base}/#/breaks/${errorHash}${qs}`;
+  const qs = new URLSearchParams();
+  if (projectName) qs.set('project_name', projectName);
+  if (logId)       qs.set('log_id', logId);
+  const qsStr = qs.toString();
+  return `${base}/#/breaks/${errorHash}${qsStr ? `?${qsStr}` : ''}`;
 }
 
 // ─── Stable device identity ───────────────────────────────────────────────────

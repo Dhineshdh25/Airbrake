@@ -575,7 +575,7 @@ export function ErrorDetailModal({
       timestamp:         data?.last_seen         || undefined,
       file_name:         data?.file_name         || undefined,
       airbrake_url:      effectiveErrorHash
-        ? buildAirbrakeErrorUrl(effectiveErrorHash, projectName)
+        ? buildAirbrakeErrorUrl(effectiveErrorHash, projectName, resolvedLogId)
         : undefined,
     };
 
