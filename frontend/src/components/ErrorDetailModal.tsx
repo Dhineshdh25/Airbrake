@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties } from 'react';
-import { apiFetch, ApiError, buildAirbrakeErrorUrl } from '../lib/api';
+import { apiFetch, ApiError, buildAirbrakeErrorUrl, API_BASE_URL } from '../lib/api';
+import { getCsrfToken, setCsrfTokenMemory } from '../auth/AuthContext';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -494,6 +495,32 @@ export function ErrorDetailModal({
   // ── Jira: initiate OAuth — authenticated fetch returns the redirect URL ──
   async function startJiraOAuth() {
     try {
+      // Ensure we have a CSRF token before the POST — after a page refresh the
+      // in-memory token is gone but the session cookie is still valid.
+      // Without this the backend returns 403 "Missing X-CSRF-Token header."
+      let csrf = getCsrfToken();
+      if (!csrf) {
+        try {
+          const res = await fetch(`${API_BASE_URL}/api/auth/csrf`, { credentials: 'include' });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.csrf_token) {
+              setCsrfTokenMemory(data.csrf_token);
+              csrf = data.csrf_token;
+            }
+          }
+        } catch {
+          // Fall through — apiFetch will send without the header and the backend
+          // will return 403 which we surface to the user below.
+        }
+      }
+
+      if (!csrf) {
+        setJiraError('Could not obtain a security token. Please refresh the page and try again.');
+        setJiraStatus('error');
+        return;
+      }
+
       // Store pending ticket context so we can auto-retry after OAuth callback
       const pendingContext = {
         error_hash: effectiveErrorHash,
@@ -522,8 +549,11 @@ export function ErrorDetailModal({
         setJiraStatus('error');
         sessionStorage.removeItem('jira_pending_ticket');
       }
-    } catch {
-      setJiraError('Could not start Jira connection. Please try again.');
+    } catch (e) {
+      const msg = e instanceof ApiError && e.status === 403
+        ? 'Security token expired. Please refresh the page and try again.'
+        : 'Could not start Jira connection. Please try again.';
+      setJiraError(msg);
       setJiraStatus('error');
       sessionStorage.removeItem('jira_pending_ticket');
     }
