@@ -154,6 +154,43 @@ export function JiraOverview() {
   const [reloadTick, setReloadTick] = useState(0);
   const bypassCache = useRef(false);
 
+  // ── Poll-sync state ───────────────────────────────────────────────────────
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<{ synced: number; skipped: number; failed: number } | null>(null);
+
+  // Run poll-sync automatically when the Jira page loads and after every manual refresh
+  useEffect(() => {
+    apiFetch('/api/jira/poll-sync', { method: 'POST' })
+      .then(r => r.json())
+      .then((d: { synced: number; skipped: number; failed: number }) => {
+        if (d.synced > 0) {
+          // Some tickets were synced — refresh the issue list to reflect new statuses
+          bypassCache.current = true;
+          setReloadTick(t => t + 1);
+        }
+        setSyncResult(d);
+      })
+      .catch(() => {/* non-fatal */});
+  }, []);
+
+  async function handleSyncNow() {
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      const r = await apiFetch('/api/jira/poll-sync', { method: 'POST' });
+      const d = await r.json();
+      setSyncResult(d);
+      if (d.synced > 0) {
+        bypassCache.current = true;
+        setReloadTick(t => t + 1);
+      }
+    } catch {
+      /* non-fatal */
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   // ── Filter / sort / search state ─────────────────────────────────────────
   const [search, setSearch] = useState('');
   const [projectFilter, setProjectFilter] = useState('');
@@ -386,6 +423,31 @@ export function JiraOverview() {
           >
             ↺ Refresh
           </button>
+
+          <button
+            type="button"
+            onClick={handleSyncNow}
+            disabled={syncing}
+            title="Check all linked Jira tickets and resolve any that are Done in Jira"
+            style={{
+              padding: '7px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+              border: '1px solid rgba(99,102,241,0.4)',
+              background: syncing ? 'rgba(99,102,241,0.05)' : 'rgba(99,102,241,0.12)',
+              color: '#818cf8', cursor: syncing ? 'not-allowed' : 'pointer',
+              opacity: syncing ? 0.7 : 1,
+            }}
+          >
+            {syncing ? '⏳ Syncing…' : '⚡ Sync from Jira'}
+          </button>
+
+          {syncResult && (
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              {syncResult.synced > 0
+                ? <span style={{ color: '#34d399', fontWeight: 600 }}>✓ {syncResult.synced} resolved</span>
+                : <span>No new resolutions</span>}
+              {syncResult.failed > 0 && <span style={{ color: '#f87171', marginLeft: 6 }}>{syncResult.failed} failed</span>}
+            </span>
+          )}
 
           {!loading && (
             <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 4 }}>
