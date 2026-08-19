@@ -190,7 +190,7 @@ def _get_session() -> dict | None:
     """Resolve the current session using the shared auth middleware."""
     user = _get_current_user()
     if user:
-        return {"userId": user["id"], "role": user.get("role", "viewer")}
+        return {"userId": user["id"], "role": user["role"]}
     return None
 
 
@@ -371,33 +371,112 @@ def jira_initiate():
     """
     POST /api/jira/initiate
 
-    Authenticated endpoint (Bearer token required).
-    Generates a CSRF state token, stores the user_id → state mapping,
-    and returns the Atlassian authorization URL for the frontend to
-    navigate to.
+    Authenticated endpoint — session cookie required.
 
-    The frontend calls this via apiFetch (which attaches the Bearer token),
-    then does window.location.href = data.redirect_url.
-    No credentials ever appear in a URL.
+    Cross-domain CSRF handling:
+      The frontend cannot read the csrf_token cookie set by a different domain,
+      so it obtains the token from /api/auth/me (or /api/auth/csrf) and stores
+      it in memory, then sends it as X-CSRF-Token on every state-changing request.
+
+    Validates:
+      1. Session authentication  → 401 if missing/invalid
+      2. CSRF token              → 403 if missing or mismatched
+      3. Jira OAuth env vars     → 500 with safe config-error message
+
+    Generates a secure OAuth state value, associates it with the user, stores
+    it in the DB (survives Lambda container switches), and returns the full
+    Atlassian authorization URL for the frontend to navigate to.
 
     Response: { redirect_url: str }
     """
+    import hmac  # constant-time comparison
+
+    # ── 1. Authentication ─────────────────────────────────────────────────────
     user_id, err = _require_auth()
     if err:
+        # _require_auth returns (None, (jsonify(...), status_code))
         return err
 
+    # ── 2. CSRF validation ────────────────────────────────────────────────────
+    # In a cross-domain setup the frontend stores the CSRF token in memory
+    # (obtained from the /api/auth/me response body) and sends it as the
+    # X-CSRF-Token request header.  We compare it against the cookie value
+    # that the browser sends automatically with credentialed requests.
+    #
+    # Dev tokens (Bearer dev-token-*) skip CSRF when DEV_AUTH=1.
+    skip_csrf = False
+    if _is_dev_auth_enabled():
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer ") and auth_header[7:].strip() in _DEV_SESSIONS:
+            skip_csrf = True
+
+    if not skip_csrf:
+        header_csrf = request.headers.get("X-CSRF-Token", "").strip()
+        cookie_csrf = request.cookies.get("csrf_token", "").strip()
+
+        if not header_csrf:
+            logger.warning(
+                "[Jira Initiate] Missing X-CSRF-Token header from user_id=%s origin=%s",
+                user_id, request.headers.get("Origin", "unknown"),
+            )
+            return jsonify({
+                "error": "Forbidden",
+                "message": "Missing CSRF token. Refresh the page and try again.",
+            }), 403
+
+        if not cookie_csrf:
+            logger.warning(
+                "[Jira Initiate] Missing csrf_token cookie for user_id=%s — "
+                "frontend may not have stored the token from /api/auth/me",
+                user_id,
+            )
+            return jsonify({
+                "error": "Forbidden",
+                "message": "CSRF cookie missing. Please log out and log in again.",
+            }), 403
+
+        # Constant-time comparison to prevent timing attacks
+        if not hmac.compare_digest(cookie_csrf, header_csrf):
+            logger.warning(
+                "[Jira Initiate] CSRF token mismatch for user_id=%s", user_id
+            )
+            return jsonify({
+                "error": "Forbidden",
+                "message": "CSRF token mismatch. Refresh the page and try again.",
+            }), 403
+
+    # ── 3. Validate Jira OAuth config before doing anything else ─────────────
+    missing_vars = []
+    for var in ("ATLASSIAN_CLIENT_ID", "ATLASSIAN_CALLBACK_URL"):
+        if not os.environ.get(var, "").strip():
+            missing_vars.append(var)
+    if missing_vars:
+        # Log the missing variable *names* — never log values/secrets
+        logger.error(
+            "[Jira Initiate] Missing required env vars: %s", ", ".join(missing_vars)
+        )
+        return jsonify({
+            "error": "Configuration error",
+            "message": (
+                "Jira OAuth is not configured on the server. "
+                "Please contact your administrator."
+            ),
+        }), 500
+
+    # ── 4. Generate state and build the Atlassian authorization URL ───────────
     try:
         state = generate_state()
         _persist_oauth_state(state, user_id)   # DB-backed — survives Lambda container switches
         redirect_url = build_authorization_url(state)
-        logger.info("[Jira Routes] OAuth initiate for user_id=%s", user_id)
+        logger.info(
+            "[Jira Initiate] OAuth URL generated for user_id=%s state_prefix=%s",
+            user_id, state[:8],
+        )
         return jsonify({"redirect_url": redirect_url})
+
     except EnvironmentError as exc:
         logger.error("[Jira Routes] initiate config error: %s", exc)
         return jsonify({"error": str(exc)}), 500
-    except Exception as exc:
-        logger.exception("[Jira Routes] initiate unexpected error: %s", exc)
-        return jsonify({"error": f"Could not start Jira connection: {type(exc).__name__}: {exc}"}), 500
 
 
 @jira_bp.route("/debug-config")

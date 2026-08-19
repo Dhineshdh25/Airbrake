@@ -6,7 +6,8 @@ Blueprint registered at /api/auth.
 Routes:
   GET  /api/auth/google           — start OAuth flow (redirects to Google)
   GET  /api/auth/google/callback  — OAuth callback (exchanges code, creates session)
-  GET  /api/auth/me               — return current authenticated user
+  GET  /api/auth/me               — return current authenticated user + csrf_token in body
+  GET  /api/auth/csrf             — issue / refresh the CSRF token (authenticated)
   POST /api/auth/logout           — invalidate session, clear cookies
 """
 
@@ -347,8 +348,14 @@ def auth_me():
     """
     Return the currently authenticated user.
 
+    In cross-domain deployments the frontend JavaScript cannot read the
+    csrf_token cookie (different domain).  We therefore also return the
+    CSRF token in the JSON body so the React app can store it in memory
+    and send it as X-CSRF-Token on every state-changing request.
+
     Returns:
-      200: { "authenticated": true, "user": { "id", "email", "role" } }
+      200: { "authenticated": true, "user": { "id", "email", "role" },
+             "csrf_token": "<token>" }
       401: { "authenticated": false, "error": "..." }
     """
     user = get_current_user()
@@ -358,14 +365,86 @@ def auth_me():
             "error": "Not authenticated",
         }), 401
 
-    return jsonify({
+    # Surface the CSRF token in the response body so cross-domain frontends
+    # can read it (JS cannot read cookies set by a different domain).
+    csrf_from_cookie = request.cookies.get(CSRF_COOKIE_NAME, "")
+
+    # If there is no CSRF cookie yet (e.g. page refresh lost it), generate a
+    # fresh one, set it on the response, and return it in the body.
+    response_data = {
         "authenticated": True,
         "user": {
             "id": user["id"],
             "email": user["email"],
             "role": user["role"],
         },
-    })
+        "csrf_token": csrf_from_cookie or "",
+    }
+
+    if not csrf_from_cookie:
+        # Mint a fresh CSRF token and set it as a cookie on this response.
+        from .middleware import generate_csrf_token as _gen_csrf
+        new_csrf = _gen_csrf()
+        response_data["csrf_token"] = new_csrf
+        resp = make_response(jsonify(response_data))
+
+        is_prod = _is_production()
+        samesite_value = "None" if is_prod else "Lax"
+        secure_value = is_prod
+        resp.set_cookie(
+            CSRF_COOKIE_NAME,
+            value=new_csrf,
+            httponly=False,          # JS must be able to read it (same-origin only)
+            secure=secure_value,
+            samesite=samesite_value,
+            path="/",
+            max_age=24 * 60 * 60,
+        )
+        return resp
+
+    return jsonify(response_data)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GET /api/auth/csrf — Issue / refresh CSRF token
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@auth_bp.route("/csrf")
+def auth_csrf():
+    """
+    Return a fresh CSRF token for authenticated cross-domain callers.
+
+    Called by the React frontend after a page refresh when the in-memory
+    CSRF token has been lost (the session cookie is still valid but JS
+    cannot read the csrf_token cookie set by a different domain).
+
+    Requires:   valid session_token cookie (or Bearer header in dev)
+    Returns:    200 { "csrf_token": "<token>" }
+                401 if no valid session
+    """
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "Unauthorized", "message": "Authentication required."}), 401
+
+    # Re-use the existing cookie value if present; otherwise mint a new one.
+    existing = request.cookies.get(CSRF_COOKIE_NAME, "")
+    csrf_token = existing if existing else generate_csrf_token()
+
+    resp = make_response(jsonify({"csrf_token": csrf_token}))
+
+    if not existing:
+        is_prod = _is_production()
+        resp.set_cookie(
+            CSRF_COOKIE_NAME,
+            value=csrf_token,
+            httponly=False,
+            secure=is_prod,
+            samesite="None" if is_prod else "Lax",
+            path="/",
+            max_age=24 * 60 * 60,
+        )
+
+    return resp
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

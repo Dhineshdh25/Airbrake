@@ -308,67 +308,83 @@ def generate_csrf_token() -> str:
 
 def csrf_protect():
     """
-    Double-Submit Cookie CSRF protection.
+    Cross-domain Double-Submit CSRF protection.
 
     For state-changing methods (POST, PUT, PATCH, DELETE):
-    - The request must include an X-CSRF-Token header
-    - The header value must match the csrf_token cookie
+    - Exempt paths (ingest, OAuth callbacks) are skipped.
+    - Dev tokens bypass CSRF when DEV_AUTH=1.
+    - For all other requests:
+        a) If BOTH cookie and header are present → compare (constant-time).
+           Mismatch → 403.
+        b) If the header is present but cookie is absent → allow through.
+           (Cross-domain flow: frontend stored token from /api/auth/me body
+            and sends it as header; browser may not send the csrf_token cookie
+            when origin != backend domain due to SameSite/cross-origin rules.)
+        c) If NEITHER is present → allow through.
+           (The session cookie alone provides CSRF protection for cross-origin
+            requests because SameSite=None+Secure + HttpOnly means an attacker
+            site cannot forge or read it.)
+        d) If the cookie is present but the header is missing:
+           - For requests from allowed origins (browser cross-site) → reject 403.
+             The frontend is expected to always send the header once it has the token.
+           - For requests with no Origin header (server-to-server / curl) → allow.
 
-    Exempt paths and safe methods are skipped.
-
-    NOTE: In cross-origin deployments (frontend on S3, backend on Lambda),
-    the session cookie is HttpOnly and SameSite=None+Secure, which means
-    only the authenticated browser can send it. This provides CSRF-equivalent
-    protection. The Double-Submit Cookie provides defense-in-depth when both
-    frontend and backend share the same origin.
+    The route-level @require_permission / @require_auth decorators are the
+    primary auth guard.  This middleware is defense-in-depth.
     """
     # Skip safe methods
     if request.method not in _CSRF_METHODS:
         return None
 
-    # Skip exempt paths (machine-to-machine only)
+    # Skip machine-to-machine exempt paths
     for prefix in _CSRF_EXEMPT_PREFIXES:
         if request.path.startswith(prefix):
             return None
 
-    # Skip CSRF check for dev tokens when dev auth is enabled
+    # Skip public paths (no session required anyway)
+    if _is_public_path(request.path):
+        return None
+
+    # Skip CSRF check for dev tokens (DEV_AUTH=1, non-production only)
     if _is_dev_auth_enabled():
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer ") and auth_header[7:].strip() in _DEV_SESSIONS:
             return None
 
-    # Skip CSRF if path is public (no auth required anyway)
-    if _is_public_path(request.path):
-        return None
-
-    # In cross-origin deployment, the frontend cannot read backend cookies.
-    # The session cookie itself provides CSRF protection because:
-    # 1. It's HttpOnly (JS cannot read it)
-    # 2. It's SameSite=None+Secure (only sent by authenticated browsers)
-    # 3. An attacker site cannot forge it
-    # If the X-CSRF-Token header IS present, validate it. Otherwise, rely on
-    # session cookie being proof of origin in cross-origin setups.
     header_csrf = request.headers.get("X-CSRF-Token", "").strip()
-    cookie_csrf = request.cookies.get(CSRF_COOKIE_NAME)
+    cookie_csrf = request.cookies.get(CSRF_COOKIE_NAME, "").strip()
 
-    # If both are present, validate they match (defense-in-depth)
+    # Case (a): both present — validate they match
     if header_csrf and cookie_csrf:
         if not secrets.compare_digest(cookie_csrf, header_csrf):
             logger.warning("[CSRF] Token mismatch for %s %s", request.method, request.path)
             return jsonify({"error": "Forbidden", "message": "CSRF token mismatch."}), 403
+        return None  # ✓ valid
 
-    # If the cookie is set but header is missing, that's a potential CSRF attack
-    # UNLESS we're in a cross-origin setup where JS can't read the cookie.
-    # In cross-origin mode, session cookie is sufficient protection.
-    # We detect cross-origin by checking the Origin header.
-    if cookie_csrf and not header_csrf:
-        origin = request.headers.get("Origin", "")
-        # Same-origin requests (no Origin or matching backend) must include CSRF token
-        if not origin:
-            # No origin = likely same-origin or non-browser client
-            # Allow through — session cookie provides auth
-            pass
-        # Cross-origin requests from allowed origins are OK (session cookie = CSRF protection)
-        # Disallowed origins won't have valid session cookies anyway.
+    # Case (b): header present, no cookie → cross-domain flow with in-memory token
+    if header_csrf and not cookie_csrf:
+        # Header alone is acceptable: the frontend got the token from /api/auth/me
+        # response body and is sending it correctly.  The session cookie (HttpOnly)
+        # still proves the user is authenticated.
+        return None  # ✓ valid
 
+    # Case (c): neither present → allow (session cookie = auth proof)
+    if not header_csrf and not cookie_csrf:
+        return None  # ✓ allow — session cookie provides CSRF protection
+
+    # Case (d): cookie present but header missing
+    # If the request has an Origin header (browser cross-site), the frontend
+    # should have sent X-CSRF-Token.  Reject it.
+    origin = request.headers.get("Origin", "")
+    if origin:
+        logger.warning(
+            "[CSRF] Cookie present but X-CSRF-Token header missing for %s %s origin=%s",
+            request.method, request.path, origin,
+        )
+        return jsonify({
+            "error": "Forbidden",
+            "message": "Missing X-CSRF-Token header.",
+        }), 403
+
+    # No Origin header (server-to-server / curl) → allow
     return None

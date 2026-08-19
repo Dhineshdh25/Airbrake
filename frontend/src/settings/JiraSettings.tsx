@@ -10,7 +10,8 @@
  */
 
 import { useEffect, useState } from 'react';
-import { apiFetch } from '../lib/api';
+import { apiFetch, API_BASE_URL } from '../lib/api';
+import { getCsrfToken, setCsrfTokenMemory } from '../auth/AuthContext';
 
 interface JiraStatusResponse {
   connected: boolean;
@@ -46,6 +47,31 @@ const btnDanger: React.CSSProperties = {
   border: '1px solid rgba(239,68,68,0.25)',
   cursor: 'pointer',
 };
+
+// ─── Fetch a fresh CSRF token from the server when the in-memory one is gone ──
+// This happens after a full page refresh — the session cookie is still valid
+// but the in-memory CSRF token (stored by AuthContext) is gone.
+async function ensureCsrfToken(): Promise<string> {
+  const current = getCsrfToken();
+  if (current) return current;
+
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/auth/csrf`, {
+      credentials: 'include',
+    });
+    if (!res.ok) throw new Error(`csrf endpoint returned ${res.status}`);
+    const data = await res.json();
+    if (data.csrf_token) {
+      // Store in the module-level memory so subsequent apiFetch calls use it.
+      setCsrfTokenMemory(data.csrf_token);
+      return data.csrf_token;
+    }
+  } catch {
+    // Fall through — we'll get a 403 from the server if still missing,
+    // which we translate into a helpful message below.
+  }
+  return '';
+}
 
 export function JiraSettings() {
   const [status, setStatus]   = useState<JiraStatusResponse | null>(null);
@@ -93,17 +119,71 @@ export function JiraSettings() {
   async function handleConnect() {
     setBusy(true);
     setError('');
+
+    // Ensure we have a CSRF token before sending the POST.
+    // After a page refresh the in-memory token is gone; we fetch a fresh one
+    // from /api/auth/csrf without forcing a full re-login.
+    const csrf = await ensureCsrfToken();
+    if (!csrf) {
+      setError(
+        'Could not obtain a security token. Please refresh the page and try again.'
+      );
+      setBusy(false);
+      return;
+    }
+
     try {
-      const r = await apiFetch('/api/jira/initiate', { method: 'POST' });
+      const r = await fetch(`${API_BASE_URL}/api/jira/initiate`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrf,
+        },
+      });
+
+      if (r.status === 401) {
+        setError('Your session has expired. Please log in again.');
+        setBusy(false);
+        return;
+      }
+
+      if (r.status === 403) {
+        let msg = 'Permission denied. Please refresh the page and try again.';
+        try {
+          const body = await r.json();
+          if (body?.message) msg = body.message;
+        } catch { /* ignore parse error */ }
+        setError(msg);
+        setBusy(false);
+        return;
+      }
+
+      if (!r.ok) {
+        let msg = `Server error (${r.status}). Please try again or contact support.`;
+        try {
+          const body = await r.json();
+          // Show config errors safely — never expose raw exception text
+          if (r.status === 500 && body?.error === 'Configuration error') {
+            msg = body.message ?? msg;
+          }
+        } catch { /* ignore parse error */ }
+        setError(msg);
+        setBusy(false);
+        return;
+      }
+
       const j = await r.json();
       if (j.redirect_url) {
-        window.location.href = j.redirect_url;  // navigate to Atlassian — no credentials in URL
+        // Redirect to Atlassian — the session cookie travels with the browser
+        // automatically; no token appears in the URL.
+        window.location.href = j.redirect_url;
       } else {
-        setError('Could not start Jira connection. Please try again.');
+        setError('Could not start Jira connection — no redirect URL returned.');
         setBusy(false);
       }
     } catch {
-      setError('Could not start Jira connection. Please try again.');
+      setError('Network error. Please check your connection and try again.');
       setBusy(false);
     }
   }
@@ -171,8 +251,8 @@ export function JiraSettings() {
             to create tickets on your behalf. You only need to do this once.
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <button onClick={handleConnect} style={btnPrimary}>
-              Connect Jira
+            <button onClick={handleConnect} disabled={busy} style={{ ...btnPrimary, opacity: busy ? 0.7 : 1 }}>
+              {busy ? 'Connecting…' : 'Connect Jira'}
             </button>
             <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
               You'll be redirected to Atlassian to sign in and grant access.
