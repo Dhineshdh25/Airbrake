@@ -147,7 +147,7 @@ def run_sync_pipeline(event: dict[str, Any]) -> dict[str, Any]:
                 sol_result = insert_solution(
                     error_hash=error_hash,
                     solution=solution_text,
-                    created_by=f"jira:{issue.get('reporter', {}).get('displayName') or issue.get('assignee', {}).get('displayName') or 'sync'}",
+                    created_by=f"jira:{(issue or {}).get('reporter', {}).get('displayName') or (issue or {}).get('assignee', {}).get('displayName') or 'sync'}",
                     project_name=project_name,
                     error_message=error_message,
                 )

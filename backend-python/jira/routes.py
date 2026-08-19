@@ -190,7 +190,7 @@ def _get_session() -> dict | None:
     """Resolve the current session using the shared auth middleware."""
     user = _get_current_user()
     if user:
-        return {"userId": user["id"], "role": dev_user["role"]}
+        return {"userId": user["id"], "role": user.get("role", "viewer")}
     return None
 
 
@@ -395,6 +395,9 @@ def jira_initiate():
     except EnvironmentError as exc:
         logger.error("[Jira Routes] initiate config error: %s", exc)
         return jsonify({"error": str(exc)}), 500
+    except Exception as exc:
+        logger.exception("[Jira Routes] initiate unexpected error: %s", exc)
+        return jsonify({"error": f"Could not start Jira connection: {type(exc).__name__}: {exc}"}), 500
 
 
 @jira_bp.route("/debug-config")
