@@ -190,7 +190,7 @@ def _get_session() -> dict | None:
     """Resolve the current session using the shared auth middleware."""
     user = _get_current_user()
     if user:
-        return {"userId": user["id"], "role": user.get("role", "viewer")}
+        return {"userId": user["id"], "role": dev_user["role"]}
     return None
 
 
@@ -1271,3 +1271,169 @@ def jira_ticket_status():
     except Exception as exc:
         logger.exception("[Jira Routes] ticket-status failed: %s", exc)
         return jsonify({"error": str(exc)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# POST /api/jira/poll-sync
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@jira_bp.route("/poll-sync", methods=["POST"])
+def jira_poll_sync():
+    """
+    POST /api/jira/poll-sync
+
+    Polls all open Airbrake log rows that have a linked Jira ticket and checks
+    whether their ticket has moved to a terminal status (Done/Closed/Resolved).
+    For each ticket that is Done, runs the full sync pipeline (same as webhook).
+
+    This is the webhook-free alternative — call this on a schedule (EventBridge,
+    cron, or manually) instead of relying on Jira webhooks.
+
+    No request body needed.
+
+    Response:
+      {
+        "polled":    int   — number of linked rows checked
+        "synced":    int   — number successfully resolved
+        "skipped":   int   — number not yet Done in Jira
+        "failed":    int   — number that errored during sync
+        "details":   list  — per-issue breakdown
+      }
+    """
+    # Authentication is optional for poll-sync — it can be called by a scheduler
+    # with no session. Only require auth if a real session is present.
+    user_id = None
+    try:
+        session = _get_session()
+        if session:
+            user_id = session.get("userId")
+    except Exception:
+        pass
+
+    logger.info("[Jira PollSync] Starting poll-sync user_id=%s", user_id)
+
+    try:
+        from db import query as _q
+        # Find all log rows that have a jira_issue_key but are NOT yet resolved
+        linked_rows = _q(
+            "SELECT id, project_name, error, error_hash, error_status, "
+            "       metadata::jsonb->>'jira_issue_key' AS issue_key "
+            "FROM projects_data "
+            "WHERE row_type = 'log' "
+            "  AND metadata::jsonb ? 'jira_issue_key' "
+            "  AND metadata::jsonb->>'jira_issue_key' IS NOT NULL "
+            "  AND metadata::jsonb->>'jira_issue_key' != '' "
+            "  AND (error_status IS NULL OR error_status NOT IN ('resolved')) "
+            "ORDER BY created_at DESC"
+        )
+    except Exception as exc:
+        logger.exception("[Jira PollSync] DB query failed: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+    if not linked_rows:
+        logger.info("[Jira PollSync] No unresolved linked rows found")
+        return jsonify({"polled": 0, "synced": 0, "skipped": 0, "failed": 0, "details": []})
+
+    # Get a valid Jira token for API calls
+    from .jira_sync import find_airbrake_token_for_webhook, fetch_full_issue
+    token_pair = find_airbrake_token_for_webhook()
+    if not token_pair:
+        return jsonify({
+            "error": "No Jira token available. Please connect your Jira account in Settings.",
+            "polled": 0, "synced": 0, "skipped": 0, "failed": 0, "details": [],
+        }), 401
+
+    access_token, cloud_id = token_pair
+
+    # Deduplicate by issue_key — one API call per ticket, not per row
+    issue_keys = list({row["issue_key"] for row in linked_rows if row.get("issue_key")})
+    logger.info("[Jira PollSync] Checking %d unique tickets for %d rows", len(issue_keys), len(linked_rows))
+
+    # Fetch current status for each unique issue
+    issue_statuses: dict[str, dict] = {}
+    for key in issue_keys:
+        try:
+            issue = fetch_full_issue(key, access_token, cloud_id)
+            issue_statuses[key] = issue
+            logger.info(
+                "[Jira PollSync] Fetched %s status=%s",
+                key, issue.get("status", "unknown"),
+            )
+        except Exception as exc:
+            logger.error("[Jira PollSync] Failed to fetch %s: %s", key, exc)
+            issue_statuses[key] = {"status": "fetch_failed", "key": key, "error": str(exc)}
+
+    # Run sync pipeline for each issue that is Done
+    from .webhook_handler import TERMINAL_STATUSES
+    from .sync_pipeline import run_sync_pipeline
+
+    polled = len(issue_keys)
+    synced = skipped = failed = 0
+    details = []
+
+    for key, issue in issue_statuses.items():
+        status_name = (issue.get("status") or "").lower()
+        is_done = status_name in TERMINAL_STATUSES
+
+        if issue.get("error"):
+            failed += 1
+            details.append({"issue_key": key, "result": "error", "detail": issue.get("error", "")})
+            continue
+
+        if not is_done:
+            skipped += 1
+            details.append({"issue_key": key, "result": "skipped", "status": status_name})
+            continue
+
+        # Build a synthetic event matching what parse_webhook would produce
+        synthetic_event = {
+            "action":          "resolve",
+            "issue_key":       key,
+            "issue_id":        issue.get("key", key),
+            "status":          status_name,
+            "is_terminal":     True,
+            "is_reopen":       False,
+            "assignee":        issue.get("assignee"),
+            "resolution":      issue.get("resolution"),
+            "summary":         issue.get("summary", ""),
+            "description":     issue.get("description"),
+            "comment_body":    None,
+            "reporter":        issue.get("reporter"),
+            "updated_by":      None,
+            "transition_name": "Done",
+            "raw":             issue,
+        }
+
+        try:
+            result = run_sync_pipeline(synthetic_event)
+            if result.get("success"):
+                synced += 1
+                details.append({
+                    "issue_key": key,
+                    "result":    "synced",
+                    "log_ids":   result.get("log_ids", []),
+                    "detail":    result.get("detail", ""),
+                })
+            else:
+                failed += 1
+                details.append({
+                    "issue_key": key,
+                    "result":    "failed",
+                    "detail":    result.get("detail", ""),
+                })
+        except Exception as exc:
+            logger.exception("[Jira PollSync] Pipeline failed for %s: %s", key, exc)
+            failed += 1
+            details.append({"issue_key": key, "result": "error", "detail": str(exc)})
+
+    logger.info(
+        "[Jira PollSync] Done — polled=%d synced=%d skipped=%d failed=%d",
+        polled, synced, skipped, failed,
+    )
+    return jsonify({
+        "polled":  polled,
+        "synced":  synced,
+        "skipped": skipped,
+        "failed":  failed,
+        "details": details,
+    })

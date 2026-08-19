@@ -4620,6 +4620,25 @@ def get_break_detail(error_hash):
         specific_row = None
         if log_id_param:
             specific_row = next((r for r in error_rows if r.get("id") == log_id_param), None)
+            # If the specific row wasn't in the group query results, fetch it directly.
+            # This happens when the log_id belongs to the same error_hash group but
+            # wasn't returned by the query (e.g. filtered out). Without this fallback
+            # the code drops into the group-aggregate path which shows "resolved" if
+            # ANY row in the group is resolved — wrong for per-occurrence deep links.
+            if not specific_row:
+                try:
+                    direct_rows = query(
+                        f"SELECT id, error_status, reopened_at, failure_count, "
+                        f"file_name, timestamp, error_group_name "
+                        f"FROM {TABLE} WHERE row_type = 'log' AND id = %s",
+                        (log_id_param,),
+                    )
+                    if direct_rows:
+                        specific_row = direct_rows[0]
+                        # Also add it to error_rows so occurrence numbering includes it
+                        error_rows = list(error_rows) + [specific_row]
+                except Exception as _sr_exc:
+                    logger.warning("[Breaks:detail] Direct log_id fetch failed: %s", _sr_exc)
 
         if specific_row:
             # Status from the specific row only
@@ -4980,7 +4999,12 @@ def get_break_detail(error_hash):
             "parsed_stacktrace": parsed_stacktrace,
             "error_hash": error_hash,
             "error_group_name": first.get("error_group_name") or None,
-            "occurrence_count": occurrence_count,
+            # occurrence_count: sequence number of this specific occurrence (or total if no log_id)
+            "occurrence_count": occurrence_map.get(
+                (specific_row or first).get("id"), occurrence_count
+            ) if specific_row else occurrence_count,
+            # total_occurrences: total count of all occurrences of this error
+            "total_occurrences": occurrence_count,
             "first_seen": first_seen,
             "status": status,
             "error_status": first.get("error_status"),
