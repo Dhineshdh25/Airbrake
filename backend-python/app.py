@@ -392,7 +392,14 @@ app.config["JSON_SORT_KEYS"] = False
 
 # ── Authentication (Google OAuth 2.0 / OIDC) ─────────────────────────────────
 try:
-    from auth import auth_bp, csrf_protect, get_current_user  # noqa: E402
+    from auth import (  # noqa: E402
+        auth_bp,
+        csrf_protect,
+        get_current_user,
+        require_auth,
+        require_permission,
+        VALID_ROLES,
+    )
 except Exception as _auth_import_exc:
     import traceback as _auth_tb
     print(f"[app] CRITICAL: auth package import FAILED — {type(_auth_import_exc).__name__}: {_auth_import_exc}")
@@ -613,7 +620,7 @@ def options_handler(p=""):
 # ── Auth helpers ──────────────────────────────────────────────────────────────
 # DEV_SESSIONS is only active when DEV_AUTH=1 and NOT in production.
 # In production, only real sessions (cookie-based) are accepted.
-from auth.middleware import get_current_user as _get_current_user_middleware, _is_dev_auth_enabled, _DEV_SESSIONS
+from auth.middleware import get_current_user as _get_current_user_middleware, _is_dev_auth_enabled, _DEV_SESSIONS, _is_production
 
 
 def get_session():
@@ -700,6 +707,7 @@ def health():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/logs/stream")
+@require_permission("logs:read")
 def stream_logs():
     """
     GET /api/logs/stream
@@ -774,6 +782,7 @@ def stream_logs():
 
 
 @app.route("/api/logs/stream/stats")
+@require_permission("logs:read")
 def stream_stats():
     """
     GET /api/logs/stream/stats
@@ -790,8 +799,11 @@ def stream_stats():
 
 
 @app.route("/api/debug/project-tables")
+@require_auth(roles=["admin"])
 def debug_project_tables():
     """Debug endpoint — lists all projects from project_data."""
+    if _is_production():
+        return jsonify({"error": "Not Found"}), 404
     rows = query(
         f"SELECT project_name AS name FROM {TABLE} WHERE row_type = 'project' ORDER BY project_name"
     )
@@ -800,8 +812,11 @@ def debug_project_tables():
 
 
 @app.route("/api/debug/columns")
+@require_auth(roles=["admin"])
 def debug_columns():
     """Debug endpoint — lists all columns in projects_data."""
+    if _is_production():
+        return jsonify({"error": "Not Found"}), 404
     rows = query("""
         SELECT column_name, data_type
         FROM information_schema.columns
@@ -812,10 +827,13 @@ def debug_columns():
 
 
 @app.route("/api/debug/kb-status")
+@require_auth(roles=["admin"])
 def debug_kb_status():
     """Debug endpoint — shows Knowledge Base and AI import status.
     Visible directly in browser: GET /api/debug/kb-status
     """
+    if _is_production():
+        return jsonify({"error": "Not Found"}), 404
     return jsonify({
         "kb_available": KB_AVAILABLE,
         "ai_recommendations_available": AI_RECOMMENDATIONS_AVAILABLE,
@@ -828,8 +846,11 @@ def debug_kb_status():
 
 
 @app.route("/api/debug/ai-health")
+@require_auth(roles=["admin"])
 def debug_ai_health():
     """Lightweight diagnostic endpoint for Bedrock, Pinecone, Aurora, and imports."""
+    if _is_production():
+        return jsonify({"error": "Not Found"}), 404
     try:
         return jsonify(get_ai_diagnostics())
     except Exception as exc:
@@ -846,7 +867,10 @@ def debug_ai_health():
 
 
 @app.route("/api/debug/nova-direct")
+@require_auth(roles=["admin"])
 def debug_nova_direct():
+    if _is_production():
+        return jsonify({"error": "Not Found"}), 404
     events = []
     try:
         import traceback as _tb_mod
@@ -993,6 +1017,7 @@ def debug_nova_direct():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/projects")
+@require_permission("projects:read")
 def list_projects():
     category = request.args.get("category")
     try:
@@ -1014,6 +1039,7 @@ def list_projects():
 
 
 @app.route("/api/projects", methods=["POST"])
+@require_auth(roles=["admin"])
 def create_project():
     """
     POST /api/projects
@@ -1063,6 +1089,7 @@ def create_project():
 
 
 @app.route("/api/projects/live")
+@require_permission("projects:read")
 def list_live_projects():
     try:
         rows = query(
@@ -1079,6 +1106,7 @@ def list_live_projects():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/logs/multi-project")
+@require_permission("logs:read")
 def multi_project_logs():
     """
     GET /api/logs/multi-project
@@ -1240,6 +1268,7 @@ def multi_project_logs():
 
 
 @app.route("/api/filters/presets", methods=["GET"])
+@require_permission("filters:read")
 def get_filter_presets():
     """
     GET /api/filters/presets
@@ -1308,6 +1337,7 @@ def get_filter_presets():
 
 
 @app.route("/api/filters/presets", methods=["POST"])
+@require_permission("filters:write")
 def create_filter_preset():
     """
     POST /api/filters/presets
@@ -1353,6 +1383,7 @@ def create_filter_preset():
 
 
 @app.route("/api/filters/presets/<preset_id>", methods=["DELETE"])
+@require_permission("filters:write")
 def delete_filter_preset(preset_id):
     """
     DELETE /api/filters/presets/:id
@@ -1368,6 +1399,7 @@ def delete_filter_preset(preset_id):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/logs/grouping/by-error-type")
+@require_permission("logs:read")
 def group_by_error_type():
     """
     GET /api/logs/grouping/by-error-type
@@ -1451,6 +1483,7 @@ def group_by_error_type():
 
 
 @app.route("/api/logs/grouping/by-file")
+@require_permission("logs:read")
 def group_by_file():
     """
     GET /api/logs/grouping/by-file
@@ -1531,6 +1564,7 @@ def group_by_file():
 
 
 @app.route("/api/logs/grouping/by-time")
+@require_permission("logs:read")
 def group_by_time():
     """
     GET /api/logs/grouping/by-time
@@ -1617,6 +1651,7 @@ def group_by_time():
 
 
 @app.route("/api/logs/grouping/by-project")
+@require_permission("logs:read")
 def group_by_project():
     """
     GET /api/logs/grouping/by-project
@@ -1712,6 +1747,7 @@ def group_by_project():
 
 
 @app.route("/api/logs/deduplication/similar")
+@require_permission("logs:read")
 def find_similar_errors():
     """
     GET /api/logs/deduplication/similar
@@ -1812,6 +1848,7 @@ def find_similar_errors():
 
 
 @app.route("/api/logs/aggregation/summary")
+@require_permission("logs:read")
 def aggregation_summary():
     """
     GET /api/logs/aggregation/summary
@@ -1898,6 +1935,7 @@ def aggregation_summary():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/visualization/timeline")
+@require_permission("visualization:read")
 def visualization_timeline():
     """
     GET /api/visualization/timeline
@@ -1999,6 +2037,7 @@ def visualization_timeline():
 
 
 @app.route("/api/visualization/heatmap")
+@require_permission("visualization:read")
 def visualization_heatmap():
     """
     GET /api/visualization/heatmap
@@ -2087,6 +2126,7 @@ def visualization_heatmap():
 
 
 @app.route("/api/visualization/distribution")
+@require_permission("visualization:read")
 def visualization_distribution():
     """
     GET /api/visualization/distribution
@@ -2227,6 +2267,7 @@ def visualization_distribution():
 
 
 @app.route("/api/visualization/bar-chart")
+@require_permission("visualization:read")
 def visualization_bar_chart():
     """
     GET /api/visualization/bar-chart
@@ -2336,6 +2377,7 @@ def visualization_bar_chart():
 
 
 @app.route("/api/visualization/sparklines")
+@require_permission("visualization:read")
 def visualization_sparklines():
     """
     GET /api/visualization/sparklines
@@ -2427,6 +2469,7 @@ def visualization_sparklines():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/stacktrace/parse/<log_id>")
+@require_permission("stacktrace:read")
 def parse_stacktrace_by_id(log_id):
     """Parse and enhance stack trace for a specific log entry."""
     try:
@@ -2443,6 +2486,7 @@ def parse_stacktrace_by_id(log_id):
 
 
 @app.route("/api/stacktrace/filter-frames", methods=["POST"])
+@require_permission("stacktrace:read")
 def filter_stack_frames():
     """Filter stack frames by criteria (hide library frames, show only app code, etc)."""
     body = request.get_json() or {}
@@ -2462,6 +2506,7 @@ def filter_stack_frames():
 
 
 @app.route("/api/stacktrace/github-link", methods=["POST"])
+@require_permission("stacktrace:read")
 def generate_github_link():
     """Generate GitHub permalink for a stack frame."""
     body = request.get_json() or {}
@@ -2486,6 +2531,7 @@ def generate_github_link():
 
 
 @app.route("/api/stacktrace/similar")
+@require_permission("stacktrace:read")
 def find_similar_stacktraces():
     """Find logs with similar stack traces based on file paths and line numbers."""
     project_name = request.args.get("project_name")
@@ -2522,6 +2568,7 @@ def find_similar_stacktraces():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/logs/<log_id>/tags", methods=["POST"])
+@require_permission("logs:annotate")
 def add_log_tags(log_id):
     """Add custom tags to a log entry."""
     body = request.get_json() or {}
@@ -2542,6 +2589,7 @@ def add_log_tags(log_id):
 
 
 @app.route("/api/logs/<log_id>/tags", methods=["GET"])
+@require_permission("logs:read")
 def get_log_tags(log_id):
     """Get tags for a log entry."""
     try:
@@ -2556,6 +2604,7 @@ def get_log_tags(log_id):
 
 
 @app.route("/api/logs/<log_id>/comments", methods=["POST"])
+@require_permission("logs:annotate")
 def add_log_comment(log_id):
     """Add a comment to a log entry."""
     body = request.get_json() or {}
@@ -2587,6 +2636,7 @@ def add_log_comment(log_id):
 
 
 @app.route("/api/logs/<log_id>/comments", methods=["GET"])
+@require_permission("logs:read")
 def get_log_comments(log_id):
     """Get all comments for a log entry."""
     try:
@@ -2607,6 +2657,7 @@ def get_log_comments(log_id):
 
 
 @app.route("/api/logs/<log_id>/assign", methods=["POST"])
+@require_permission("logs:annotate")
 def assign_log(log_id):
     """Assign a log to a team member."""
     body = request.get_json() or {}
@@ -2626,6 +2677,7 @@ def assign_log(log_id):
 
 
 @app.route("/api/logs/<log_id>/priority", methods=["POST"])
+@require_permission("logs:annotate")
 def set_log_priority(log_id):
     """Set priority flag for a log entry."""
     body = request.get_json() or {}
@@ -2645,6 +2697,7 @@ def set_log_priority(log_id):
 
 
 @app.route("/api/logs/by-assignee/<assignee>")
+@require_permission("logs:read")
 def get_logs_by_assignee(assignee):
     """Get all logs assigned to a specific team member."""
     status = request.args.get("status", "active")
@@ -2678,6 +2731,7 @@ def get_logs_by_assignee(assignee):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/notifications/webhooks", methods=["POST"])
+@require_permission("notifications:write")
 def create_webhook():
     """Create a webhook for notifications (Slack, Teams, Discord, etc)."""
     body = request.get_json() or {}
@@ -2711,6 +2765,7 @@ def create_webhook():
 
 
 @app.route("/api/notifications/webhooks", methods=["GET"])
+@require_permission("notifications:read")
 def list_webhooks():
     """List all configured webhooks."""
     try:
@@ -2722,6 +2777,7 @@ def list_webhooks():
 
 
 @app.route("/api/notifications/webhooks/<webhook_id>", methods=["DELETE"])
+@require_permission("notifications:write")
 def delete_webhook(webhook_id):
     """Delete a webhook."""
     try:
@@ -2732,6 +2788,7 @@ def delete_webhook(webhook_id):
 
 
 @app.route("/api/notifications/alert-rules", methods=["POST"])
+@require_permission("alerts:write")
 def create_alert_rule():
     """Create an alert rule based on thresholds."""
     body = request.get_json() or {}
@@ -2764,6 +2821,7 @@ def create_alert_rule():
 
 
 @app.route("/api/notifications/alert-rules", methods=["GET"])
+@require_permission("alerts:read")
 def list_alert_rules():
     """List all alert rules."""
     try:
@@ -2779,6 +2837,7 @@ def list_alert_rules():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/logs/retention/archive", methods=["POST"])
+@require_auth(roles=["admin"])
 def archive_old_logs():
     """Archive logs older than specified days."""
     body = request.get_json() or {}
@@ -2807,6 +2866,7 @@ def archive_old_logs():
 
 
 @app.route("/api/logs/retention/cleanup", methods=["POST"])
+@require_auth(roles=["admin"])
 def cleanup_old_logs():
     """Permanently delete archived logs older than specified days."""
     body = request.get_json() or {}
@@ -2823,6 +2883,7 @@ def cleanup_old_logs():
 
 
 @app.route("/api/logs/bulk/resolve", methods=["POST"])
+@require_permission("errors:resolve")
 def bulk_resolve_logs():
     """Bulk resolve multiple logs at once."""
     body = request.get_json() or {}
@@ -2845,6 +2906,7 @@ def bulk_resolve_logs():
 
 
 @app.route("/api/logs/retention/policy", methods=["GET", "POST"])
+@require_auth(roles=["admin"])
 def manage_retention_policy():
     """Get or set retention policy for projects."""
     if request.method == "GET":
@@ -2883,6 +2945,7 @@ def manage_retention_policy():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/metrics/llm-usage")
+@require_permission("metrics:read")
 def get_llm_usage_metrics():
     """Get LLM usage statistics and costs."""
     project_name = request.args.get("project_name")
@@ -2930,6 +2993,7 @@ def get_llm_usage_metrics():
 
 
 @app.route("/api/metrics/api-performance")
+@require_permission("metrics:read")
 def get_api_performance_metrics():
     """Get API endpoint performance metrics."""
     # This would track response times if we add middleware to log them
@@ -2940,6 +3004,7 @@ def get_api_performance_metrics():
 
 
 @app.route("/api/metrics/error-resolution-time")
+@require_permission("metrics:read")
 def get_error_resolution_metrics():
     """Calculate average time to resolve errors."""
     project_name = request.args.get("project_name")
@@ -2981,6 +3046,7 @@ def get_error_resolution_metrics():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/logs/<log_id>/context", methods=["POST"])
+@require_permission("logs:annotate")
 def add_log_context(log_id):
     """Add additional context to a log entry."""
     body = request.get_json() or {}
@@ -3009,6 +3075,7 @@ def add_log_context(log_id):
 
 
 @app.route("/api/logs/<log_id>/context", methods=["GET"])
+@require_permission("logs:read")
 def get_log_context(log_id):
     """Get context data for a log entry."""
     try:
@@ -3023,6 +3090,7 @@ def get_log_context(log_id):
 
 
 @app.route("/api/logs/by-session/<session_id>")
+@require_permission("logs:read")
 def get_logs_by_session(session_id):
     """Get all logs for a specific user session."""
     try:
@@ -3039,6 +3107,7 @@ def get_logs_by_session(session_id):
 
 
 @app.route("/api/logs/by-deployment/<deployment_id>")
+@require_permission("logs:read")
 def get_logs_by_deployment(deployment_id):
     """Get all logs for a specific deployment."""
     try:
@@ -3055,6 +3124,7 @@ def get_logs_by_deployment(deployment_id):
 
 
 @app.route("/api/visualization/gauge")
+@require_permission("visualization:read")
 def visualization_gauge():
     """
     GET /api/visualization/gauge
@@ -3162,6 +3232,7 @@ def visualization_gauge():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/projects/<path:name>/logs")
+@require_permission("projects:read")
 def project_logs(name):
     project_name = name
     page = max(1, int(request.args.get("page", 1)))
@@ -3362,6 +3433,7 @@ def project_logs(name):
 
 
 @app.route("/api/projects/<path:name>/errors", methods=["POST"])
+@require_permission("errors:resolve")
 def upsert_project_error(name):
     project_name = name
     try:
@@ -3419,6 +3491,7 @@ def upsert_project_error(name):
 
 
 @app.route("/api/projects/<path:name>/errors/<hash>/resolve", methods=["PATCH"])
+@require_permission("errors:resolve")
 def resolve_project_error(name, hash):
     try:
         actual_name = _resolve_project_name(name)
@@ -3436,6 +3509,7 @@ def resolve_project_error(name, hash):
 
 
 @app.route("/api/projects/<path:name>/live", methods=["PATCH"])
+@require_auth(roles=["admin"])
 def toggle_project_live(name):
     body = request.get_json() or {}
     is_live = body.get("is_live")
@@ -3842,6 +3916,7 @@ def ingest_success():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/dashboard/top-projects")
+@require_permission("dashboard:read")
 def dashboard_top_projects():
     from_ts = request.args.get("from", "")
     to_ts = request.args.get("to", "")
@@ -3868,6 +3943,7 @@ def dashboard_top_projects():
 
 
 @app.route("/api/dashboard/top-error-projects")
+@require_permission("dashboard:read")
 def dashboard_top_error_projects():
     from_ts = request.args.get("from", "")
     to_ts = request.args.get("to", "")
@@ -3898,6 +3974,7 @@ def dashboard_top_error_projects():
 
 
 @app.route("/api/dashboard/today-errors")
+@require_permission("dashboard:read")
 def dashboard_today_errors():
     try:
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -3919,6 +3996,7 @@ def dashboard_today_errors():
 
 
 @app.route("/api/dashboard/errors")
+@require_permission("dashboard:read")
 def dashboard_errors():
     from_ts = request.args.get("from", "")
     to_ts = request.args.get("to", "")
@@ -3951,6 +4029,7 @@ def dashboard_errors():
 
 
 @app.route("/api/dashboard/project-errors", methods=["GET"])
+@require_permission("dashboard:read")
 def dashboard_project_errors():
     """
     GET /api/dashboard/project-errors?project=<name>&from=<iso>&to=<iso>
@@ -4119,6 +4198,7 @@ def jira_summary():
 
 
 @app.route("/api/breaks/grouped")
+@require_permission("breaks:read")
 def breaks_grouped():
     page = max(1, int(request.args.get("page", 1) or 1))
     limit = min(100, max(1, int(request.args.get("limit", 20) or 20)))
@@ -4241,6 +4321,7 @@ def breaks_grouped():
 
 
 @app.route("/api/breaks/<break_id>")
+@require_permission("breaks:read")
 def get_break(break_id):
     """
     GET /api/breaks/:id — returns break detail with correlatedLogs: []
@@ -4265,6 +4346,7 @@ def get_break(break_id):
 
 
 @app.route("/api/breaks/detail/<error_hash>")
+@require_permission("breaks:read")
 def get_break_detail(error_hash):
     """
     GET /api/breaks/detail/:error_hash
@@ -4960,6 +5042,7 @@ def get_break_detail(error_hash):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/dashboard")
+@require_permission("dashboard:read")
 def dashboard_legacy():
     """
     GET /api/dashboard — returns aggregated break counts, trend, etc.
@@ -5009,6 +5092,7 @@ def dashboard_legacy():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/knowledge_base/reopen", methods=["POST"])
+@require_permission("errors:resolve")
 def reopen_error_solution():
     body         = request.get_json() or {}
     error_hash   = body.get("error_hash")
@@ -5045,6 +5129,7 @@ def reopen_error_solution():
 
 
 @app.route("/api/knowledge_base/resolve", methods=["POST"])
+@require_permission("errors:resolve")
 def resolve_error_solution():
     body         = request.get_json() or {}
     error_hash   = body.get("error_hash")
@@ -5080,6 +5165,7 @@ def resolve_error_solution():
 
 
 @app.route("/api/knowledge_base/use", methods=["POST"])
+@require_permission("errors:resolve")
 def use_solution():
     body         = request.get_json() or {}
     solution_id  = body.get("solution_id")
@@ -5132,6 +5218,7 @@ def use_solution():
 
 
 @app.route("/api/knowledge_base/<solution_id>/versions", methods=["GET"])
+@require_permission("breaks:read")
 def get_solution_versions_route(solution_id):
     try:
         versions = get_solution_versions(solution_id)
@@ -5142,6 +5229,7 @@ def get_solution_versions_route(solution_id):
 
 
 @app.route("/api/knowledge_base/<solution_id>/versions/<version_id>", methods=["DELETE"])
+@require_permission("errors:resolve")
 def delete_solution_version_route(solution_id, version_id):
     try:
         count = delete_solution_version(version_id)
@@ -5152,6 +5240,7 @@ def delete_solution_version_route(solution_id, version_id):
 
 
 @app.route("/api/knowledge_base/top", methods=["GET"])
+@require_permission("breaks:read")
 def get_top_solutions_route():
     # Primary key: error_message (normalized in get_top_solutions).
     # error_hash accepted for backward-compat but ignored when error_message is present.
@@ -5181,6 +5270,7 @@ def get_top_solutions_route():
 
 
 @app.route("/api/knowledge_base/<error_hash>", methods=["GET"])
+@require_permission("breaks:read")
 def get_error_solution(error_hash):
     try:
         hash_candidates = build_error_hash_candidates(error_hash, None)
@@ -5204,6 +5294,7 @@ def get_error_solution(error_hash):
 
 
 @app.route("/api/knowledge_base", methods=["POST"])
+@require_permission("errors:resolve")
 def upsert_error_solution():
     body = request.get_json() or {}
     error_hash   = body.get("error_hash")
@@ -5248,6 +5339,7 @@ def upsert_error_solution():
 
 
 @app.route("/api/knowledge_base/<error_hash>", methods=["DELETE"])
+@require_permission("errors:resolve")
 def delete_error_solution(error_hash):
     """Delete one solution family (all versions created via Improve from the same root).
 
@@ -5459,10 +5551,8 @@ def bootstrap_google_id():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/users", methods=["GET"])
+@require_auth(roles=["admin"])
 def list_users():
-    _, err = require_role("admin")
-    if err:
-        return err
     try:
         rows = query(
             f"SELECT * FROM {TABLE} WHERE row_type = 'user' ORDER BY created_at DESC"
@@ -5473,16 +5563,17 @@ def list_users():
 
 
 @app.route("/api/users", methods=["POST"])
+@require_auth(roles=["admin"])
 def create_user():
-    _, err = require_role("admin")
-    if err:
-        return err
     body = request.get_json() or {}
+    role = body.get("role", "viewer")
+    if role not in VALID_ROLES:
+        return jsonify({"error": "Bad Request", "message": f"Invalid role. Must be one of: {', '.join(sorted(VALID_ROLES))}"}), 400
     try:
         row = execute_returning(
             f"INSERT INTO {TABLE} (id, row_type, email, role, oauth_provider, oauth_subject, created_at) "
             f"VALUES (%s,'user',%s,%s,%s,%s,NOW()) RETURNING *",
-            (str(uuid.uuid4()), body.get("email"), body.get("role"),
+            (str(uuid.uuid4()), body.get("email"), role,
              body.get("oauthProvider"), body.get("oauthSubject")),
         )
         return jsonify(serialize_row(row)), 201
@@ -5490,12 +5581,79 @@ def create_user():
         return jsonify({"error": "Internal server error"}), 500
 
 
-@app.route("/api/users/<user_id>", methods=["DELETE"])
-def delete_user(user_id):
-    _, err = require_role("admin")
-    if err:
-        return err
+@app.route("/api/users/<user_id>", methods=["PUT"])
+@require_auth(roles=["admin"])
+def update_user(user_id):
+    body = request.get_json() or {}
+    # Validate role if provided
+    new_role = body.get("role")
+    if new_role is not None and new_role not in VALID_ROLES:
+        return jsonify({"error": "Bad Request", "message": f"Invalid role. Must be one of: {', '.join(sorted(VALID_ROLES))}"}), 400
+
+    # Check user exists
     try:
+        rows = query(
+            f"SELECT * FROM {TABLE} WHERE row_type = 'user' AND id = %s",
+            (user_id,),
+        )
+        if not rows:
+            return jsonify({"error": "Not Found", "message": "User not found."}), 404
+
+        existing_user = rows[0]
+
+        # Prevent demotion of the last admin
+        if new_role and new_role != "admin" and existing_user.get("role") == "admin":
+            admin_count_rows = query(
+                f"SELECT COUNT(*) AS cnt FROM {TABLE} WHERE row_type = 'user' AND role = 'admin'"
+            )
+            admin_count = int(admin_count_rows[0]["cnt"]) if admin_count_rows else 0
+            if admin_count <= 1:
+                return jsonify({"error": "Forbidden", "message": "Cannot demote the last admin."}), 403
+
+        # Build update fields
+        update_fields = {}
+        if "email" in body:
+            update_fields["email"] = body["email"]
+        if new_role is not None:
+            update_fields["role"] = new_role
+
+        if not update_fields:
+            return jsonify(serialize_row(existing_user))
+
+        set_clauses = ", ".join(f"{k} = %s" for k in update_fields.keys())
+        values = list(update_fields.values()) + [user_id]
+
+        row = execute_returning(
+            f"UPDATE {TABLE} SET {set_clauses} WHERE row_type = 'user' AND id = %s RETURNING *",
+            tuple(values),
+        )
+        if not row:
+            return jsonify({"error": "Not Found", "message": "User not found."}), 404
+        return jsonify(serialize_row(row))
+    except Exception as e:
+        logger.exception("[Users] PUT error: %s", e)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route("/api/users/<user_id>", methods=["DELETE"])
+@require_auth(roles=["admin"])
+def delete_user(user_id):
+    try:
+        # Prevent deletion of last admin
+        rows = query(
+            f"SELECT role FROM {TABLE} WHERE row_type = 'user' AND id = %s",
+            (user_id,),
+        )
+        if not rows:
+            return jsonify({"error": "User not found"}), 404
+        if rows[0].get("role") == "admin":
+            admin_count_rows = query(
+                f"SELECT COUNT(*) AS cnt FROM {TABLE} WHERE row_type = 'user' AND role = 'admin'"
+            )
+            admin_count = int(admin_count_rows[0]["cnt"]) if admin_count_rows else 0
+            if admin_count <= 1:
+                return jsonify({"error": "Forbidden", "message": "Cannot delete the last admin."}), 403
+
         count = execute(
             f"DELETE FROM {TABLE} WHERE row_type = 'user' AND id = %s",
             (user_id,),
@@ -5512,6 +5670,7 @@ def delete_user(user_id):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/test/smart-extraction", methods=["GET"])
+@require_auth(roles=["admin"])
 def test_smart_extraction():
     """
     GET /api/test/smart-extraction
@@ -5615,6 +5774,7 @@ KeyError: 'user_id'""",
 
 
 @app.route("/api/test/ingestion", methods=["POST"])
+@require_auth(roles=["admin"])
 def test_ingestion():
     """
     POST /api/test/ingestion
@@ -5731,6 +5891,7 @@ KeyError: 'user_id'""",
 
 
 @app.route("/api/test/parser", methods=["POST"])
+@require_auth(roles=["admin"])
 def test_parser():
     """
     POST /api/test/parser
@@ -5811,6 +5972,7 @@ def test_parser():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/error-groups", methods=["GET"])
+@require_permission("error-groups:read")
 def list_error_groups():
     """
     GET /api/error-groups[?project_name=xxx]
@@ -5830,6 +5992,7 @@ def list_error_groups():
 
 
 @app.route("/api/error-groups/taxonomy", methods=["GET"])
+@require_permission("error-groups:read")
 def get_error_taxonomy():
     """
     GET /api/error-groups/taxonomy
@@ -5846,6 +6009,7 @@ def get_error_taxonomy():
 
 
 @app.route("/api/error-groups/classify", methods=["POST"])
+@require_permission("error-groups:write")
 def classify_single_error():
     """
     POST /api/error-groups/classify
@@ -5878,6 +6042,7 @@ def classify_single_error():
 
 
 @app.route("/api/error-groups/backfill", methods=["POST"])
+@require_permission("error-groups:write")
 def backfill_error_groups():
     """
     POST /api/error-groups/backfill
@@ -5931,6 +6096,7 @@ def backfill_error_groups():
 
 
 @app.route("/api/error-groups/override", methods=["PATCH"])
+@require_permission("error-groups:write")
 def override_error_group():
     """
     PATCH /api/error-groups/override
@@ -5964,6 +6130,7 @@ def override_error_group():
 
 
 @app.route("/api/error-groups/merge", methods=["POST"])
+@require_permission("error-groups:write")
 def merge_error_groups():
     """
     POST /api/error-groups/merge
@@ -6012,6 +6179,7 @@ def merge_error_groups():
 
 
 @app.route("/api/error-groups/rename", methods=["PATCH"])
+@require_permission("error-groups:write")
 def rename_error_group():
     """
     PATCH /api/error-groups/rename
