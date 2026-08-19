@@ -85,7 +85,8 @@ def extract_solution_from_issue(issue: dict[str, Any]) -> dict[str, Any]:
     comment_lines = []
     for idx, c in enumerate(comments, start=1):
         body   = (c.get("body") or "").strip()
-        author = (c.get("author") or {}).get("display_name", "Unknown")
+        # Use displayName (Jira Cloud) falling back to display_name (webhook handler normalised)
+        author = (c.get("author") or {}).get("displayName") or (c.get("author") or {}).get("display_name", "Unknown")
         if body:
             comment_lines.append(f"[{idx}] {author}: {body}")
 
@@ -179,6 +180,17 @@ def _parse_nova_response(raw: str) -> dict[str, Any]:
     # If extracted but both fields are null/empty, mark as not extracted
     if extracted and not root_cause and not final_fix:
         extracted = False
+
+    # Quality gate: if final_fix is a single word or very short (< 15 chars),
+    # Nova likely latched onto a keyword rather than extracting a real fix.
+    # Treat as not extracted so the comment fallback fires instead.
+    if extracted and final_fix and len(final_fix.strip().split()) <= 2:
+        logger.info(
+            "[NovaExtractor] final_fix too short (%r) — rejecting as low quality",
+            final_fix.strip()[:40],
+        )
+        extracted = False
+        final_fix = None
 
     return {
         "root_cause": root_cause if isinstance(root_cause, str) and root_cause.strip() else None,
