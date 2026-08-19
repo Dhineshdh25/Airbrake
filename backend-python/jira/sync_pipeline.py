@@ -118,25 +118,103 @@ def run_sync_pipeline(event: dict[str, Any]) -> dict[str, Any]:
 
         error_hash = linked_row.get("error_hash") or ""
         project_name = linked_row.get("project_name") or None
-        error_message = linked_row.get("error") or issue.get("summary") or ""
-        jira_status = issue.get("status", "") or ""
+        error_message = linked_row.get("error") or (issue or {}).get("summary") or ""
+        jira_status = (issue or {}).get("status", "") or ""
 
-        extraction = extract_solution_from_issue(issue)
-        solution_text = build_solution_text(extraction)
+        # ── Solution extraction ───────────────────────────────────────────────
+        # Strategy:
+        # 1. Get the latest comment from the issue.
+        # 2. Use Nova to classify it — is it a technical solution or just discussion?
+        # 3. If it's a solution, use it directly (preserves full human-written text).
+        # 4. If Nova finds it's not a solution / no comment, fall back to Nova's
+        #    own extraction from the full issue content.
+        solution_text = None
+        comments = (issue or {}).get("comments") or []
 
-        # Fallback: if Nova found nothing, use the last comment directly.
-        # A human wrote it to explain the fix — it's better than nothing.
+        # Find the latest non-empty comment
+        latest_comment_body = None
+        latest_comment_author = None
+        for c in reversed(comments):
+            body = (c.get("body") or "").strip()
+            if body and len(body) > 15:
+                latest_comment_body = body
+                latest_comment_author = (
+                    (c.get("author") or {}).get("displayName")
+                    or (c.get("author") or {}).get("display_name")
+                    or "sync"
+                )
+                break
+
+        if latest_comment_body:
+            # Ask Nova: is this comment a technical solution or just discussion?
+            from .nova_extractor import _call_nova, _parse_nova_response
+            classify_prompt = (
+                "You are evaluating a Jira comment to determine if it contains a technical solution.\n\n"
+                f"COMMENT:\n{latest_comment_body[:1000]}\n\n"
+                "Does this comment describe a specific technical fix, root cause analysis, or actionable solution?\n"
+                "IGNORE: greetings, status updates ('I'll look into this'), questions, vague statements.\n"
+                "ONLY accept: specific technical actions taken, code changes, configuration fixes, root cause + fix.\n\n"
+                "Return ONLY valid JSON:\n"
+                "{\"is_solution\": <true or false>, \"confidence\": <0.0 to 1.0>}"
+            )
+            classify_raw = _call_nova(classify_prompt)
+            is_solution = False
+            if classify_raw:
+                try:
+                    import json as _j
+                    text = classify_raw.strip()
+                    start = text.find("{"); end = text.rfind("}") + 1
+                    if start != -1 and end > 0:
+                        result = _j.loads(text[start:end])
+                        is_solution = bool(result.get("is_solution", False))
+                        confidence = float(result.get("confidence", 0.0))
+                        # Only use if confidence >= 0.5
+                        if confidence < 0.5:
+                            is_solution = False
+                except Exception:
+                    is_solution = False
+            else:
+                # Nova unavailable — heuristic: if comment is > 50 chars and
+                # contains technical keywords, treat as solution
+                tech_keywords = {"fix", "solve", "resolv", "updat", "chang", "configur",
+                                  "install", "remov", "replac", "set ", "add ", "run ", "pip ",
+                                  "command", "code", "function", "class", "error", "import"}
+                body_lower = latest_comment_body.lower()
+                is_solution = (
+                    len(latest_comment_body) > 50
+                    and any(kw in body_lower for kw in tech_keywords)
+                )
+
+            if is_solution:
+                solution_text = latest_comment_body
+                logger.info(
+                    "[SyncPipeline] Using latest comment as solution for %s (len=%d)",
+                    issue_key, len(solution_text),
+                )
+
+        # If comment wasn't a solution, fall back to Nova full extraction
         if not solution_text:
-            comments = issue.get("comments") or []
-            for c in reversed(comments):
-                body = (c.get("body") or "").strip()
-                if body and len(body) > 10:
-                    solution_text = body
-                    logger.info(
-                        "[SyncPipeline] Nova found nothing — using last comment as solution for %s",
-                        issue_key,
-                    )
-                    break
+            extraction = extract_solution_from_issue(issue)
+            solution_text = build_solution_text(extraction)
+            if solution_text:
+                logger.info(
+                    "[SyncPipeline] Using Nova extraction for %s",
+                    issue_key,
+                )
+
+        # Last resort: use the comment body directly even if not classified as solution
+        if not solution_text and latest_comment_body and len(latest_comment_body) > 30:
+            solution_text = latest_comment_body
+            logger.info(
+                "[SyncPipeline] Last resort: using latest comment directly for %s",
+                issue_key,
+            )
+
+        creator = latest_comment_author or (
+            (issue or {}).get("reporter", {}).get("displayName")
+            or (issue or {}).get("assignee", {}).get("displayName")
+            or "sync"
+        )
 
         if not solution_text:
             overall_success = False
@@ -147,7 +225,7 @@ def run_sync_pipeline(event: dict[str, Any]) -> dict[str, Any]:
                 sol_result = insert_solution(
                     error_hash=error_hash,
                     solution=solution_text,
-                    created_by=f"jira:{(issue or {}).get('reporter', {}).get('displayName') or (issue or {}).get('assignee', {}).get('displayName') or 'sync'}",
+                    created_by=f"jira:{creator}",
                     project_name=project_name,
                     error_message=error_message,
                 )
@@ -160,6 +238,11 @@ def run_sync_pipeline(event: dict[str, Any]) -> dict[str, Any]:
                     solution_ok = True
                     detail = "Solution already in knowledge base; resolving error."
                     logger.info("[SyncPipeline] Duplicate solution for error_hash=%s — resolving anyway", error_hash)
+                elif "no matching log row" in exc_str.lower() or isinstance(exc, (ValueError, AttributeError)):
+                    # log row not found by insert_solution lookup — resolve directly without KB insert
+                    solution_ok = True
+                    detail = "Could not insert to KB (log row lookup failed) — resolving error directly."
+                    logger.warning("[SyncPipeline] insert_solution lookup failed for %s: %s — resolving anyway", error_hash, exc)
                 else:
                     overall_success = False
                     detail = f"Solution insertion failed: {exc}"

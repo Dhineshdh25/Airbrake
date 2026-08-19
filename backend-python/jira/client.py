@@ -294,3 +294,57 @@ class JiraClient:
 
         # Fallback: use configured cloud ID in a generic URL pattern
         return f"https://your-domain.atlassian.net/browse/{ticket_key}"
+
+    def transition_issue_to_todo(self, issue_key: str) -> None:
+        """
+        Move a Jira issue back to its initial To Do state.
+
+        Gets available transitions for the issue and applies the first one
+        whose name matches "To Do" (case-insensitive). If no exact match,
+        falls back to the transition with the lowest sequence order that is
+        NOT in a terminal category (Done/Closed/Resolved).
+
+        Raises requests.HTTPError on API failure.
+        """
+        # Step 1: get available transitions for this issue
+        url = f"{self._base}/issue/{issue_key}/transitions"
+        resp = requests.get(url, headers=self._headers, timeout=_TIMEOUT)
+        resp.raise_for_status()
+
+        transitions = resp.json().get("transitions", [])
+        if not transitions:
+            raise ValueError(f"No transitions available for {issue_key}")
+
+        # Step 2: find the best "To Do" transition
+        terminal_categories = {"done", "complete"}
+        chosen_id = None
+
+        # Prefer exact "To Do" name match
+        for t in transitions:
+            name = (t.get("name") or "").lower().strip()
+            if name in ("to do", "todo", "reopen", "open", "backlog"):
+                chosen_id = t["id"]
+                break
+
+        # Fallback: first non-terminal transition
+        if not chosen_id:
+            for t in transitions:
+                category = (t.get("to", {}).get("statusCategory", {}).get("key") or "").lower()
+                if category not in terminal_categories:
+                    chosen_id = t["id"]
+                    break
+
+        if not chosen_id:
+            # Last resort: just take the first available transition
+            chosen_id = transitions[0]["id"]
+
+        # Step 3: apply the transition
+        transition_url = f"{self._base}/issue/{issue_key}/transitions"
+        payload = {"transition": {"id": chosen_id}}
+        resp2 = requests.post(transition_url, json=payload, headers=self._headers, timeout=_TIMEOUT)
+        resp2.raise_for_status()
+
+        logger.info(
+            "[Jira Client] Transitioned %s to To Do via transition_id=%s",
+            issue_key, chosen_id,
+        )

@@ -5146,6 +5146,48 @@ def reopen_error_solution():
         )
         logger.info("[Reopen] log_id=%r error_hash=%r project=%r rows_updated=%d",
                     log_id, error_hash, project_name, count)
+
+        # ── Reopen the linked Jira ticket back to To Do ───────────────────────
+        # If this log row has a Jira ticket linked, move it back to To Do
+        # so the Jira ticket stays in sync with the Airbrake error status.
+        if count and log_id:
+            try:
+                from jira.jira_sync import find_airbrake_token_for_webhook
+                from jira.client import JiraClient
+                from db import query as _q
+
+                # Get the jira_issue_key from this row's metadata
+                meta_rows = _q(
+                    f"SELECT metadata FROM {TABLE} "
+                    f"WHERE row_type = 'log' AND id = %s "
+                    f"  AND metadata::jsonb ? 'jira_issue_key'",
+                    (log_id,),
+                )
+                if meta_rows:
+                    import json as _j
+                    raw  = meta_rows[0].get("metadata")
+                    meta = _j.loads(raw) if isinstance(raw, str) else (raw or {})
+                    issue_key = meta.get("jira_issue_key", "")
+                    if issue_key:
+                        token_pair = find_airbrake_token_for_webhook()
+                        if token_pair:
+                            access_token, cloud_id = token_pair
+                            client = JiraClient(access_token=access_token, cloud_id=cloud_id)
+                            try:
+                                client.transition_issue_to_todo(issue_key)
+                                logger.info(
+                                    "[Reopen] Moved Jira ticket %s back to To Do for log_id=%r",
+                                    issue_key, log_id,
+                                )
+                            except Exception as jira_exc:
+                                # Non-fatal — Airbrake reopen succeeded regardless
+                                logger.warning(
+                                    "[Reopen] Could not move Jira ticket %s to To Do: %s",
+                                    issue_key, jira_exc,
+                                )
+            except Exception as jira_outer_exc:
+                logger.warning("[Reopen] Jira sync step failed (non-fatal): %s", jira_outer_exc)
+
         return jsonify({"reopened": count, "project_name": project_name, "error_hash": error_hash})
     except Exception as e:
         logger.exception("[Reopen] Failed: %s", e)
