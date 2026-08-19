@@ -42,6 +42,7 @@ _CSRF_EXEMPT_PREFIXES = (
     "/api/auth/logout",               # Logout is session-destructive, exempt
     "/api/jira/webhook",              # Server-to-server Jira webhook
     "/api/jira/callback",             # OAuth redirect from Atlassian
+    "/api/jira/poll-sync",            # Can be called by scheduler with no session
 )
 
 # Paths that do NOT require authentication
