@@ -667,8 +667,9 @@ def jira_tickets():
     status = (request.args.get('status') or '').strip().lower()
     sync_status = (request.args.get('sync_status') or '').strip().lower()
 
-    filters = ["row_type = 'log'", "metadata::jsonb->>'jira_issue_key' IS NOT NULL"]
-    params = []
+    filters = ["row_type = 'log'", "metadata::jsonb->>'jira_issue_key' IS NOT NULL",
+               "owner_user_id = %s"]
+    params = [user_id]
 
     if project:
         filters.append("project_name = %s")
@@ -809,10 +810,28 @@ def jira_create():
     if not body.get("error_message"):
         return jsonify({"error": "error_message is required"}), 400
 
+    # Verify log ownership before creating the Jira ticket
+    log_id = body.get("log_id") or body.get("representative_id")
+    if log_id:
+        try:
+            from db import query as _q
+            log_rows = _q(
+                "SELECT id FROM projects_data "
+                "WHERE row_type = 'log' AND id = %s AND owner_user_id = %s",
+                (log_id, user_id),
+            )
+            if not log_rows:
+                logger.warning(
+                    "[Jira Routes] create ticket — log_id=%s does not belong to user_id=%s",
+                    log_id, user_id,
+                )
+                return jsonify({"error": "Not Found"}), 404
+        except Exception as _chk_exc:
+            logger.warning("[Jira Routes] ownership check failed: %s", _chk_exc)
+
     logger.info(
         "[Jira Routes] create ticket requested by user_id=%s error=%s",
-        user_id,
-        (body.get("error_message") or "")[:80],
+        user_id, (body.get("error_message") or "")[:80],
     )
 
     try:
@@ -1285,10 +1304,11 @@ def jira_ticket_status():
             "FROM projects_data "
             "WHERE row_type = 'log' "
             "  AND id = %s "
+            "  AND owner_user_id = %s "
             "  AND metadata::jsonb ? 'jira_issue_key' "
             "  AND metadata::jsonb->>'jira_issue_key' IS NOT NULL "
             "  AND metadata::jsonb->>'jira_issue_key' != '' ",
-            (log_id,),
+            (log_id, user_id),
         )
 
         if not rows:
