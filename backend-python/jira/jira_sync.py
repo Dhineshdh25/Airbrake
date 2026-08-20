@@ -172,10 +172,13 @@ def find_log_rows_by_jira_key(issue_key: str) -> list[dict]:
     Find all Airbrake log rows linked to a Jira issue key.
 
     Looks in the metadata JSON column for jira_issue_key = issue_key.
+    Also falls back to matching jira_issue_url containing the issue key
+    so rows linked via the URL field are never missed.
     Returns list of { id, project_name, error, error_hash, error_status }.
     """
     try:
         from db import query
+        # Primary lookup: exact jira_issue_key match
         rows = query(
             "SELECT id, project_name, error, error_hash, error_status "
             "FROM projects_data "
@@ -183,8 +186,30 @@ def find_log_rows_by_jira_key(issue_key: str) -> list[dict]:
             "  AND metadata::jsonb->>'jira_issue_key' = %s",
             (issue_key,),
         )
+
+        # Secondary: rows where jira_issue_key is missing but jira_issue_url
+        # contains the issue key (e.g. stored as .../browse/ARGUS-36).
+        # Avoids missing rows when /link stored the URL but not the key.
+        fallback_rows = query(
+            "SELECT id, project_name, error, error_hash, error_status "
+            "FROM projects_data "
+            "WHERE row_type = 'log' "
+            "  AND (metadata::jsonb->>'jira_issue_key' IS NULL "
+            "       OR metadata::jsonb->>'jira_issue_key' = '') "
+            "  AND metadata::jsonb->>'jira_issue_url' LIKE %s",
+            (f"%/{issue_key}",),
+        )
+
+        # Merge, deduplicating by id
+        seen: set[str] = {r["id"] for r in rows if r.get("id")}
+        for r in fallback_rows:
+            if r.get("id") and r["id"] not in seen:
+                rows.append(r)
+                seen.add(r["id"])
+
         logger.info(
-            "[JiraSync] Found %d log rows for issue_key=%s", len(rows), issue_key
+            "[JiraSync] Found %d log rows for issue_key=%s (primary=%d fallback=%d)",
+            len(rows), issue_key, len(rows) - len(fallback_rows), len(fallback_rows),
         )
         return rows
     except Exception as exc:

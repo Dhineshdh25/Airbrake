@@ -181,16 +181,21 @@ def _parse_nova_response(raw: str) -> dict[str, Any]:
     if extracted and not root_cause and not final_fix:
         extracted = False
 
-    # Quality gate: if final_fix is a single word or very short (< 15 chars),
-    # Nova likely latched onto a keyword rather than extracting a real fix.
-    # Treat as not extracted so the comment fallback fires instead.
-    if extracted and final_fix and len(final_fix.strip().split()) <= 2:
-        logger.info(
-            "[NovaExtractor] final_fix too short (%r) — rejecting as low quality",
-            final_fix.strip()[:40],
-        )
-        extracted = False
-        final_fix = None
+    # Quality gate: if final_fix is too short Nova likely latched onto a
+    # keyword rather than extracting a real fix (e.g. "path", "fix path").
+    # Reject anything under 20 characters OR 3 words so the comment
+    # fallback (which uses the full human-written text) fires instead.
+    if extracted and final_fix:
+        _fix_stripped = final_fix.strip()
+        _fix_words = _fix_stripped.split()
+        if len(_fix_stripped) < 20 or len(_fix_words) <= 3:
+            logger.info(
+                "[NovaExtractor] final_fix too short (%r, %d chars, %d words) — "
+                "rejecting as low quality",
+                _fix_stripped[:40], len(_fix_stripped), len(_fix_words),
+            )
+            extracted = False
+            final_fix = None
 
     return {
         "root_cause": root_cause if isinstance(root_cause, str) and root_cause.strip() else None,
