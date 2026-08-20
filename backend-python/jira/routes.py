@@ -742,6 +742,152 @@ def jira_tickets():
     })
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# GET /api/jira/my-tickets
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@jira_bp.route("/my-tickets")
+def jira_my_tickets():
+    """
+    GET /api/jira/my-tickets?status=resolved|open&limit=5&offset=0
+
+    Returns Jira tickets created by the currently authenticated Airbrake user,
+    with server-side pagination.
+
+    Filtering is done on the backend using the authenticated session user_id —
+    never trust a user-supplied id from the frontend.
+
+    Ticket ownership is determined by the jira_created_by field stamped on the
+    log row metadata at /api/jira/link time.
+
+    Historical tickets without a jira_created_by stamp cannot be attributed to
+    any user and are excluded from all users' views. No legacy fallback exists.
+    Only tickets explicitly stamped with jira_created_by = <user_id> are shown.
+
+    Query params:
+      status  — 'resolved' | 'open' (default: both)
+      limit   — int, default 5, max 50
+      offset  — int, default 0
+
+    Response:
+      {
+        "total":   int,       — total matching rows (for pagination)
+        "limit":   int,
+        "offset":  int,
+        "tickets": [
+          {
+            "log_id":      str,
+            "issue_key":   str,
+            "project_name": str,
+            "error":       str,   — truncated to 200 chars
+            "jira_status": str,
+            "jira_url":    str,
+            "updated_at":  str,
+          },
+          ...
+        ]
+      }
+    """
+    user_id, err = _require_auth()
+    if err:
+        return err
+
+    # ── Parse query params ────────────────────────────────────────────────────
+    status_filter = (request.args.get("status") or "").strip().lower()  # 'resolved' | 'open' | ''
+    try:
+        limit = min(int(request.args.get("limit", 5)), 50)
+    except (ValueError, TypeError):
+        limit = 5
+    try:
+        offset = max(int(request.args.get("offset", 0)), 0)
+    except (ValueError, TypeError):
+        offset = 0
+
+    terminal_values = tuple(s.lower() for s in TERMINAL_STATUSES)
+
+    # ── Base filter: ONLY this user's tickets (strict ownership) ─────────────
+    # A ticket is visible ONLY when jira_created_by == authenticated user_id.
+    # There is NO fallback for un-stamped (legacy) tickets.
+    # If a historical ticket has no jira_created_by stamp, it cannot be
+    # reliably attributed to any user — it is excluded from all users' views.
+    # This is the correct secure default.
+    base_conditions = [
+        "row_type = 'log'",
+        "metadata::jsonb ? 'jira_issue_key'",
+        "metadata::jsonb->>'jira_issue_key' IS NOT NULL",
+        "metadata::jsonb->>'jira_issue_key' != ''",
+        # Strict ownership — must have an explicit stamp matching this session's user.
+        "metadata::jsonb->>'jira_created_by' = %s",
+    ]
+    base_params: list = [user_id]
+
+    # ── Optional status filter ────────────────────────────────────────────────
+    if status_filter == "resolved":
+        base_conditions.append(
+            "LOWER(COALESCE(metadata::jsonb->>'jira_status', '')) IN %s"
+        )
+        base_params.append(terminal_values)
+    elif status_filter == "open":
+        base_conditions.append(
+            "(metadata::jsonb->>'jira_status' IS NULL "
+            " OR metadata::jsonb->>'jira_status' = '' "
+            " OR LOWER(metadata::jsonb->>'jira_status') NOT IN %s)"
+        )
+        base_params.append(terminal_values)
+
+    where_clause = " AND ".join(base_conditions)
+
+    try:
+        # Count query (no LIMIT/OFFSET) for the total
+        count_rows = query(
+            f"SELECT COUNT(*) AS n FROM projects_data WHERE {where_clause}",
+            tuple(base_params),
+        )
+        total = int((count_rows[0].get("n") or 0) if count_rows else 0)
+
+        # Data query with pagination
+        data_rows = query(
+            "SELECT id, project_name, error, metadata, "
+            "       COALESCE(updated_at, created_at) AS updated_at "
+            f"FROM projects_data WHERE {where_clause} "
+            "ORDER BY created_at DESC "
+            "LIMIT %s OFFSET %s",
+            tuple(base_params) + (limit, offset),
+        )
+    except Exception as exc:
+        logger.exception("[Jira Routes] my-tickets query failed: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+    tickets = []
+    for row in data_rows:
+        meta = _decode_metadata(row.get("metadata"))
+        issue_key = (meta.get("jira_issue_key") or "").strip()
+        jira_status = (meta.get("jira_status") or "").strip()
+        jira_url = (meta.get("jira_issue_url") or meta.get("jira_url") or meta.get("url") or "").strip()
+        error = (row.get("error") or "").strip() or (meta.get("error_message") or "").strip()
+        updated_at = row.get("updated_at")
+
+        tickets.append({
+            "log_id":       row.get("id"),
+            "issue_key":    issue_key,
+            "project_name": row.get("project_name") or meta.get("project_name") or "",
+            "error":        error[:200],
+            "jira_status":  jira_status,
+            "jira_url":     jira_url,
+            "updated_at":   updated_at.isoformat() if hasattr(updated_at, "isoformat") else (updated_at or ""),
+        })
+
+    logger.info(
+        "[Jira Routes] my-tickets user_id=%s status=%s total=%d limit=%d offset=%d",
+        user_id, status_filter or "all", total, limit, offset,
+    )
+    return jsonify({
+        "total":   total,
+        "limit":   limit,
+        "offset":  offset,
+        "tickets": tickets,
+    })
+
 @jira_bp.route('/tickets/<log_id>/retry-sync', methods=['POST'])
 def jira_retry_ticket_sync(log_id):
     user_id, err = _require_auth()
@@ -1046,7 +1192,7 @@ def jira_link():
 
     try:
         from .jira_sync import mark_log_jira_key
-        mark_log_jira_key(log_id, issue_key, issue_url=issue_url)
+        mark_log_jira_key(log_id, issue_key, issue_url=issue_url, created_by_user_id=user_id)
         logger.info(
             "[Jira Routes] Linked log_id=%s to issue_key=%s by user_id=%s",
             log_id, issue_key, user_id,

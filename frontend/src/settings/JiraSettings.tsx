@@ -9,7 +9,8 @@
  * environment variables, invisible to developers.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { apiFetch, API_BASE_URL } from '../lib/api';
 import { getCsrfToken, setCsrfTokenMemory } from '../auth/AuthContext';
 
@@ -78,6 +79,20 @@ export function JiraSettings() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy]       = useState(false);
   const [error, setError]     = useState('');
+  const sectionRef = useRef<HTMLElement>(null);
+  const location = useLocation();
+
+  // ── Scroll into view when redirected from Jira nav (not connected) ────────
+  useEffect(() => {
+    // With HashRouter, navigate('/settings?jira_section=1') puts the query
+    // string inside the hash — React Router exposes it via location.search.
+    const params = new URLSearchParams(location.search);
+    if (params.get('jira_section') === '1' && sectionRef.current) {
+      setTimeout(() => {
+        sectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 120);
+    }
+  }, [location.search]);
 
   // ── Check connection status on mount ──────────────────────────────────────
   useEffect(() => {
@@ -205,7 +220,7 @@ export function JiraSettings() {
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <section style={cardStyle}>
+    <section ref={sectionRef} style={cardStyle}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
         <span style={{ fontSize: 20 }}>🎫</span>

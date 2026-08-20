@@ -217,26 +217,55 @@ def find_log_rows_by_jira_key(issue_key: str) -> list[dict]:
         return []
 
 
-def mark_log_jira_key(log_id: str, issue_key: str, issue_url: str = "") -> None:
+def mark_log_jira_key(
+    log_id: str,
+    issue_key: str,
+    issue_url: str = "",
+    created_by_user_id: str = "",
+) -> None:
     """
     Store the Jira issue key (and URL) on a log row's metadata so we can
     look it up later via the global ticket-status endpoint.
+
+    Also stamps jira_created_by = the Airbrake user_id who created the ticket
+    so GET /api/jira/my-tickets can filter server-side per user.
 
     Uses a JSON merge so existing metadata is preserved.
     """
     try:
         from db import execute
-        execute(
-            "UPDATE projects_data "
-            "SET metadata = COALESCE(metadata::jsonb, '{}'::jsonb) "
-            "           || jsonb_build_object("
-            "               'jira_issue_key', %s::text,"
-            "               'jira_issue_url', %s::text"
-            "             ) "
-            "WHERE row_type = 'log' AND id = %s",
-            (issue_key, issue_url, log_id),
+        extra = {}
+        if created_by_user_id:
+            extra["jira_created_by"] = created_by_user_id
+        # Build the jsonb_build_object call dynamically — always include
+        # jira_issue_key and jira_issue_url; optionally include jira_created_by.
+        if extra:
+            execute(
+                "UPDATE projects_data "
+                "SET metadata = COALESCE(metadata::jsonb, '{}'::jsonb) "
+                "           || jsonb_build_object("
+                "               'jira_issue_key',  %s::text,"
+                "               'jira_issue_url',  %s::text,"
+                "               'jira_created_by', %s::text"
+                "             ) "
+                "WHERE row_type = 'log' AND id = %s",
+                (issue_key, issue_url, created_by_user_id, log_id),
+            )
+        else:
+            execute(
+                "UPDATE projects_data "
+                "SET metadata = COALESCE(metadata::jsonb, '{}'::jsonb) "
+                "           || jsonb_build_object("
+                "               'jira_issue_key', %s::text,"
+                "               'jira_issue_url', %s::text"
+                "             ) "
+                "WHERE row_type = 'log' AND id = %s",
+                (issue_key, issue_url, log_id),
+            )
+        logger.info(
+            "[JiraSync] Linked log_id=%s → jira_issue_key=%s created_by=%s",
+            log_id, issue_key, created_by_user_id or "(none)",
         )
-        logger.info("[JiraSync] Linked log_id=%s → jira_issue_key=%s", log_id, issue_key)
     except Exception as exc:
         logger.exception("[JiraSync] mark_log_jira_key failed: %s", exc)
 
