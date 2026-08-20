@@ -1,14 +1,15 @@
-import React from 'react';
+import React, { useCallback, useRef } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useTheme } from '../theme/ThemeContext';
 import { useAuth } from '../auth/AuthContext';
+import { apiFetch } from '../lib/api';
 
-const NAV_LINKS = [
+// Non-Jira links — plain React Router <Link>
+const PLAIN_NAV_LINKS = [
   { to: '/dashboard', label: 'Dashboard', icon: '▦' },
-  { to: '/logs', label: 'Log Stream', icon: '≡' },
-  { to: '/breaks', label: 'Breaks', icon: '⚡' },
-  { to: '/jira', label: 'Jira', icon: '🔗' },
-  { to: '/settings', label: 'Settings', icon: '⚙' },
+  { to: '/logs',      label: 'Log Stream', icon: '≡' },
+  { to: '/breaks',    label: 'Breaks',     icon: '⚡' },
+  { to: '/settings',  label: 'Settings',   icon: '⚙' },
 ];
 
 interface Props {
@@ -22,10 +23,94 @@ export function Layout({ children }: Props) {
   const location = useLocation();
   const isDark = theme === 'dark';
 
+  // Cache the last-known Jira connection status so repeated clicks don't
+  // fire an extra network request. Invalidated after 60 s.
+  const jiraStatusCache = useRef<{ connected: boolean; ts: number } | null>(null);
+
   const handleLogout = async () => {
     await logout();
     navigate('/auth/login', { replace: true });
   };
+
+  /**
+   * Jira nav click handler.
+   *
+   * 1. If the user has no Airbrake session yet → do nothing special; the
+   *    ProtectedRoute will redirect to login. This path should never happen
+   *    in practice because Layout is rendered inside ProtectedRoute.
+   *
+   * 2. If Jira IS connected → navigate to /jira normally.
+   *
+   * 3. If Jira is NOT connected → navigate to /settings and scroll to the
+   *    Jira Integration section.  Do NOT start Google OAuth.
+   *
+   * We call /api/jira/status (already called by JiraSettings on mount, so
+   * the Lambda response is usually cached at the CDN level and is fast).
+   */
+  const handleJiraClick = useCallback(
+    async (e: React.MouseEvent) => {
+      e.preventDefault();
+
+      // No user session — let the normal ProtectedRoute handle it
+      if (!user) {
+        navigate('/jira');
+        return;
+      }
+
+      // Use cached result if fresh (< 60 s)
+      const now = Date.now();
+      if (jiraStatusCache.current && now - jiraStatusCache.current.ts < 60_000) {
+        if (jiraStatusCache.current.connected) {
+          navigate('/jira');
+        } else {
+          navigate('/settings?jira_section=1', { replace: false });
+        }
+        return;
+      }
+
+      // Fetch fresh status
+      try {
+        const r = await apiFetch('/api/jira/status');
+        const d = await r.json() as { connected: boolean };
+        jiraStatusCache.current = { connected: d.connected, ts: Date.now() };
+        if (d.connected) {
+          navigate('/jira');
+        } else {
+          // Redirect to Settings → Jira Integration section.
+          // Do NOT navigate to /auth/login or start Google OAuth.
+          navigate('/settings?jira_section=1', { replace: false });
+        }
+      } catch {
+        // Network error — fall through to /jira which shows its own error state
+        navigate('/jira');
+      }
+    },
+    [user, navigate],
+  );
+
+  // Shared nav item styles
+  function navItemStyle(active: boolean): React.CSSProperties {
+    return {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      padding: '9px 12px',
+      borderRadius: 'var(--radius-sm)',
+      color: active ? '#fff' : 'rgba(255,255,255,0.5)',
+      fontWeight: active ? 600 : 400,
+      fontSize: 13.5,
+      background: active ? 'var(--accent-glow)' : 'transparent',
+      boxShadow: active ? 'inset 0 0 0 1px rgba(99,102,241,0.3)' : 'none',
+      transition: 'all var(--transition)',
+      textDecoration: 'none',
+      cursor: 'pointer',
+      border: 'none',
+      width: '100%',
+      textAlign: 'left',
+    };
+  }
+
+  const jiraActive = location.pathname === '/jira' || location.pathname.startsWith('/jira/');
 
   return (
     <div style={{ display: 'flex', minHeight: '100vh', background: 'var(--bg)', color: 'var(--text)', fontFamily: 'var(--font)' }}>
@@ -58,26 +143,13 @@ export function Layout({ children }: Props) {
 
         {/* Nav links */}
         <div style={{ flex: 1, padding: '12px 10px', display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {NAV_LINKS.map(({ to, label, icon }) => {
+          {PLAIN_NAV_LINKS.map(({ to, label, icon }) => {
             const active = location.pathname === to || location.pathname.startsWith(to + '/');
             return (
               <Link
                 key={to}
                 to={to}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 10,
-                  padding: '9px 12px',
-                  borderRadius: 'var(--radius-sm)',
-                  color: active ? '#fff' : 'rgba(255,255,255,0.5)',
-                  fontWeight: active ? 600 : 400,
-                  fontSize: 13.5,
-                  background: active ? 'var(--accent-glow)' : 'transparent',
-                  boxShadow: active ? 'inset 0 0 0 1px rgba(99,102,241,0.3)' : 'none',
-                  transition: 'all var(--transition)',
-                  textDecoration: 'none',
-                }}
+                style={navItemStyle(active) as React.CSSProperties}
               >
                 <span style={{ fontSize: 14, opacity: active ? 1 : 0.6, width: 18, textAlign: 'center' }}>{icon}</span>
                 {label}
@@ -94,6 +166,26 @@ export function Layout({ children }: Props) {
               </Link>
             );
           })}
+
+          {/* Jira — connection-aware nav item */}
+          <button
+            onClick={handleJiraClick}
+            style={navItemStyle(jiraActive) as React.CSSProperties}
+            aria-current={jiraActive ? 'page' : undefined}
+          >
+            <span style={{ fontSize: 14, opacity: jiraActive ? 1 : 0.6, width: 18, textAlign: 'center' }}>🔗</span>
+            Jira
+            {jiraActive && (
+              <span style={{
+                marginLeft: 'auto',
+                width: 6,
+                height: 6,
+                borderRadius: '50%',
+                background: 'var(--accent)',
+                boxShadow: '0 0 6px var(--accent)',
+              }} />
+            )}
+          </button>
         </div>
 
         {/* Theme toggle */}
