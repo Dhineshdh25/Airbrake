@@ -120,6 +120,22 @@ def run_sync_pipeline(event: dict[str, Any]) -> dict[str, Any]:
         project_name = linked_row.get("project_name") or None
         error_message = linked_row.get("error") or (issue or {}).get("summary") or ""
         jira_status = (issue or {}).get("status", "") or ""
+        current_status = linked_row.get("error_status") or ""
+
+        # Skip rows that are already resolved — they were resolved by a previous
+        # sync run or manually. Do not overwrite or duplicate-process them.
+        if current_status == "resolved":
+            logger.info(
+                "[SyncPipeline] log_id=%s already resolved — skipping (issue=%s)",
+                log_id, issue_key,
+            )
+            details.append(f"log_id={log_id} already resolved — skipped.")
+            continue
+
+        logger.info(
+            "[SyncPipeline] Processing log_id=%s issue=%s current_status=%s",
+            log_id, issue_key, current_status or "null",
+        )
 
         # ── Solution extraction ───────────────────────────────────────────────
         # Strategy:

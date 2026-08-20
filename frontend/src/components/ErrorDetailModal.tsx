@@ -524,6 +524,7 @@ export function ErrorDetailModal({
       // Store pending ticket context so we can auto-retry after OAuth callback
       const pendingContext = {
         error_hash: effectiveErrorHash,
+        log_id: resolvedLogId || undefined,
         project_name: projectName,
         error_message: errorMessage,
         error_group: data?.error_group_name,
@@ -535,7 +536,7 @@ export function ErrorDetailModal({
         timestamp: data?.last_seen,
         file_name: data?.file_name,
         airbrake_url: effectiveErrorHash
-          ? buildAirbrakeErrorUrl(effectiveErrorHash, projectName)
+          ? buildAirbrakeErrorUrl(effectiveErrorHash, projectName, resolvedLogId)
           : undefined,
       };
       sessionStorage.setItem('jira_pending_ticket', JSON.stringify(pendingContext));
