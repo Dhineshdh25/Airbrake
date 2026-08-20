@@ -1,20 +1,22 @@
 """
-Authentication, Authorization, and CSRF middleware.
+Authentication, Authorization, CSRF middleware, and project ownership helpers.
 
 Provides:
-  - require_auth()           — decorator that validates session (optional role list)
-  - require_permission()     — decorator enforcing permission-based RBAC
-  - get_current_user()       — returns the authenticated user or None
-  - csrf_protect()           — Double-Submit Cookie CSRF protection
-  - VALID_ROLES              — the only accepted role values
-  - ROLE_PERMISSIONS         — complete permission map per role
+  - require_auth()              — decorator that validates session (optional role list)
+  - require_permission()        — decorator enforcing permission-based RBAC
+  - get_current_user()          — returns the authenticated user or None
+  - csrf_protect()              — Double-Submit Cookie CSRF protection
+  - get_accessible_project()    — resolve a project only if it belongs to the current user
+  - require_project_access()    — like get_accessible_project() but returns 401/404 directly
+  - VALID_ROLES                 — the only accepted role values
+  - ROLE_PERMISSIONS            — complete permission map per role
 """
 
 import functools
 import logging
 import os
 import secrets
-from typing import Optional, Set
+from typing import Optional, Set, Tuple, Any
 
 from flask import g, jsonify, request
 
@@ -389,3 +391,201 @@ def csrf_protect():
 
     # No Origin header (server-to-server / curl) → allow
     return None
+
+
+# ── Project Ownership Helpers ─────────────────────────────────────────────────
+# These helpers enforce account-level isolation.  Every project and log query
+# MUST go through these helpers instead of querying by name/id alone.
+#
+# Rules enforced here:
+#   1. Session must exist   → 401
+#   2. Project must exist   → 404  (same response whether missing OR foreign)
+#   3. project.owner_user_id must equal authenticated user → 404
+#   4. owner_user_id IS NULL rows are NEVER returned (legacy / unowned data)
+#   5. owner_user_id is NEVER accepted from the client
+#
+# Only correctly owned data (e.g. test-stacktrace-demo with a valid owner)
+# is returned to that owner.  Legacy NULL rows are excluded and logged.
+
+
+def get_accessible_project(project_id: str) -> Tuple[Optional[dict], Optional[Any]]:
+    """
+    Resolve a project that belongs to the currently authenticated user.
+
+    Queries: WHERE row_type = 'project' AND id = %s AND owner_user_id = %s
+
+    Returns:
+      (project_dict, None)   — project found and owned by current user
+      (None, error_response) — 401 (no session) or 404 (not found / wrong owner)
+
+    Never leaks whether the project exists for another user: always 404.
+    Never accepts owner_user_id from the client.
+    Legacy rows with owner_user_id IS NULL are excluded and logged.
+    """
+    # Lazy import to avoid circular imports — db is not imported at module load
+    try:
+        from db import query as _db_query
+    except Exception as _e:
+        logger.error("[ProjectAccess] DB import failed: %s", _e)
+        return None, (jsonify({"error": "Internal server error"}), 500)
+
+    user = get_current_user()
+    if not user:
+        return None, (jsonify({"error": "Unauthorized", "message": "Authentication required."}), 401)
+
+    user_id = user["id"]
+
+    rows = _db_query(
+        "SELECT id, project_name, category, is_live, owner_user_id, project_id "
+        "FROM projects_data "
+        "WHERE row_type = 'project' AND id = %s AND owner_user_id = %s",
+        (project_id, user_id),
+    )
+
+    if not rows:
+        # Check if a project with this id exists but belongs to someone else or is unowned.
+        # We log a warning for unowned legacy rows but never expose them.
+        _check_legacy_project(project_id)
+        return None, (jsonify({"error": "Not Found"}), 404)
+
+    return dict(rows[0]), None
+
+
+def get_accessible_project_by_name(project_name: str) -> Tuple[Optional[dict], Optional[Any]]:
+    """
+    Resolve a project by name that belongs to the currently authenticated user.
+
+    Used by name-based legacy routes.  Two users may have projects with the
+    same name — they MUST NOT see each other's data.
+
+    Queries: WHERE row_type = 'project'
+                   AND LOWER(project_name) = LOWER(%s)
+                   AND owner_user_id = %s
+    """
+    try:
+        from db import query as _db_query
+    except Exception as _e:
+        logger.error("[ProjectAccess] DB import failed: %s", _e)
+        return None, (jsonify({"error": "Internal server error"}), 500)
+
+    user = get_current_user()
+    if not user:
+        return None, (jsonify({"error": "Unauthorized", "message": "Authentication required."}), 401)
+
+    user_id = user["id"]
+
+    rows = _db_query(
+        "SELECT id, project_name, category, is_live, owner_user_id, project_id "
+        "FROM projects_data "
+        "WHERE row_type = 'project' "
+        "  AND LOWER(project_name) = LOWER(%s) "
+        "  AND owner_user_id = %s",
+        (project_name, user_id),
+    )
+
+    if not rows:
+        _check_legacy_project_by_name(project_name)
+        return None, (jsonify({"error": "Not Found"}), 404)
+
+    return dict(rows[0]), None
+
+
+def require_project_access(project_id: str) -> Tuple[Optional[dict], Optional[Any]]:
+    """
+    Shortcut wrapper around get_accessible_project().
+
+    Identical semantics — callers can use whichever reads more naturally:
+        project, err = require_project_access(project_id)
+        if err:
+            return err
+    """
+    return get_accessible_project(project_id)
+
+
+def get_accessible_log(log_id: str, owner_user_id: str) -> Optional[dict]:
+    """
+    Fetch a single log row only if it belongs to the given owner.
+
+    Queries: WHERE row_type = 'log' AND id = %s AND owner_user_id = %s
+
+    Returns the row dict or None.  Logs a warning for unowned legacy rows.
+    Never accepts owner_user_id from the client — caller passes the
+    value from the authenticated session.
+    """
+    try:
+        from db import query as _db_query
+    except Exception as _e:
+        logger.error("[ProjectAccess] DB import failed: %s", _e)
+        return None
+
+    rows = _db_query(
+        "SELECT * FROM projects_data "
+        "WHERE row_type = 'log' AND id = %s AND owner_user_id = %s",
+        (log_id, owner_user_id),
+    )
+
+    if not rows:
+        # Check for an unowned legacy row and emit a warning
+        try:
+            legacy = _db_query(
+                "SELECT id, owner_user_id FROM projects_data "
+                "WHERE row_type = 'log' AND id = %s LIMIT 1",
+                (log_id,),
+            )
+            if legacy:
+                if legacy[0].get("owner_user_id") is None:
+                    logger.warning(
+                        "[ProjectAccess] LEGACY UNOWNED LOG row encountered — "
+                        "log_id=%s owner_user_id=NULL — NOT exposing to user %s",
+                        log_id, owner_user_id,
+                    )
+                else:
+                    logger.warning(
+                        "[ProjectAccess] Cross-user log access attempt — "
+                        "log_id=%s belongs to a different user — requested by %s",
+                        log_id, owner_user_id,
+                    )
+        except Exception:
+            pass
+        return None
+
+    return dict(rows[0])
+
+
+def _check_legacy_project(project_id: str) -> None:
+    """Log a warning if a project exists but has NULL ownership (legacy row)."""
+    try:
+        from db import query as _db_query
+        rows = _db_query(
+            "SELECT id, owner_user_id FROM projects_data "
+            "WHERE row_type = 'project' AND id = %s LIMIT 1",
+            (project_id,),
+        )
+        if rows and rows[0].get("owner_user_id") is None:
+            logger.warning(
+                "[ProjectAccess] LEGACY UNOWNED PROJECT encountered — "
+                "id=%s owner_user_id=NULL — NOT exposing to authenticated user",
+                project_id,
+            )
+    except Exception:
+        pass
+
+
+def _check_legacy_project_by_name(project_name: str) -> None:
+    """Log a warning if a project by this name exists but has NULL ownership."""
+    try:
+        from db import query as _db_query
+        rows = _db_query(
+            "SELECT id, owner_user_id FROM projects_data "
+            "WHERE row_type = 'project' "
+            "  AND LOWER(project_name) = LOWER(%s) LIMIT 1",
+            (project_name,),
+        )
+        if rows and rows[0].get("owner_user_id") is None:
+            logger.warning(
+                "[ProjectAccess] LEGACY UNOWNED PROJECT by name encountered — "
+                "project_name=%s owner_user_id=NULL — NOT exposing to authenticated user",
+                project_name,
+            )
+    except Exception:
+        pass
