@@ -663,13 +663,33 @@ def jira_tickets():
     if err:
         return err
 
-    project = (request.args.get('project') or '').strip()
-    status = (request.args.get('status') or '').strip().lower()
+    # Build access condition based on role
+    from auth.middleware import get_current_user as _gcr
+    _user = _gcr()
+    role = _user.get("role", "") if _user else ""
+
+    if role == "admin":
+        access_cond   = "owner_user_id IS NOT NULL"
+        access_params = []
+    elif role == "viewer":
+        # viewer sees all Jira tickets too
+        access_cond   = "owner_user_id IS NOT NULL"
+        access_params = []
+    else:
+        # developer: own logs or assigned logs
+        access_cond   = "(owner_user_id = %s OR assigned_to = %s)"
+        access_params = [user_id, user_id]
+
+    project     = (request.args.get('project') or '').strip()
+    status      = (request.args.get('status') or '').strip().lower()
     sync_status = (request.args.get('sync_status') or '').strip().lower()
 
-    filters = ["row_type = 'log'", "metadata::jsonb->>'jira_issue_key' IS NOT NULL",
-               "owner_user_id = %s"]
-    params = [user_id]
+    filters = [
+        "row_type = 'log'",
+        "metadata::jsonb->>'jira_issue_key' IS NOT NULL",
+        f"({access_cond})",
+    ]
+    params = list(access_params)
 
     if project:
         filters.append("project_name = %s")
@@ -956,24 +976,38 @@ def jira_create():
     if not body.get("error_message"):
         return jsonify({"error": "error_message is required"}), 400
 
-    # Verify log ownership before creating the Jira ticket
+    # Verify log access before creating the Jira ticket — role-aware
     log_id = body.get("log_id") or body.get("representative_id")
     if log_id:
         try:
             from db import query as _q
+            from auth.middleware import get_current_user as _gcr
+            _user = _gcr()
+            _role = _user.get("role", "") if _user else ""
+
+            if _role == "admin":
+                _access_cond   = "owner_user_id IS NOT NULL"
+                _access_params = []
+            elif _role == "viewer":
+                _access_cond   = "owner_user_id IS NOT NULL"
+                _access_params = []
+            else:
+                _access_cond   = "(owner_user_id = %s OR assigned_to = %s)"
+                _access_params = [user_id, user_id]
+
             log_rows = _q(
-                "SELECT id FROM projects_data "
-                "WHERE row_type = 'log' AND id = %s AND owner_user_id = %s",
-                (log_id, user_id),
+                f"SELECT id FROM projects_data "
+                f"WHERE row_type = 'log' AND id = %s AND ({_access_cond})",
+                tuple([log_id] + _access_params),
             )
             if not log_rows:
                 logger.warning(
-                    "[Jira Routes] create ticket — log_id=%s does not belong to user_id=%s",
-                    log_id, user_id,
+                    "[Jira Routes] create ticket — log_id=%s not accessible for user_id=%s role=%s",
+                    log_id, user_id, _role,
                 )
                 return jsonify({"error": "Not Found"}), 404
         except Exception as _chk_exc:
-            logger.warning("[Jira Routes] ownership check failed: %s", _chk_exc)
+            logger.warning("[Jira Routes] access check failed: %s", _chk_exc)
 
     logger.info(
         "[Jira Routes] create ticket requested by user_id=%s error=%s",
@@ -1420,41 +1454,44 @@ def jira_search():
 @jira_bp.route("/ticket-status")
 def jira_ticket_status():
     """
-    GET /api/jira/ticket-status?error_hash=<hash>
+    GET /api/jira/ticket-status?log_id=<id>
 
-    Returns whether a Jira ticket already exists for this error_hash.
-    This is a GLOBAL check — not scoped to the current user.
-    Any user opening the error detail gets the same answer.
-
-    Does NOT require Jira OAuth. Only reads the local database.
-    Does NOT create anything.
-
-    Response (ticket exists):
-      { has_ticket: true, issue_key: "ARGUS-15", issue_url: "...", status: "exists" }
-
-    Response (no ticket):
-      { has_ticket: false }
+    Returns whether a Jira ticket already exists for this log.
+    Access is role-aware:
+      admin/viewer → can check any log with a valid owner
+      developer    → can only check logs they own or are assigned to
     """
-    _, err = _require_auth()
+    user_id, err = _require_auth()
     if err:
         return err
 
     log_id = (request.args.get("log_id") or "").strip()
     if not log_id:
-        return jsonify({"has_ticket": False})  # no log_id = no ticket to check
+        return jsonify({"has_ticket": False})
 
     try:
         from db import query as _query
+        from auth.middleware import get_current_user as _gcr
+        _user = _gcr()
+        _role = _user.get("role", "") if _user else ""
+
+        if _role in ("admin", "viewer"):
+            _access_cond   = "owner_user_id IS NOT NULL"
+            _access_params = []
+        else:
+            _access_cond   = "(owner_user_id = %s OR assigned_to = %s)"
+            _access_params = [user_id, user_id]
+
         rows = _query(
-            "SELECT metadata "
-            "FROM projects_data "
-            "WHERE row_type = 'log' "
-            "  AND id = %s "
-            "  AND owner_user_id = %s "
-            "  AND metadata::jsonb ? 'jira_issue_key' "
-            "  AND metadata::jsonb->>'jira_issue_key' IS NOT NULL "
-            "  AND metadata::jsonb->>'jira_issue_key' != '' ",
-            (log_id, user_id),
+            f"SELECT metadata "
+            f"FROM projects_data "
+            f"WHERE row_type = 'log' "
+            f"  AND id = %s "
+            f"  AND ({_access_cond}) "
+            f"  AND metadata::jsonb ? 'jira_issue_key' "
+            f"  AND metadata::jsonb->>'jira_issue_key' IS NOT NULL "
+            f"  AND metadata::jsonb->>'jira_issue_key' != '' ",
+            tuple([log_id] + _access_params),
         )
 
         if not rows:
