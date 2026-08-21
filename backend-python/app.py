@@ -6201,12 +6201,15 @@ def get_user_ticket_counts(target_user_id):
     Returns the resolved and open Jira ticket counts for any user.
     Admin-only — the requester's identity comes from the session, never the URL.
 
-    This reuses exactly the same two-step ownership chain as
-    GET /api/jira/my-tickets:
-      Step 1: jira_ticket rows WHERE created_by = target_user_id  → owned_keys
-      Step 2: log rows WHERE jira_issue_key IN owned_keys
-                          OR jira_created_by = target_user_id
-              grouped by resolved/open status
+    Ownership source: jira_ticket rows WHERE created_by = target_user_id.
+    This is the authoritative record written by ticket_service.py at the
+    moment a ticket is created through Airbrake.
+
+    We classify by the jira_status field on the jira_ticket row itself
+    (kept up-to-date by poll-sync / webhook), NOT by matching log rows.
+    Matching log rows caused cross-user leakage: the same ARGUS key can
+    appear on log rows owned by different users if multiple people created
+    tickets for the same error_hash.
 
     Response:
       { "resolved": int, "open": int }
@@ -6220,7 +6223,11 @@ def get_user_ticket_counts(target_user_id):
         return jsonify({"error": "User not found"}), 404
 
     try:
-        # ── Step 1: jira_ticket rows owned by this user ───────────────────────
+        from jira.webhook_handler import TERMINAL_STATUSES
+        terminal_values = tuple(s.lower() for s in TERMINAL_STATUSES)
+
+        # Fetch all jira_ticket rows owned by this specific user.
+        # created_by = target_user_id is the ONLY filter — no log row join.
         ticket_rows = query(
             f"SELECT metadata FROM {TABLE} "
             f"WHERE row_type = 'jira_ticket' "
@@ -6228,61 +6235,16 @@ def get_user_ticket_counts(target_user_id):
             (target_user_id,),
         )
 
-        owned_keys: set = set()
+        resolved = 0
+        open_count = 0
         for tr in ticket_rows:
             raw  = tr.get("metadata")
             meta = json.loads(raw) if isinstance(raw, str) else (raw or {})
-            key  = (meta.get("jira_key") or meta.get("key") or "").strip()
-            if key:
-                owned_keys.add(key)
-
-        # ── Step 2: count log rows ────────────────────────────────────────────
-        from jira.webhook_handler import TERMINAL_STATUSES
-        terminal_values = tuple(s.lower() for s in TERMINAL_STATUSES)
-
-        # Build the ownership OR clause (same logic as jira_my_tickets)
-        ownership_parts: list = []
-        ownership_params: list = []
-
-        if owned_keys:
-            placeholders = ", ".join(["%s"] * len(owned_keys))
-            ownership_parts.append(
-                f"metadata::jsonb->>'jira_issue_key' IN ({placeholders})"
-            )
-            ownership_params.extend(sorted(owned_keys))
-
-        ownership_parts.append("metadata::jsonb->>'jira_created_by' = %s")
-        ownership_params.append(target_user_id)
-
-        ownership_clause = "(" + " OR ".join(ownership_parts) + ")"
-
-        base_where = (
-            f"row_type = 'log' "
-            f"AND metadata::jsonb ? 'jira_issue_key' "
-            f"AND metadata::jsonb->>'jira_issue_key' IS NOT NULL "
-            f"AND metadata::jsonb->>'jira_issue_key' != '' "
-            f"AND {ownership_clause}"
-        )
-
-        # Resolved count
-        resolved_rows = query(
-            f"SELECT COUNT(*) AS n FROM {TABLE} "
-            f"WHERE {base_where} "
-            f"  AND LOWER(COALESCE(metadata::jsonb->>'jira_status', '')) IN %s",
-            tuple(ownership_params) + (terminal_values,),
-        )
-        resolved = int((resolved_rows[0] or {}).get("n") or 0)
-
-        # Open count
-        open_rows = query(
-            f"SELECT COUNT(*) AS n FROM {TABLE} "
-            f"WHERE {base_where} "
-            f"  AND (metadata::jsonb->>'jira_status' IS NULL "
-            f"       OR metadata::jsonb->>'jira_status' = '' "
-            f"       OR LOWER(metadata::jsonb->>'jira_status') NOT IN %s)",
-            tuple(ownership_params) + (terminal_values,),
-        )
-        open_count = int((open_rows[0] or {}).get("n") or 0)
+            jira_status = (meta.get("jira_status") or "").strip().lower()
+            if jira_status in terminal_values:
+                resolved += 1
+            else:
+                open_count += 1
 
         return jsonify({"resolved": resolved, "open": open_count})
 
