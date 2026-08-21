@@ -6201,15 +6201,20 @@ def get_user_ticket_counts(target_user_id):
     Returns the resolved and open Jira ticket counts for any user.
     Admin-only — the requester's identity comes from the session, never the URL.
 
-    Ownership source: jira_ticket rows WHERE created_by = target_user_id.
-    This is the authoritative record written by ticket_service.py at the
-    moment a ticket is created through Airbrake.
+    Ownership is established via jira_ticket rows WHERE created_by = target_user_id.
+    Status is read from the corresponding log rows (WHERE jira_issue_key = owned_key),
+    because sync_pipeline.py writes jira_status onto row_type='log' rows — never onto
+    jira_ticket rows.  jira_ticket rows do not carry a jira_status field.
 
-    We classify by the jira_status field on the jira_ticket row itself
-    (kept up-to-date by poll-sync / webhook), NOT by matching log rows.
-    Matching log rows caused cross-user leakage: the same ARGUS key can
-    appear on log rows owned by different users if multiple people created
-    tickets for the same error_hash.
+    Anti-leakage guarantee:
+    - Step 1 collects owned_keys using created_by = target_user_id only.
+    - Step 2 reads jira_status from log rows WHERE jira_issue_key IN owned_keys.
+      This reads a status value only, NOT re-determines ownership.
+      No other user's tickets can appear because owned_keys is already
+      scoped to this specific user's jira_ticket records.
+    - If the same ARGUS key appears on multiple users' jira_ticket rows
+      (possible if two users created tickets for the same error_hash), each
+      user's owned_keys set is independent — their counts are independent too.
 
     Response:
       { "resolved": int, "open": int }
@@ -6226,8 +6231,8 @@ def get_user_ticket_counts(target_user_id):
         from jira.webhook_handler import TERMINAL_STATUSES
         terminal_values = tuple(s.lower() for s in TERMINAL_STATUSES)
 
-        # Fetch all jira_ticket rows owned by this specific user.
-        # created_by = target_user_id is the ONLY filter — no log row join.
+        # ── Step 1: collect jira_keys owned by this user ──────────────────────
+        # jira_ticket rows written by ticket_service.py carry created_by = user_id.
         ticket_rows = query(
             f"SELECT metadata FROM {TABLE} "
             f"WHERE row_type = 'jira_ticket' "
@@ -6235,12 +6240,47 @@ def get_user_ticket_counts(target_user_id):
             (target_user_id,),
         )
 
-        resolved = 0
-        open_count = 0
+        owned_keys: set = set()
         for tr in ticket_rows:
             raw  = tr.get("metadata")
             meta = json.loads(raw) if isinstance(raw, str) else (raw or {})
-            jira_status = (meta.get("jira_status") or "").strip().lower()
+            key  = (meta.get("jira_key") or meta.get("key") or "").strip()
+            if key:
+                owned_keys.add(key)
+
+        # No tickets at all for this user → return zeros immediately
+        if not owned_keys:
+            return jsonify({"resolved": 0, "open": 0})
+
+        # ── Step 2: read jira_status from log rows for this user's keys ───────
+        # sync_pipeline.py writes jira_status onto log rows, not jira_ticket rows.
+        # We read the most-recent jira_status for each owned key.
+        # Only one status per key is needed to classify that ticket.
+        placeholders = ", ".join(["%s"] * len(owned_keys))
+        status_rows = query(
+            f"SELECT DISTINCT ON (metadata::jsonb->>'jira_issue_key') "
+            f"       metadata::jsonb->>'jira_issue_key' AS issue_key, "
+            f"       metadata::jsonb->>'jira_status'    AS jira_status "
+            f"FROM {TABLE} "
+            f"WHERE row_type = 'log' "
+            f"  AND metadata::jsonb->>'jira_issue_key' IN ({placeholders}) "
+            f"ORDER BY metadata::jsonb->>'jira_issue_key', created_at DESC",
+            tuple(sorted(owned_keys)),
+        )
+
+        # Build a lookup: issue_key → jira_status (from the most-recent log row)
+        status_map: dict = {}
+        for sr in status_rows:
+            key    = (sr.get("issue_key") or "").strip()
+            status = (sr.get("jira_status") or "").strip().lower()
+            if key:
+                status_map[key] = status
+
+        # Classify each owned key using the status_map
+        resolved   = 0
+        open_count = 0
+        for key in owned_keys:
+            jira_status = status_map.get(key, "")
             if jira_status in terminal_values:
                 resolved += 1
             else:
