@@ -604,18 +604,19 @@ def _build_project_access_condition(user: dict) -> tuple:
     admin   → "TRUE"  — unrestricted; includes legacy NULL-owner rows
     viewer  → "TRUE"  — unrestricted; includes legacy NULL-owner rows
     developer → three access paths (any one sufficient):
-        1. owner_user_id = authenticated_user_id
-           (developer created or owns the project directly)
-        2. COALESCE(metadata::jsonb, '{}'::jsonb)->>'responsible_user_id' = user_id
-           (admin assigned developer as the Responsible User via Settings)
+        1. owner_user_id = user_id
+        2. metadata TEXT column contains the user_id as responsible_user_id
+           (uses plain-text LIKE to avoid JSONB casting issues in Aurora DSQL)
         3. id IN (SELECT DISTINCT project_id FROM logs WHERE assigned_to = user_id)
-           (developer has individual logs directly assigned to them)
     unknown → "FALSE" — fail closed; no access
 
-    Rules:
-      - role is normalised to lowercase before comparison
-      - admin/viewer use TRUE so legacy rows with owner_user_id = NULL are visible
-      - never trusts user_id from request body/params — always from the session
+    Aurora DSQL notes:
+      - JSONB casting (metadata::jsonb) can fail when metadata is NULL or when
+        Aurora DSQL's distributed query engine handles the cast differently.
+      - We use LIKE '%"responsible_user_id": "<id>"%' instead of JSONB operators.
+        This is safe because responsible_user_id is a UUID (no special regex chars)
+        and the LIKE pattern will only match when the key is present with that value.
+      - The self-referential subquery for logs is kept but uses only indexed columns.
     """
     role    = str(user.get("role") or "").strip().lower()
     user_id = user["id"]
@@ -624,10 +625,13 @@ def _build_project_access_condition(user: dict) -> tuple:
         return "TRUE", []
 
     if role == "developer":
+        # Plain-text responsible_user pattern — avoids JSONB cast entirely.
+        # The stored JSON always has the form: {"responsible_user_id": "<uuid>", ...}
+        responsible_pattern = f'%"responsible_user_id": "{user_id}"%'
         return (
             "("
             "  owner_user_id = %s"
-            "  OR COALESCE(metadata::jsonb, '{}'::jsonb)->>'responsible_user_id' = %s"
+            "  OR (metadata IS NOT NULL AND metadata LIKE %s)"
             "  OR id IN ("
             "    SELECT DISTINCT project_id FROM projects_data"
             "    WHERE row_type = 'log'"
@@ -635,7 +639,7 @@ def _build_project_access_condition(user: dict) -> tuple:
             "      AND project_id IS NOT NULL"
             "  )"
             ")",
-            [user_id, user_id, user_id],
+            [user_id, responsible_pattern, user_id],
         )
 
     # Unknown / missing role — fail closed
@@ -649,20 +653,17 @@ def _build_log_access_condition(user: dict) -> tuple:
     admin   → "TRUE"  — unrestricted; includes legacy NULL-owner rows
     viewer  → "TRUE"  — unrestricted; includes legacy NULL-owner rows
     developer → three access paths (any one sufficient):
-        1. owner_user_id = authenticated_user_id
-           (developer owns the log directly)
-        2. assigned_to = authenticated_user_id
-           (log was directly assigned to the developer)
-        3. project_id IN (SELECT id FROM projects WHERE responsible_user_id = user_id)
-           (developer is the Responsible User for the log's project — grants access to
-            ALL logs in that project without needing to update every log row)
+        1. owner_user_id = user_id
+        2. assigned_to = user_id
+        3. project_id IN (SELECT id FROM projects WHERE metadata LIKE responsible pattern)
+           Grants access to ALL logs in a project where developer is responsible_user.
+           Uses plain-text LIKE to avoid JSONB casting issues in Aurora DSQL.
     unknown → "FALSE" — fail closed; no access
 
-    Rules:
-      - role is normalised to lowercase before comparison
-      - admin/viewer use TRUE so legacy rows with owner_user_id = NULL are visible
-      - the responsible_user subquery is the key fix: assigning a project-level
-        responsible user grants access to every log in that project
+    Aurora DSQL notes:
+      - Same LIKE approach as _build_project_access_condition to avoid JSONB issues.
+      - The responsible_user subquery is a separate SELECT on projects_data — Aurora
+        DSQL handles this as a standard subquery, not a self-join, which is safe.
     """
     role    = str(user.get("role") or "").strip().lower()
     user_id = user["id"]
@@ -671,6 +672,7 @@ def _build_log_access_condition(user: dict) -> tuple:
         return "TRUE", []
 
     if role == "developer":
+        responsible_pattern = f'%"responsible_user_id": "{user_id}"%'
         return (
             "("
             "  owner_user_id = %s"
@@ -678,10 +680,11 @@ def _build_log_access_condition(user: dict) -> tuple:
             "  OR project_id IN ("
             "    SELECT id FROM projects_data"
             "    WHERE row_type = 'project'"
-            "      AND COALESCE(metadata::jsonb, '{}'::jsonb)->>'responsible_user_id' = %s"
+            "      AND metadata IS NOT NULL"
+            "      AND metadata LIKE %s"
             "  )"
             ")",
-            [user_id, user_id, user_id],
+            [user_id, user_id, responsible_pattern],
         )
 
     return "FALSE", []
