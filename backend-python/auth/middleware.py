@@ -589,3 +589,72 @@ def _check_legacy_project_by_name(project_name: str) -> None:
             )
     except Exception:
         pass
+
+
+# ── Role-based data access condition helpers ──────────────────────────────────
+# These are the SINGLE SOURCE OF TRUTH for all role-based SQL scoping.
+# Every backend route and Jira endpoint must call these instead of writing
+# its own role check.  Changing the access model only requires editing here.
+
+
+def _build_project_access_condition(user: dict) -> tuple:
+    """
+    Return (WHERE-fragment, params) for scoping project queries by role.
+
+    admin   → "TRUE"  — unrestricted; includes legacy NULL-owner rows
+    viewer  → "TRUE"  — unrestricted; includes legacy NULL-owner rows
+    developer → assignment-only — only projects that contain at least one log
+                assigned to the authenticated user (owner_user_id alone is NOT enough)
+    unknown → "FALSE" — fail closed; no access
+
+    Rules:
+      - role is normalised to lowercase before comparison
+      - developer access is assignment-only; project ownership does NOT grant access
+      - admin/viewer use TRUE so legacy rows with owner_user_id = NULL are visible
+    """
+    role    = str(user.get("role") or "").strip().lower()
+    user_id = user["id"]
+
+    if role in ("admin", "viewer"):
+        return "TRUE", []
+
+    if role == "developer":
+        return (
+            "id IN ("
+            "  SELECT DISTINCT project_id FROM projects_data"
+            "  WHERE row_type = 'log'"
+            "    AND assigned_to = %s"
+            "    AND project_id IS NOT NULL"
+            ")",
+            [user_id],
+        )
+
+    # Unknown / missing role — fail closed
+    return "FALSE", []
+
+
+def _build_log_access_condition(user: dict) -> tuple:
+    """
+    Return (WHERE-fragment, params) for scoping log queries by role.
+
+    admin   → "TRUE"  — unrestricted; includes legacy NULL-owner rows
+    viewer  → "TRUE"  — unrestricted; includes legacy NULL-owner rows
+    developer → "assigned_to = %s" — only logs explicitly assigned to them
+                (owner_user_id alone does NOT grant log access)
+    unknown → "FALSE" — fail closed; no access
+
+    Rules:
+      - role is normalised to lowercase before comparison
+      - developer access is assignment-only; log ownership does NOT grant access
+      - admin/viewer use TRUE so legacy rows with owner_user_id = NULL are visible
+    """
+    role    = str(user.get("role") or "").strip().lower()
+    user_id = user["id"]
+
+    if role in ("admin", "viewer"):
+        return "TRUE", []
+
+    if role == "developer":
+        return "assigned_to = %s", [user_id]
+
+    return "FALSE", []
