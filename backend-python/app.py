@@ -402,6 +402,8 @@ try:
         get_accessible_project,
         get_accessible_project_by_name,
         get_accessible_log,
+        _build_project_access_condition,
+        _build_log_access_condition,
     )
 except Exception as _auth_import_exc:
     import traceback as _auth_tb
@@ -1018,54 +1020,12 @@ def debug_nova_direct():
 # ═══════════════════════════════════════════════════════════════════════════════
 # PROJECTS
 # ═══════════════════════════════════════════════════════════════════════════════
-
-def _build_project_access_condition(user: dict) -> tuple:
-    """
-    Return (WHERE-fragment, params) for scoping project queries by role.
-
-    admin   → all projects with a valid owner (sees everything)
-    viewer  → all projects with a valid owner (read-only, sees everything)
-    developer → only projects where a log is assigned to them
-                OR they are the owner of the project
-
-    Never returns NULL-owner rows regardless of role.
-    """
-    role    = user.get("role", "")
-    user_id = user["id"]
-
-    if role in ("admin", "viewer"):
-        # Full visibility — no ownership filter, just exclude legacy NULL rows
-        return "owner_user_id IS NOT NULL", []
-
-    # developer: projects they own OR have at least one log assigned to them
-    return (
-        "(owner_user_id = %s OR id IN ("
-        "  SELECT DISTINCT project_id FROM projects_data "
-        "  WHERE row_type = 'log' AND assigned_to = %s AND project_id IS NOT NULL"
-        "))",
-        [user_id, user_id],
-    )
+# Role-based access helpers live in auth/middleware.py and are imported via
+# the auth package import above. They are available as module-level names here:
+#   _build_project_access_condition(user) → (cond, params)
+#   _build_log_access_condition(user)     → (cond, params)
 
 
-def _build_log_access_condition(user: dict) -> tuple:
-    """
-    Return (WHERE-fragment, params) for scoping log queries by role.
-
-    admin   → all logs with a valid owner
-    viewer  → all logs with a valid owner (read-only)
-    developer → only logs they own OR logs assigned to them
-    """
-    role    = user.get("role", "")
-    user_id = user["id"]
-
-    if role in ("admin", "viewer"):
-        return "owner_user_id IS NOT NULL", []
-
-    # developer: own logs or assigned logs
-    return (
-        "(owner_user_id = %s OR assigned_to = %s)",
-        [user_id, user_id],
-    )
 @app.route("/api/projects")
 @require_permission("projects:read")
 def list_projects():
@@ -3536,27 +3496,14 @@ def project_logs(name):
 
     try:
         # ── Step 1: verify the caller can access this project ─────────────────
-        if role in ("admin", "viewer"):
-            # Full visibility — just check the project exists with a valid owner
-            proj_rows = query(
-                f"SELECT id, project_name FROM {TABLE} "
-                f"WHERE row_type = 'project' "
-                f"  AND LOWER(project_name) = LOWER(%s) "
-                f"  AND owner_user_id IS NOT NULL",
-                (project_name,),
-            )
-        else:
-            # developer: must own the project or have an assigned log in it
-            proj_rows = query(
-                f"SELECT id, project_name FROM {TABLE} "
-                f"WHERE row_type = 'project' "
-                f"  AND LOWER(project_name) = LOWER(%s) "
-                f"  AND (owner_user_id = %s OR id IN ("
-                f"    SELECT DISTINCT project_id FROM projects_data "
-                f"    WHERE row_type = 'log' AND assigned_to = %s AND project_id IS NOT NULL"
-                f"  ))",
-                (project_name, user_id, user_id),
-            )
+        access_cond, access_params = _build_project_access_condition(user)
+        proj_rows = query(
+            f"SELECT id, project_name FROM {TABLE} "
+            f"WHERE row_type = 'project' "
+            f"  AND LOWER(project_name) = LOWER(%s) "
+            f"  AND ({access_cond})",
+            [project_name] + access_params,
+        )
 
         if not proj_rows:
             return jsonify({
@@ -3571,15 +3518,8 @@ def project_logs(name):
 
         authorized_project_id = proj_rows[0]["id"]
 
-        # ── Step 2: build log-level access condition ──────────────────────────
-        # admin/viewer: all logs in this project
-        # developer: only their owned or assigned logs
-        if role in ("admin", "viewer"):
-            log_access_cond   = "owner_user_id IS NOT NULL"
-            log_access_params = []
-        else:
-            log_access_cond   = "(owner_user_id = %s OR assigned_to = %s)"
-            log_access_params = [user_id, user_id]
+        # ── Step 2: build log-level access condition using the role helper ───
+        log_access_cond, log_access_params = _build_log_access_condition(user)
 
         # ── Step 3: optional filters ──────────────────────────────────────────
         filters = []
@@ -3731,26 +3671,15 @@ def upsert_project_error(name):
     role    = user.get("role", "")
 
     try:
-        # Verify the caller can access this project
-        if role == "admin":
-            proj_rows = query(
-                f"SELECT id, project_name, owner_user_id FROM {TABLE} "
-                f"WHERE row_type = 'project' "
-                f"  AND LOWER(project_name) = LOWER(%s) "
-                f"  AND owner_user_id IS NOT NULL",
-                (name,),
-            )
-        else:
-            proj_rows = query(
-                f"SELECT id, project_name, owner_user_id FROM {TABLE} "
-                f"WHERE row_type = 'project' "
-                f"  AND LOWER(project_name) = LOWER(%s) "
-                f"  AND (owner_user_id = %s OR id IN ("
-                f"    SELECT DISTINCT project_id FROM projects_data "
-                f"    WHERE row_type = 'log' AND assigned_to = %s AND project_id IS NOT NULL"
-                f"  ))",
-                (name, user_id, user_id),
-            )
+        # Verify the caller can access this project using the role helper
+        access_cond, access_params = _build_project_access_condition(user)
+        proj_rows = query(
+            f"SELECT id, project_name, owner_user_id FROM {TABLE} "
+            f"WHERE row_type = 'project' "
+            f"  AND LOWER(project_name) = LOWER(%s) "
+            f"  AND ({access_cond})",
+            [name] + access_params,
+        )
         if not proj_rows:
             return jsonify({"error": "Not Found"}), 404
 
@@ -3819,24 +3748,15 @@ def resolve_project_error(name, hash):
     role    = user.get("role", "")
 
     try:
-        # Verify project access by role
-        if role == "admin":
-            proj_rows = query(
-                f"SELECT id FROM {TABLE} "
-                f"WHERE row_type = 'project' AND LOWER(project_name) = LOWER(%s) "
-                f"  AND owner_user_id IS NOT NULL",
-                (name,),
-            )
-        else:
-            proj_rows = query(
-                f"SELECT id FROM {TABLE} "
-                f"WHERE row_type = 'project' AND LOWER(project_name) = LOWER(%s) "
-                f"  AND (owner_user_id = %s OR id IN ("
-                f"    SELECT DISTINCT project_id FROM projects_data "
-                f"    WHERE row_type = 'log' AND assigned_to = %s AND project_id IS NOT NULL"
-                f"  ))",
-                (name, user_id, user_id),
-            )
+        # Verify project access using the role helper
+        access_cond, access_params = _build_project_access_condition(user)
+        proj_rows = query(
+            f"SELECT id FROM {TABLE} "
+            f"WHERE row_type = 'project' "
+            f"  AND LOWER(project_name) = LOWER(%s) "
+            f"  AND ({access_cond})",
+            [name] + access_params,
+        )
         if not proj_rows:
             return jsonify({"error": "Not Found"}), 404
 
@@ -3868,13 +3788,14 @@ def toggle_project_live(name):
     if not isinstance(is_live, bool):
         return jsonify({"error": "Body must contain { is_live: true | false }"}), 400
     try:
-        # Admin sees all projects — just require a valid owner
+        # Admin sees all projects (TRUE condition) — use helper
+        access_cond, access_params = _build_project_access_condition(user)
         row = execute_returning(
             f"UPDATE {TABLE} SET is_live = %s "
             f"WHERE row_type = 'project' AND LOWER(project_name) = LOWER(%s) "
-            f"  AND owner_user_id IS NOT NULL "
+            f"  AND ({access_cond}) "
             f"RETURNING id, project_name AS name, category, is_live",
-            (is_live, name),
+            tuple([is_live, name] + access_params),
         )
         if not row:
             return jsonify({"error": f"Project not found: {name}"}), 404
@@ -4526,11 +4447,36 @@ def dashboard_project_errors():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/jira/summary")
+@require_permission("jira:read")
 def jira_summary():
-    """Return Jira ticket summary for the breaks page Jira section."""
+    """
+    Return Jira ticket summary for the breaks page Jira section.
+    Scoped by role:
+      admin/viewer → all tickets
+      developer    → only tickets linked to logs assigned to them
+    """
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    log_access_cond, log_access_params = _build_log_access_condition(user)
+
     try:
+        # Fetch jira_ticket rows whose linked log is accessible to this user.
+        # jira_ticket rows store error_hash + project_name in metadata; we join
+        # back to log rows to enforce the access condition.
         rows = query(
-            "SELECT metadata FROM projects_data WHERE row_type = 'jira_ticket' ORDER BY created_at DESC"
+            f"SELECT jt.metadata "
+            f"FROM {TABLE} jt "
+            f"WHERE jt.row_type = 'jira_ticket' "
+            f"  AND EXISTS ("
+            f"    SELECT 1 FROM {TABLE} lg "
+            f"    WHERE lg.row_type = 'log' "
+            f"      AND lg.error_hash = jt.metadata::jsonb->>'error_hash' "
+            f"      AND ({log_access_cond})"
+            f"  ) "
+            f"ORDER BY jt.created_at DESC",
+            log_access_params,
         )
 
         tickets = []
@@ -4541,47 +4487,47 @@ def jira_summary():
             except Exception:
                 payload = {}
 
-            error_hash = payload.get("error_hash") or ""
+            error_hash   = payload.get("error_hash") or ""
             project_name = payload.get("project_name") or ""
-            created_by = payload.get("created_by") or ""
-            created_at = payload.get("created_at") or ""
-            jira_key = payload.get("jira_key") or payload.get("key") or ""
-            jira_url = payload.get("jira_url") or payload.get("url") or ""
+            created_by   = payload.get("created_by") or ""
+            created_at   = payload.get("created_at") or ""
+            jira_key     = payload.get("jira_key") or payload.get("key") or ""
+            jira_url     = payload.get("jira_url") or payload.get("url") or ""
 
             status = "Todo"
             if error_hash:
                 log_rows = query(
-                    "SELECT error_status FROM projects_data WHERE row_type = 'log' AND error_hash = %s AND LOWER(project_name) = LOWER(%s)",
-                    (error_hash, project_name),
+                    f"SELECT error_status FROM {TABLE} "
+                    f"WHERE row_type = 'log' "
+                    f"  AND error_hash = %s "
+                    f"  AND LOWER(project_name) = LOWER(%s) "
+                    f"  AND ({log_access_cond})",
+                    [error_hash, project_name] + log_access_params,
                 )
                 if log_rows:
                     error_status = (log_rows[0].get("error_status") or "").strip().lower()
                     if error_status == "resolved":
                         status = "Resolved"
-                    elif error_status == "reopened":
-                        status = "Todo"
-                    else:
-                        status = "Todo"
 
             tickets.append({
-                "error_hash": error_hash,
+                "error_hash":   error_hash,
                 "project_name": project_name,
-                "error": payload.get("error_message") or payload.get("summary") or "",
-                "jira_key": jira_key,
-                "jira_url": jira_url,
-                "created_by": created_by,
-                "created_at": created_at,
-                "status": status,
+                "error":        payload.get("error_message") or payload.get("summary") or "",
+                "jira_key":     jira_key,
+                "jira_url":     jira_url,
+                "created_by":   created_by,
+                "created_at":   created_at,
+                "status":       status,
             })
 
         resolved = sum(1 for t in tickets if t["status"] == "Resolved")
-        todo = sum(1 for t in tickets if t["status"] == "Todo")
+        todo     = sum(1 for t in tickets if t["status"] == "Todo")
 
         return jsonify({
-            "total": len(tickets),
+            "total":    len(tickets),
             "resolved": resolved,
-            "todo": todo,
-            "tickets": tickets,
+            "todo":     todo,
+            "tickets":  tickets,
         })
     except Exception as exc:
         logger.exception("[Jira Summary] failed: %s", exc)

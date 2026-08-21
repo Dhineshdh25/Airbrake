@@ -663,22 +663,12 @@ def jira_tickets():
     if err:
         return err
 
-    # Build access condition based on role
-    from auth.middleware import get_current_user as _gcr
+    # Use the shared access helper — single source of truth for role logic
+    from auth.middleware import get_current_user as _gcr, _build_log_access_condition as _lac
     _user = _gcr()
-    role = _user.get("role", "") if _user else ""
-
-    if role == "admin":
-        access_cond   = "owner_user_id IS NOT NULL"
-        access_params = []
-    elif role == "viewer":
-        # viewer sees all Jira tickets too
-        access_cond   = "owner_user_id IS NOT NULL"
-        access_params = []
-    else:
-        # developer: own logs or assigned logs
-        access_cond   = "(owner_user_id = %s OR assigned_to = %s)"
-        access_params = [user_id, user_id]
+    if not _user:
+        return jsonify({"error": "Unauthorized"}), 401
+    access_cond, access_params = _lac(_user)
 
     project     = (request.args.get('project') or '').strip()
     status      = (request.args.get('status') or '').strip().lower()
@@ -1027,24 +1017,16 @@ def jira_create():
     if not body.get("error_message"):
         return jsonify({"error": "error_message is required"}), 400
 
-    # Verify log access before creating the Jira ticket — role-aware
+    # Verify log access before creating the Jira ticket — use shared helper
     log_id = body.get("log_id") or body.get("representative_id")
     if log_id:
         try:
             from db import query as _q
-            from auth.middleware import get_current_user as _gcr
+            from auth.middleware import get_current_user as _gcr, _build_log_access_condition as _lac
             _user = _gcr()
-            _role = _user.get("role", "") if _user else ""
-
-            if _role == "admin":
-                _access_cond   = "owner_user_id IS NOT NULL"
-                _access_params = []
-            elif _role == "viewer":
-                _access_cond   = "owner_user_id IS NOT NULL"
-                _access_params = []
-            else:
-                _access_cond   = "(owner_user_id = %s OR assigned_to = %s)"
-                _access_params = [user_id, user_id]
+            if not _user:
+                return jsonify({"error": "Unauthorized"}), 401
+            _access_cond, _access_params = _lac(_user)
 
             log_rows = _q(
                 f"SELECT id FROM projects_data "
@@ -1053,8 +1035,8 @@ def jira_create():
             )
             if not log_rows:
                 logger.warning(
-                    "[Jira Routes] create ticket — log_id=%s not accessible for user_id=%s role=%s",
-                    log_id, user_id, _role,
+                    "[Jira Routes] create ticket — log_id=%s not accessible for user_id=%s",
+                    log_id, user_id,
                 )
                 return jsonify({"error": "Not Found"}), 404
         except Exception as _chk_exc:
@@ -1522,16 +1504,11 @@ def jira_ticket_status():
 
     try:
         from db import query as _query
-        from auth.middleware import get_current_user as _gcr
+        from auth.middleware import get_current_user as _gcr, _build_log_access_condition as _lac
         _user = _gcr()
-        _role = _user.get("role", "") if _user else ""
-
-        if _role in ("admin", "viewer"):
-            _access_cond   = "owner_user_id IS NOT NULL"
-            _access_params = []
-        else:
-            _access_cond   = "(owner_user_id = %s OR assigned_to = %s)"
-            _access_params = [user_id, user_id]
+        if not _user:
+            return jsonify({"error": "Unauthorized"}), 401
+        _access_cond, _access_params = _lac(_user)
 
         rows = _query(
             f"SELECT metadata "

@@ -18,4 +18,6 @@ from .middleware import (  # noqa: F401
     get_accessible_project_by_name,
     require_project_access,
     get_accessible_log,
+    _build_project_access_condition,
+    _build_log_access_condition,
 )
