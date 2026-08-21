@@ -1074,6 +1074,11 @@ def list_projects():
       admin/viewer → all projects (any valid owner)
       developer    → only projects they own OR have an assigned log in
     Never returns NULL-owner rows.
+
+    Response shape per project:
+      { id, name, category, is_live, owner_user_id,
+        responsible_user_id, responsible_user_email }
+    responsible_user_* come from the metadata JSONB column.
     """
     user = get_current_user()
     if not user:
@@ -1084,19 +1089,23 @@ def list_projects():
     try:
         if category:
             rows = query(
-                f"SELECT id, project_name AS name, category FROM {TABLE} "
+                f"SELECT id, project_name AS name, category, is_live, "
+                f"       owner_user_id, metadata "
+                f"FROM {TABLE} "
                 f"WHERE row_type = 'project' AND {access_cond} AND category = %s "
                 f"ORDER BY project_name",
                 access_params + [category],
             )
         else:
             rows = query(
-                f"SELECT id, project_name AS name, category FROM {TABLE} "
+                f"SELECT id, project_name AS name, category, is_live, "
+                f"       owner_user_id, metadata "
+                f"FROM {TABLE} "
                 f"WHERE row_type = 'project' AND {access_cond} "
                 f"ORDER BY project_name",
                 access_params,
             )
-        return jsonify(serialize_rows(rows))
+        return jsonify([_format_project(r) for r in rows])
     except Exception as e:
         print(f"[Projects] error: {e}")
         return jsonify({"error": "Internal server error"}), 500
@@ -1160,6 +1169,122 @@ def create_project():
         return jsonify(serialize_row(row)), 201
     except Exception as e:
         print(f"[Projects] create error: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+def _format_project(row: dict) -> dict:
+    """
+    Build a safe project dict for the frontend.
+
+    Pulls responsible_user_id and responsible_user_email out of the
+    metadata JSONB column so the frontend doesn't need to parse JSON.
+    """
+    raw_meta = row.get("metadata")
+    if isinstance(raw_meta, str):
+        try:
+            meta = json.loads(raw_meta)
+        except Exception:
+            meta = {}
+    elif isinstance(raw_meta, dict):
+        meta = raw_meta
+    else:
+        meta = {}
+    return {
+        "id":                     str(row.get("id") or ""),
+        "name":                   row.get("name") or row.get("project_name") or "",
+        "category":               row.get("category") or "",
+        "is_live":                bool(row.get("is_live")),
+        "owner_user_id":          str(row.get("owner_user_id") or ""),
+        "responsible_user_id":    meta.get("responsible_user_id") or "",
+        "responsible_user_email": meta.get("responsible_user_email") or "",
+    }
+
+
+@app.route("/api/projects/<project_id>/responsible-user", methods=["PATCH"])
+@require_auth(roles=["admin"])
+def set_project_responsible_user(project_id):
+    """
+    PATCH /api/projects/<project_id>/responsible-user
+
+    Assign or unassign a responsible user for a project.  Admin-only.
+
+    Body:
+      { "user_id": "<uuid>" }   — assign a user
+      { "user_id": null }       — unassign (set to Unassigned)
+
+    The responsible_user_id and responsible_user_email are stored in the
+    project row's metadata JSONB column — no schema migration needed.
+
+    Response: the updated project dict (same shape as GET /api/projects items).
+    """
+    caller = get_current_user()
+    if not caller:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    body = request.get_json() or {}
+    new_user_id = (body.get("user_id") or "").strip() or None
+
+    try:
+        # Verify project exists
+        proj_rows = query(
+            f"SELECT id, project_name AS name, category, is_live, owner_user_id, metadata "
+            f"FROM {TABLE} WHERE row_type = 'project' AND id = %s",
+            (project_id,),
+        )
+        if not proj_rows:
+            return jsonify({"error": "Project not found"}), 404
+
+        # Resolve the new responsible user (if any)
+        new_email = ""
+        if new_user_id:
+            user_rows = query(
+                f"SELECT email FROM {TABLE} WHERE row_type = 'user' AND id = %s LIMIT 1",
+                (new_user_id,),
+            )
+            if not user_rows:
+                return jsonify({"error": "User not found"}), 404
+            new_email = user_rows[0].get("email") or ""
+
+        # Merge into existing metadata (preserves other metadata fields)
+        if new_user_id:
+            execute(
+                f"UPDATE {TABLE} "
+                f"SET metadata = COALESCE(metadata::jsonb, '{{}}'::jsonb) "
+                f"           || jsonb_build_object("
+                f"               'responsible_user_id',    %s::text, "
+                f"               'responsible_user_email', %s::text"
+                f"             ) "
+                f"WHERE row_type = 'project' AND id = %s",
+                (new_user_id, new_email, project_id),
+            )
+        else:
+            # Unassign — remove the keys from metadata
+            execute(
+                f"UPDATE {TABLE} "
+                f"SET metadata = COALESCE(metadata::jsonb, '{{}}'::jsonb) "
+                f"           - 'responsible_user_id' "
+                f"           - 'responsible_user_email' "
+                f"WHERE row_type = 'project' AND id = %s",
+                (project_id,),
+            )
+
+        # Re-fetch and return the updated row
+        updated = query(
+            f"SELECT id, project_name AS name, category, is_live, owner_user_id, metadata "
+            f"FROM {TABLE} WHERE row_type = 'project' AND id = %s",
+            (project_id,),
+        )
+        if not updated:
+            return jsonify({"error": "Project not found after update"}), 404
+
+        logger.info(
+            "[Projects] Admin %s set responsible_user=%s for project_id=%s",
+            caller["id"], new_user_id or "(unassigned)", project_id,
+        )
+        return jsonify(_format_project(updated[0]))
+
+    except Exception as exc:
+        logger.exception("[Projects] responsible-user PATCH error: %s", exc)
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -5880,53 +6005,139 @@ def bootstrap_google_id():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ADMIN (users) — requires admin token
+# ADMIN (users) — requires admin role
 # ═══════════════════════════════════════════════════════════════════════════════
+
+# Safe columns to return — never expose oauth_subject, raw metadata, or
+# access tokens to the frontend.
+_USER_SAFE_COLS = "id, email, role, oauth_provider, created_at"
+
+
+def _safe_user(row: dict) -> dict:
+    """Strip sensitive fields before returning a user dict to the frontend."""
+    return {
+        "id":             str(row.get("id") or ""),
+        "email":          row.get("email") or "",
+        "role":           row.get("role") or "viewer",
+        "oauth_provider": row.get("oauth_provider") or "",
+        "created_at":     _safe_value(row.get("created_at")),
+    }
+
 
 @app.route("/api/users", methods=["GET"])
 @require_auth(roles=["admin"])
 def list_users():
+    """
+    GET /api/users
+
+    Returns all user accounts.  Only accessible by admins.
+    Response fields are restricted to non-sensitive columns — oauth_subject
+    and raw metadata are never returned.
+    """
     try:
         rows = query(
-            f"SELECT * FROM {TABLE} WHERE row_type = 'user' ORDER BY created_at DESC"
+            f"SELECT {_USER_SAFE_COLS} FROM {TABLE} "
+            f"WHERE row_type = 'user' ORDER BY created_at DESC"
         )
-        return jsonify(serialize_rows(rows))
-    except Exception:
+        return jsonify([_safe_user(r) for r in rows])
+    except Exception as exc:
+        logger.exception("[Users] list error: %s", exc)
         return jsonify([])
 
 
 @app.route("/api/users", methods=["POST"])
 @require_auth(roles=["admin"])
-def create_user():
+def create_user_admin():
+    """
+    POST /api/users
+
+    Pre-register a new user.  Admin-only.
+
+    Body:
+      {
+        "email": "user@example.com",   ← required
+        "role":  "viewer"              ← required; must be in VALID_ROLES
+      }
+
+    Notes:
+    - oauth_provider and oauth_subject are NOT required here.  They are set
+      automatically when the user first logs in via Google OAuth.
+    - Email uniqueness is enforced server-side.
+    - The caller's identity always comes from the session — never the body.
+    """
+    caller = get_current_user()
+    if not caller:
+        return jsonify({"error": "Unauthorized"}), 401
+
     body = request.get_json() or {}
-    role = body.get("role", "viewer")
+    email = (body.get("email") or "").strip().lower()
+    role  = (body.get("role") or "viewer").strip()
+
+    # ── Input validation ──────────────────────────────────────────────────────
+    if not email:
+        return jsonify({"error": "Bad Request", "message": "email is required"}), 400
+
+    import re as _re
+    if not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        return jsonify({"error": "Bad Request", "message": "Invalid email address"}), 400
+
     if role not in VALID_ROLES:
-        return jsonify({"error": "Bad Request", "message": f"Invalid role. Must be one of: {', '.join(sorted(VALID_ROLES))}"}), 400
+        return jsonify({
+            "error":   "Bad Request",
+            "message": f"Invalid role. Must be one of: {', '.join(sorted(VALID_ROLES))}",
+        }), 400
+
     try:
-        row = execute_returning(
-            f"INSERT INTO {TABLE} (id, row_type, email, role, oauth_provider, oauth_subject, created_at) "
-            f"VALUES (%s,'user',%s,%s,%s,%s,NOW()) RETURNING *",
-            (str(uuid.uuid4()), body.get("email"), role,
-             body.get("oauthProvider"), body.get("oauthSubject")),
+        # Duplicate check
+        existing = query(
+            f"SELECT id FROM {TABLE} WHERE row_type = 'user' AND email = %s LIMIT 1",
+            (email,),
         )
-        return jsonify(serialize_row(row)), 201
-    except Exception:
+        if existing:
+            return jsonify({"error": "Conflict", "message": "A user with that email already exists"}), 409
+
+        new_id = str(uuid.uuid4())
+        row = execute_returning(
+            f"INSERT INTO {TABLE} "
+            f"  (id, row_type, email, role, created_at) "
+            f"VALUES (%s, 'user', %s, %s, NOW()) "
+            f"RETURNING {_USER_SAFE_COLS}",
+            (new_id, email, role),
+        )
+        logger.info("[Users] Admin %s created user email=%s role=%s", caller["id"], email, role)
+        return jsonify(_safe_user(row)), 201
+    except Exception as exc:
+        logger.exception("[Users] create error: %s", exc)
         return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route("/api/users/<user_id>", methods=["PUT"])
 @require_auth(roles=["admin"])
 def update_user(user_id):
+    """
+    PUT /api/users/<user_id>
+
+    Update a user's role (and optionally email).  Admin-only.
+
+    Guards:
+    - Cannot demote the last admin.
+    - Returns 404 for unknown users.
+    """
+    caller = get_current_user()
+    if not caller:
+        return jsonify({"error": "Unauthorized"}), 401
+
     body = request.get_json() or {}
-    # Validate role if provided
     new_role = body.get("role")
     if new_role is not None and new_role not in VALID_ROLES:
-        return jsonify({"error": "Bad Request", "message": f"Invalid role. Must be one of: {', '.join(sorted(VALID_ROLES))}"}), 400
+        return jsonify({
+            "error":   "Bad Request",
+            "message": f"Invalid role. Must be one of: {', '.join(sorted(VALID_ROLES))}",
+        }), 400
 
-    # Check user exists
     try:
         rows = query(
-            f"SELECT * FROM {TABLE} WHERE row_type = 'user' AND id = %s",
+            f"SELECT {_USER_SAFE_COLS} FROM {TABLE} WHERE row_type = 'user' AND id = %s",
             (user_id,),
         )
         if not rows:
@@ -5937,55 +6148,89 @@ def update_user(user_id):
         # Prevent demotion of the last admin
         if new_role and new_role != "admin" and existing_user.get("role") == "admin":
             admin_count_rows = query(
-                f"SELECT COUNT(*) AS cnt FROM {TABLE} WHERE row_type = 'user' AND role = 'admin'"
+                f"SELECT COUNT(*) AS cnt FROM {TABLE} "
+                f"WHERE row_type = 'user' AND role = 'admin'"
             )
-            admin_count = int(admin_count_rows[0]["cnt"]) if admin_count_rows else 0
+            admin_count = int((admin_count_rows[0] or {}).get("cnt") or 0)
             if admin_count <= 1:
                 return jsonify({"error": "Forbidden", "message": "Cannot demote the last admin."}), 403
 
-        # Build update fields
-        update_fields = {}
-        if "email" in body:
-            update_fields["email"] = body["email"]
+        # Build dynamic SET clause — only update supplied fields
+        update_fields: dict = {}
+        if "email" in body and (body["email"] or "").strip():
+            update_fields["email"] = body["email"].strip().lower()
         if new_role is not None:
             update_fields["role"] = new_role
 
         if not update_fields:
-            return jsonify(serialize_row(existing_user))
+            return jsonify(_safe_user(existing_user))
 
-        set_clauses = ", ".join(f"{k} = %s" for k in update_fields.keys())
+        set_clauses = ", ".join(f"{k} = %s" for k in update_fields)
         values = list(update_fields.values()) + [user_id]
 
         row = execute_returning(
-            f"UPDATE {TABLE} SET {set_clauses} WHERE row_type = 'user' AND id = %s RETURNING *",
+            f"UPDATE {TABLE} SET {set_clauses} "
+            f"WHERE row_type = 'user' AND id = %s "
+            f"RETURNING {_USER_SAFE_COLS}",
             tuple(values),
         )
         if not row:
             return jsonify({"error": "Not Found", "message": "User not found."}), 404
-        return jsonify(serialize_row(row))
-    except Exception as e:
-        logger.exception("[Users] PUT error: %s", e)
+        logger.info("[Users] Admin %s updated user_id=%s fields=%s", caller["id"], user_id, list(update_fields))
+        return jsonify(_safe_user(row))
+    except Exception as exc:
+        logger.exception("[Users] PUT error: %s", exc)
         return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route("/api/users/<user_id>", methods=["DELETE"])
 @require_auth(roles=["admin"])
 def delete_user(user_id):
+    """
+    DELETE /api/users/<user_id>
+
+    Hard-delete a user row.  Admin-only.
+
+    Guards:
+    - Cannot delete the last admin.
+    - Project rows owned by this user are left intact (owner_user_id preserved).
+      They become unassigned from a responsible-user perspective but the data
+      is not deleted.
+    - Historical Jira ticket ownership (jira_ticket rows) is preserved — the
+      created_by field is not modified.
+    """
+    caller = get_current_user()
+    if not caller:
+        return jsonify({"error": "Unauthorized"}), 401
+
     try:
-        # Prevent deletion of last admin
         rows = query(
             f"SELECT role FROM {TABLE} WHERE row_type = 'user' AND id = %s",
             (user_id,),
         )
         if not rows:
             return jsonify({"error": "User not found"}), 404
+
         if rows[0].get("role") == "admin":
             admin_count_rows = query(
-                f"SELECT COUNT(*) AS cnt FROM {TABLE} WHERE row_type = 'user' AND role = 'admin'"
+                f"SELECT COUNT(*) AS cnt FROM {TABLE} "
+                f"WHERE row_type = 'user' AND role = 'admin'"
             )
-            admin_count = int(admin_count_rows[0]["cnt"]) if admin_count_rows else 0
+            admin_count = int((admin_count_rows[0] or {}).get("cnt") or 0)
             if admin_count <= 1:
                 return jsonify({"error": "Forbidden", "message": "Cannot delete the last admin."}), 403
+
+        # When a user is deleted, clear them as responsible_user from projects.
+        # Projects themselves are NOT deleted — they become effectively unassigned.
+        execute(
+            f"UPDATE {TABLE} "
+            f"SET metadata = COALESCE(metadata::jsonb, '{{}}'::jsonb) "
+            f"           - 'responsible_user_id' "
+            f"           - 'responsible_user_email' "
+            f"WHERE row_type = 'project' "
+            f"  AND metadata::jsonb->>'responsible_user_id' = %s",
+            (user_id,),
+        )
 
         count = execute(
             f"DELETE FROM {TABLE} WHERE row_type = 'user' AND id = %s",
@@ -5993,8 +6238,110 @@ def delete_user(user_id):
         )
         if count == 0:
             return jsonify({"error": "User not found"}), 404
+
+        logger.info("[Users] Admin %s deleted user_id=%s", caller["id"], user_id)
         return make_response("", 204)
-    except Exception:
+    except Exception as exc:
+        logger.exception("[Users] DELETE error: %s", exc)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route("/api/users/<target_user_id>/tickets")
+@require_auth(roles=["admin"])
+def get_user_ticket_counts(target_user_id):
+    """
+    GET /api/users/<target_user_id>/tickets
+
+    Returns the resolved and open Jira ticket counts for any user.
+    Admin-only — the requester's identity comes from the session, never the URL.
+
+    This reuses exactly the same two-step ownership chain as
+    GET /api/jira/my-tickets:
+      Step 1: jira_ticket rows WHERE created_by = target_user_id  → owned_keys
+      Step 2: log rows WHERE jira_issue_key IN owned_keys
+                          OR jira_created_by = target_user_id
+              grouped by resolved/open status
+
+    Response:
+      { "resolved": int, "open": int }
+    """
+    # Verify target user exists
+    target = query(
+        f"SELECT id FROM {TABLE} WHERE row_type = 'user' AND id = %s LIMIT 1",
+        (target_user_id,),
+    )
+    if not target:
+        return jsonify({"error": "User not found"}), 404
+
+    try:
+        # ── Step 1: jira_ticket rows owned by this user ───────────────────────
+        ticket_rows = query(
+            f"SELECT metadata FROM {TABLE} "
+            f"WHERE row_type = 'jira_ticket' "
+            f"  AND metadata::jsonb->>'created_by' = %s",
+            (target_user_id,),
+        )
+
+        owned_keys: set = set()
+        for tr in ticket_rows:
+            raw  = tr.get("metadata")
+            meta = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            key  = (meta.get("jira_key") or meta.get("key") or "").strip()
+            if key:
+                owned_keys.add(key)
+
+        # ── Step 2: count log rows ────────────────────────────────────────────
+        from jira.webhook_handler import TERMINAL_STATUSES
+        terminal_values = tuple(s.lower() for s in TERMINAL_STATUSES)
+
+        # Build the ownership OR clause (same logic as jira_my_tickets)
+        ownership_parts: list = []
+        ownership_params: list = []
+
+        if owned_keys:
+            placeholders = ", ".join(["%s"] * len(owned_keys))
+            ownership_parts.append(
+                f"metadata::jsonb->>'jira_issue_key' IN ({placeholders})"
+            )
+            ownership_params.extend(sorted(owned_keys))
+
+        ownership_parts.append("metadata::jsonb->>'jira_created_by' = %s")
+        ownership_params.append(target_user_id)
+
+        ownership_clause = "(" + " OR ".join(ownership_parts) + ")"
+
+        base_where = (
+            f"row_type = 'log' "
+            f"AND metadata::jsonb ? 'jira_issue_key' "
+            f"AND metadata::jsonb->>'jira_issue_key' IS NOT NULL "
+            f"AND metadata::jsonb->>'jira_issue_key' != '' "
+            f"AND {ownership_clause}"
+        )
+
+        # Resolved count
+        resolved_rows = query(
+            f"SELECT COUNT(*) AS n FROM {TABLE} "
+            f"WHERE {base_where} "
+            f"  AND LOWER(COALESCE(metadata::jsonb->>'jira_status', '')) IN %s",
+            tuple(ownership_params) + (terminal_values,),
+        )
+        resolved = int((resolved_rows[0] or {}).get("n") or 0)
+
+        # Open count
+        open_rows = query(
+            f"SELECT COUNT(*) AS n FROM {TABLE} "
+            f"WHERE {base_where} "
+            f"  AND (metadata::jsonb->>'jira_status' IS NULL "
+            f"       OR metadata::jsonb->>'jira_status' = '' "
+            f"       OR LOWER(metadata::jsonb->>'jira_status') NOT IN %s)",
+            tuple(ownership_params) + (terminal_values,),
+        )
+        open_count = int((open_rows[0] or {}).get("n") or 0)
+
+        return jsonify({"resolved": resolved, "open": open_count})
+
+    except Exception as exc:
+        logger.exception("[Users] ticket count error for user_id=%s: %s", target_user_id, exc)
         return jsonify({"error": "Internal server error"}), 500
 
 
