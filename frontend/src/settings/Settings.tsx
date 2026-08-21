@@ -319,6 +319,12 @@ function TicketDropdown({
 
 // ── Per-user ticket counts for the admin users table ──────────────────────────
 // Fetches GET /api/users/<id>/tickets — admin-gated on the backend.
+// Shows the COUNT only. Expanding to show ticket detail is intentionally
+// disabled for other users: the only available listing endpoint (/api/jira/my-tickets)
+// is session-scoped and would return the admin's own tickets instead of the
+// target user's — which would be cross-user ticket leakage.
+// The currently-logged-in admin's own row uses TicketDropdown (below) which
+// calls my-tickets correctly.
 
 function AdminTicketCell({
   userId,
@@ -329,16 +335,13 @@ function AdminTicketCell({
   status: 'resolved' | 'open';
   color: string;
 }) {
-  const [count, setCount]   = useState<CountState>(null);
-  const [open, setOpen]     = useState(false);
-  const [page, setPage]     = useState(0);
-  const [tickets, setTickets] = useState<MyTicket[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [fetchErr, setFetchErr] = useState('');
+  const [count, setCount] = useState<CountState>(null);
   const fetched = useRef(false);
 
+  // Reset and re-fetch whenever userId changes (defensive guard)
   useEffect(() => {
     fetched.current = false;
+    setCount(null);
   }, [userId]);
 
   useEffect(() => {
@@ -352,81 +355,14 @@ function AdminTicketCell({
       .catch(() => setCount(0));
   }, [userId, status]);
 
-  useEffect(() => {
-    if (!open) return;
-    setLoading(true);
-    setFetchErr('');
-    // Ticket listing for other users uses the same my-tickets endpoint
-    // because the backend scopes it to the session user. For admins viewing
-    // other users' tickets the count endpoint is sufficient; the dropdown
-    // only shows the current user's own ticket detail.
-    apiFetch(
-      `/api/jira/my-tickets?status=${status}&limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}`
-    )
-      .then(r => r.json())
-      .then((d: MyTicketsResponse) => setTickets(d.tickets ?? []))
-      .catch(() => setFetchErr('Failed to load.'))
-      .finally(() => setLoading(false));
-  }, [open, page, status, userId]);
-
   if (count === null) return <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>—</span>;
   if (count === 0)    return <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>—</span>;
 
-  const totalPages = Math.ceil(count / PAGE_SIZE);
-
+  // Count only — no dropdown expansion for other users' tickets.
+  // Expanding would require a server-side per-user ticket listing endpoint
+  // which does not yet exist. Showing count only is safe and accurate.
   return (
-    <>
-      <button
-        onClick={() => { setOpen(o => !o); setPage(0); }}
-        style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: 0, color }}
-        aria-expanded={open}
-      >
-        <span style={{ fontSize: 13, fontWeight: 700 }}>{count}</span>
-        <span style={{ fontSize: 9, opacity: 0.7, display: 'inline-block', transition: 'transform 0.15s', transform: open ? 'rotate(180deg)' : 'none' }}>▼</span>
-      </button>
-
-      {open && (
-        <div style={{ marginTop: 8, background: 'var(--bg)', border: '1px solid var(--card-border)', borderRadius: 8, overflow: 'hidden', minWidth: 260, position: 'relative', zIndex: 10 }}>
-          {loading ? (
-            <div style={{ padding: '10px 13px', fontSize: 12, color: 'var(--text-muted)' }}>Loading…</div>
-          ) : fetchErr ? (
-            <div style={{ padding: '10px 13px', fontSize: 12, color: '#f87171' }}>{fetchErr}</div>
-          ) : tickets.length === 0 ? (
-            <div style={{ padding: '10px 13px', fontSize: 12, color: 'var(--text-muted)' }}>No tickets found.</div>
-          ) : (
-            <>
-              {tickets.map((t, i) => (
-                <div key={t.log_id} style={{ padding: '9px 13px', borderBottom: i < tickets.length - 1 ? '1px solid var(--card-border)' : 'none', display: 'flex', flexDirection: 'column', gap: 3 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                    {t.jira_url ? (
-                      <a href={t.jira_url} target="_blank" rel="noreferrer"
-                        style={{ fontSize: 11, fontWeight: 700, color: '#818cf8', fontFamily: 'ui-monospace, monospace', textDecoration: 'none' }}>
-                        {t.issue_key}
-                      </a>
-                    ) : (
-                      <span style={{ fontSize: 11, fontWeight: 700, color: '#818cf8', fontFamily: 'ui-monospace, monospace' }}>{t.issue_key}</span>
-                    )}
-                    {t.jira_status && (
-                      <span style={{ fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 999, background: `${color}1a`, color }}>{t.jira_status}</span>
-                    )}
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 320 }}>{t.error || '—'}</div>
-                </div>
-              ))}
-              {totalPages > 1 && (
-                <div style={{ padding: '7px 13px', borderTop: '1px solid var(--card-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 11 }}>
-                  <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}
-                    style={{ ...S.btnSecondary, padding: '3px 8px', opacity: page === 0 ? 0.4 : 1 }}>← Prev</button>
-                  <span style={{ color: 'var(--text-muted)' }}>{page + 1} / {totalPages}</span>
-                  <button onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))} disabled={page >= totalPages - 1}
-                    style={{ ...S.btnSecondary, padding: '3px 8px', opacity: page >= totalPages - 1 ? 0.4 : 1 }}>Next →</button>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
-    </>
+    <span style={{ fontSize: 13, fontWeight: 700, color }}>{count}</span>
   );
 }
 
