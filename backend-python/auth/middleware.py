@@ -603,14 +603,19 @@ def _build_project_access_condition(user: dict) -> tuple:
 
     admin   → "TRUE"  — unrestricted; includes legacy NULL-owner rows
     viewer  → "TRUE"  — unrestricted; includes legacy NULL-owner rows
-    developer → assignment-only — only projects that contain at least one log
-                assigned to the authenticated user (owner_user_id alone is NOT enough)
+    developer → three access paths (any one sufficient):
+        1. owner_user_id = authenticated_user_id
+           (developer created or owns the project directly)
+        2. COALESCE(metadata::jsonb, '{}'::jsonb)->>'responsible_user_id' = user_id
+           (admin assigned developer as the Responsible User via Settings)
+        3. id IN (SELECT DISTINCT project_id FROM logs WHERE assigned_to = user_id)
+           (developer has individual logs directly assigned to them)
     unknown → "FALSE" — fail closed; no access
 
     Rules:
       - role is normalised to lowercase before comparison
-      - developer access is assignment-only; project ownership does NOT grant access
       - admin/viewer use TRUE so legacy rows with owner_user_id = NULL are visible
+      - never trusts user_id from request body/params — always from the session
     """
     role    = str(user.get("role") or "").strip().lower()
     user_id = user["id"]
@@ -620,13 +625,17 @@ def _build_project_access_condition(user: dict) -> tuple:
 
     if role == "developer":
         return (
-            "id IN ("
-            "  SELECT DISTINCT project_id FROM projects_data"
-            "  WHERE row_type = 'log'"
-            "    AND assigned_to = %s"
-            "    AND project_id IS NOT NULL"
+            "("
+            "  owner_user_id = %s"
+            "  OR COALESCE(metadata::jsonb, '{}'::jsonb)->>'responsible_user_id' = %s"
+            "  OR id IN ("
+            "    SELECT DISTINCT project_id FROM projects_data"
+            "    WHERE row_type = 'log'"
+            "      AND assigned_to = %s"
+            "      AND project_id IS NOT NULL"
+            "  )"
             ")",
-            [user_id],
+            [user_id, user_id, user_id],
         )
 
     # Unknown / missing role — fail closed
@@ -639,14 +648,21 @@ def _build_log_access_condition(user: dict) -> tuple:
 
     admin   → "TRUE"  — unrestricted; includes legacy NULL-owner rows
     viewer  → "TRUE"  — unrestricted; includes legacy NULL-owner rows
-    developer → "assigned_to = %s" — only logs explicitly assigned to them
-                (owner_user_id alone does NOT grant log access)
+    developer → three access paths (any one sufficient):
+        1. owner_user_id = authenticated_user_id
+           (developer owns the log directly)
+        2. assigned_to = authenticated_user_id
+           (log was directly assigned to the developer)
+        3. project_id IN (SELECT id FROM projects WHERE responsible_user_id = user_id)
+           (developer is the Responsible User for the log's project — grants access to
+            ALL logs in that project without needing to update every log row)
     unknown → "FALSE" — fail closed; no access
 
     Rules:
       - role is normalised to lowercase before comparison
-      - developer access is assignment-only; log ownership does NOT grant access
       - admin/viewer use TRUE so legacy rows with owner_user_id = NULL are visible
+      - the responsible_user subquery is the key fix: assigning a project-level
+        responsible user grants access to every log in that project
     """
     role    = str(user.get("role") or "").strip().lower()
     user_id = user["id"]
@@ -655,6 +671,17 @@ def _build_log_access_condition(user: dict) -> tuple:
         return "TRUE", []
 
     if role == "developer":
-        return "assigned_to = %s", [user_id]
+        return (
+            "("
+            "  owner_user_id = %s"
+            "  OR assigned_to = %s"
+            "  OR project_id IN ("
+            "    SELECT id FROM projects_data"
+            "    WHERE row_type = 'project'"
+            "      AND COALESCE(metadata::jsonb, '{}'::jsonb)->>'responsible_user_id' = %s"
+            "  )"
+            ")",
+            [user_id, user_id, user_id],
+        )
 
     return "FALSE", []
