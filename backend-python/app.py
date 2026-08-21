@@ -1019,29 +1019,82 @@ def debug_nova_direct():
 # PROJECTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _build_project_access_condition(user: dict) -> tuple:
+    """
+    Return (WHERE-fragment, params) for scoping project queries by role.
+
+    admin   → all projects with a valid owner (sees everything)
+    viewer  → all projects with a valid owner (read-only, sees everything)
+    developer → only projects where a log is assigned to them
+                OR they are the owner of the project
+
+    Never returns NULL-owner rows regardless of role.
+    """
+    role    = user.get("role", "")
+    user_id = user["id"]
+
+    if role in ("admin", "viewer"):
+        # Full visibility — no ownership filter, just exclude legacy NULL rows
+        return "owner_user_id IS NOT NULL", []
+
+    # developer: projects they own OR have at least one log assigned to them
+    return (
+        "(owner_user_id = %s OR id IN ("
+        "  SELECT DISTINCT project_id FROM projects_data "
+        "  WHERE row_type = 'log' AND assigned_to = %s AND project_id IS NOT NULL"
+        "))",
+        [user_id, user_id],
+    )
+
+
+def _build_log_access_condition(user: dict) -> tuple:
+    """
+    Return (WHERE-fragment, params) for scoping log queries by role.
+
+    admin   → all logs with a valid owner
+    viewer  → all logs with a valid owner (read-only)
+    developer → only logs they own OR logs assigned to them
+    """
+    role    = user.get("role", "")
+    user_id = user["id"]
+
+    if role in ("admin", "viewer"):
+        return "owner_user_id IS NOT NULL", []
+
+    # developer: own logs or assigned logs
+    return (
+        "(owner_user_id = %s OR assigned_to = %s)",
+        [user_id, user_id],
+    )
 @app.route("/api/projects")
 @require_permission("projects:read")
 def list_projects():
-    """Return only projects owned by the authenticated user. Never returns NULL-owner rows."""
+    """
+    Return projects the authenticated user can access based on role:
+      admin/viewer → all projects (any valid owner)
+      developer    → only projects they own OR have an assigned log in
+    Never returns NULL-owner rows.
+    """
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
+
+    access_cond, access_params = _build_project_access_condition(user)
     category = request.args.get("category")
     try:
         if category:
             rows = query(
                 f"SELECT id, project_name AS name, category FROM {TABLE} "
-                f"WHERE row_type = 'project' AND owner_user_id = %s AND category = %s "
+                f"WHERE row_type = 'project' AND {access_cond} AND category = %s "
                 f"ORDER BY project_name",
-                (user_id, category),
+                access_params + [category],
             )
         else:
             rows = query(
                 f"SELECT id, project_name AS name, category FROM {TABLE} "
-                f"WHERE row_type = 'project' AND owner_user_id = %s "
+                f"WHERE row_type = 'project' AND {access_cond} "
                 f"ORDER BY project_name",
-                (user_id,),
+                access_params,
             )
         return jsonify(serialize_rows(rows))
     except Exception as e:
@@ -1113,17 +1166,17 @@ def create_project():
 @app.route("/api/projects/live")
 @require_permission("projects:read")
 def list_live_projects():
-    """Return only live projects owned by the authenticated user."""
+    """Return live projects the authenticated user can access based on role."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
+    access_cond, access_params = _build_project_access_condition(user)
     try:
         rows = query(
             f"SELECT id, project_name AS name, category, is_live FROM {TABLE} "
-            f"WHERE row_type = 'project' AND is_live = true AND owner_user_id = %s "
+            f"WHERE row_type = 'project' AND is_live = true AND {access_cond} "
             f"ORDER BY project_name",
-            (user_id,),
+            access_params,
         )
         return jsonify(serialize_rows(rows))
     except Exception as e:
@@ -2500,16 +2553,16 @@ def visualization_sparklines():
 @app.route("/api/stacktrace/parse/<log_id>")
 @require_permission("stacktrace:read")
 def parse_stacktrace_by_id(log_id):
-    """Parse stack trace for a specific log. Ownership enforced."""
+    """Parse stack trace for a specific log. Access enforced by role."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
+    log_access_cond, log_access_params = _build_log_access_condition(user)
     try:
         rows = query(
             f"SELECT error, error_detail FROM {TABLE} "
-            f"WHERE row_type = 'log' AND id = %s AND owner_user_id = %s",
-            (log_id, user_id),
+            f"WHERE row_type = 'log' AND id = %s AND ({log_access_cond})",
+            tuple([log_id] + log_access_params),
         )
         if not rows:
             return jsonify({"error": "Not Found"}), 404
@@ -2605,12 +2658,12 @@ def find_similar_stacktraces():
 @app.route("/api/logs/<log_id>/tags", methods=["POST"])
 @require_permission("logs:annotate")
 def add_log_tags(log_id):
-    """Add tags to a log entry. Ownership verified before write."""
+    """Add tags to a log entry. Access enforced by role."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
 
+    log_access_cond, log_access_params = _build_log_access_condition(user)
     body = request.get_json() or {}
     tags = body.get("tags", [])
     if not tags:
@@ -2618,8 +2671,8 @@ def add_log_tags(log_id):
     try:
         count = execute(
             f"UPDATE {TABLE} SET tags = %s "
-            f"WHERE row_type = 'log' AND id = %s AND owner_user_id = %s",
-            (json.dumps(tags), log_id, user_id),
+            f"WHERE row_type = 'log' AND id = %s AND ({log_access_cond})",
+            tuple([json.dumps(tags), log_id] + log_access_params),
         )
         if count == 0:
             return jsonify({"error": "Not Found"}), 404
@@ -2631,16 +2684,16 @@ def add_log_tags(log_id):
 @app.route("/api/logs/<log_id>/tags", methods=["GET"])
 @require_permission("logs:read")
 def get_log_tags(log_id):
-    """Get tags for a log entry. Ownership enforced."""
+    """Get tags for a log entry. Access enforced by role."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
+    log_access_cond, log_access_params = _build_log_access_condition(user)
     try:
         rows = query(
             f"SELECT tags FROM {TABLE} "
-            f"WHERE row_type = 'log' AND id = %s AND owner_user_id = %s",
-            (log_id, user_id),
+            f"WHERE row_type = 'log' AND id = %s AND ({log_access_cond})",
+            tuple([log_id] + log_access_params),
         )
         if not rows:
             return jsonify({"error": "Not Found"}), 404
@@ -2653,32 +2706,30 @@ def get_log_tags(log_id):
 @app.route("/api/logs/<log_id>/comments", methods=["POST"])
 @require_permission("logs:annotate")
 def add_log_comment(log_id):
-    """Add a comment to a log entry. Ownership verified before write."""
+    """Add a comment to a log entry. Access enforced by role."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
 
+    log_access_cond, log_access_params = _build_log_access_condition(user)
+    user_id = user["id"]
     body = request.get_json() or {}
     comment_text = body.get("comment", "").strip()
     if not comment_text:
         return jsonify({"error": "comment text required"}), 400
 
     try:
-        # Verify the log belongs to this user before allowing a comment
         log_rows = query(
             f"SELECT id FROM {TABLE} "
-            f"WHERE row_type = 'log' AND id = %s AND owner_user_id = %s",
-            (log_id, user_id),
+            f"WHERE row_type = 'log' AND id = %s AND ({log_access_cond})",
+            tuple([log_id] + log_access_params),
         )
         if not log_rows:
             return jsonify({"error": "Not Found"}), 404
 
         comment_id = str(uuid.uuid4())
         comment = {
-            "id": comment_id,
-            "log_id": log_id,
-            "user_id": user_id,
+            "id": comment_id, "log_id": log_id, "user_id": user_id,
             "comment": comment_text,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -2695,17 +2746,16 @@ def add_log_comment(log_id):
 @app.route("/api/logs/<log_id>/comments", methods=["GET"])
 @require_permission("logs:read")
 def get_log_comments(log_id):
-    """Get comments for a log entry. Ownership enforced on the parent log."""
+    """Get comments for a log entry. Access enforced by role."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
+    log_access_cond, log_access_params = _build_log_access_condition(user)
     try:
-        # Verify the log belongs to this user
         log_rows = query(
             f"SELECT id FROM {TABLE} "
-            f"WHERE row_type = 'log' AND id = %s AND owner_user_id = %s",
-            (log_id, user_id),
+            f"WHERE row_type = 'log' AND id = %s AND ({log_access_cond})",
+            tuple([log_id] + log_access_params),
         )
         if not log_rows:
             return jsonify({"error": "Not Found"}), 404
@@ -2728,12 +2778,11 @@ def get_log_comments(log_id):
 @app.route("/api/logs/<log_id>/assign", methods=["POST"])
 @require_permission("logs:annotate")
 def assign_log(log_id):
-    """Assign a log to a team member. Ownership verified before write."""
+    """Assign a log to a team member. Access enforced by role."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
-
+    log_access_cond, log_access_params = _build_log_access_condition(user)
     body = request.get_json() or {}
     assignee = body.get("assignee", "").strip()
     if not assignee:
@@ -2741,8 +2790,8 @@ def assign_log(log_id):
     try:
         count = execute(
             f"UPDATE {TABLE} SET assigned_to = %s, assigned_at = NOW() "
-            f"WHERE row_type = 'log' AND id = %s AND owner_user_id = %s",
-            (assignee, log_id, user_id),
+            f"WHERE row_type = 'log' AND id = %s AND ({log_access_cond})",
+            tuple([assignee, log_id] + log_access_params),
         )
         if count == 0:
             return jsonify({"error": "Not Found"}), 404
@@ -2754,23 +2803,20 @@ def assign_log(log_id):
 @app.route("/api/logs/<log_id>/priority", methods=["POST"])
 @require_permission("logs:annotate")
 def set_log_priority(log_id):
-    """Set priority for a log entry. Ownership verified before write."""
+    """Set priority for a log entry. Access enforced by role."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
-
+    log_access_cond, log_access_params = _build_log_access_condition(user)
     body = request.get_json() or {}
     priority = body.get("priority", "medium")
-
     if priority not in ["low", "medium", "high", "critical"]:
         return jsonify({"error": "priority must be: low, medium, high, critical"}), 400
-
     try:
         count = execute(
             f"UPDATE {TABLE} SET priority = %s "
-            f"WHERE row_type = 'log' AND id = %s AND owner_user_id = %s",
-            (priority, log_id, user_id),
+            f"WHERE row_type = 'log' AND id = %s AND ({log_access_cond})",
+            tuple([priority, log_id] + log_access_params),
         )
         if count == 0:
             return jsonify({"error": "Not Found"}), 404
@@ -2968,11 +3014,11 @@ def cleanup_old_logs():
 @app.route("/api/logs/bulk/resolve", methods=["POST"])
 @require_permission("errors:resolve")
 def bulk_resolve_logs():
-    """Bulk resolve multiple logs. Only resolves logs owned by the authenticated user."""
+    """Bulk resolve multiple logs. Scoped by role."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
+    log_access_cond, log_access_params = _build_log_access_condition(user)
 
     body = request.get_json() or {}
     log_ids = body.get("log_ids", [])
@@ -2983,8 +3029,9 @@ def bulk_resolve_logs():
         placeholders = ",".join(["%s"] * len(log_ids))
         count = execute(
             f"UPDATE {TABLE} SET error_status = 'resolved', resolved_at = NOW() "
-            f"WHERE row_type = 'log' AND owner_user_id = %s AND id IN ({placeholders})",
-            tuple([user_id] + list(log_ids)),
+            f"WHERE row_type = 'log' AND ({log_access_cond}) "
+            f"AND id IN ({placeholders})",
+            tuple(log_access_params + list(log_ids)),
         )
         return jsonify({"resolved": count, "log_ids": log_ids})
     except Exception as e:
@@ -3134,12 +3181,11 @@ def get_error_resolution_metrics():
 @app.route("/api/logs/<log_id>/context", methods=["POST"])
 @require_permission("logs:annotate")
 def add_log_context(log_id):
-    """Add context to a log entry. Ownership verified before write."""
+    """Add context to a log entry. Access enforced by role."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
-
+    log_access_cond, log_access_params = _build_log_access_condition(user)
     body = request.get_json() or {}
     context_data = {
         "session_id": body.get("session_id"),
@@ -3156,8 +3202,8 @@ def add_log_context(log_id):
     try:
         count = execute(
             f"UPDATE {TABLE} SET context_data = %s "
-            f"WHERE row_type = 'log' AND id = %s AND owner_user_id = %s",
-            (json.dumps(context_data), log_id, user_id),
+            f"WHERE row_type = 'log' AND id = %s AND ({log_access_cond})",
+            tuple([json.dumps(context_data), log_id] + log_access_params),
         )
         if count == 0:
             return jsonify({"error": "Not Found"}), 404
@@ -3169,16 +3215,16 @@ def add_log_context(log_id):
 @app.route("/api/logs/<log_id>/context", methods=["GET"])
 @require_permission("logs:read")
 def get_log_context(log_id):
-    """Get context for a log entry. Ownership enforced."""
+    """Get context for a log entry. Access enforced by role."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
+    log_access_cond, log_access_params = _build_log_access_condition(user)
     try:
         rows = query(
             f"SELECT context_data FROM {TABLE} "
-            f"WHERE row_type = 'log' AND id = %s AND owner_user_id = %s",
-            (log_id, user_id),
+            f"WHERE row_type = 'log' AND id = %s AND ({log_access_cond})",
+            tuple([log_id] + log_access_params),
         )
         if not rows:
             return jsonify({"error": "Not Found"}), 404
@@ -3336,57 +3382,85 @@ def project_logs(name):
     """
     GET /api/projects/<name>/logs
 
-    Returns logs belonging ONLY to the authenticated user's project of this name.
-    Two users with the same project name never see each other's data.
-    Ownership is enforced via owner_user_id on both the project and log rows.
+    Access by role:
+      admin/viewer → can access any project by name
+      developer    → only projects they own or have an assigned log in
+    Log rows are further scoped by the same log access condition.
     """
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
+    user_id  = user["id"]
+    role     = user.get("role", "")
 
     project_name = name
-    page = max(1, int(request.args.get("page", 1)))
+    page  = max(1, int(request.args.get("page", 1)))
     limit = min(100, max(1, int(request.args.get("limit", 50))))
     offset = (page - 1) * limit
 
-    # Advanced filtering parameters
-    from_date = request.args.get("from")
-    to_date = request.args.get("to")
-    search = request.args.get("search")
-    regex_pattern = request.args.get("regex")
-    severity = request.args.get("severity")
-    file_path = request.args.get("file_path")
-    status_filter = request.args.get("status")
+    from_date      = request.args.get("from")
+    to_date        = request.args.get("to")
+    search         = request.args.get("search")
+    regex_pattern  = request.args.get("regex")
+    severity       = request.args.get("severity")
+    file_path      = request.args.get("file_path")
+    status_filter  = request.args.get("status")
 
     print(f"[DEBUG] Advanced filters - from: {from_date}, to: {to_date}, search: {search}, "
           f"regex: {regex_pattern}, severity: {severity}, file_path: {file_path}, status: {status_filter}")
 
     try:
-        # Verify the project belongs to the authenticated user — never by name alone
-        proj, err = get_accessible_project_by_name(project_name)
-        if err:
-            # Project doesn't exist or belongs to another user — return empty (not 404)
-            # so the frontend can show "no data" rather than an error page
+        # ── Step 1: verify the caller can access this project ─────────────────
+        if role in ("admin", "viewer"):
+            # Full visibility — just check the project exists with a valid owner
+            proj_rows = query(
+                f"SELECT id, project_name FROM {TABLE} "
+                f"WHERE row_type = 'project' "
+                f"  AND LOWER(project_name) = LOWER(%s) "
+                f"  AND owner_user_id IS NOT NULL",
+                (project_name,),
+            )
+        else:
+            # developer: must own the project or have an assigned log in it
+            proj_rows = query(
+                f"SELECT id, project_name FROM {TABLE} "
+                f"WHERE row_type = 'project' "
+                f"  AND LOWER(project_name) = LOWER(%s) "
+                f"  AND (owner_user_id = %s OR id IN ("
+                f"    SELECT DISTINCT project_id FROM projects_data "
+                f"    WHERE row_type = 'log' AND assigned_to = %s AND project_id IS NOT NULL"
+                f"  ))",
+                (project_name, user_id, user_id),
+            )
+
+        if not proj_rows:
             return jsonify({
                 "exists": False, "tableName": project_name.replace(" ", "_"),
                 "total": 0, "filesProcessed": 0, "success": 0, "failure": 0, "resolved": 0,
                 "totalCost": None, "errors": [], "logs": [],
                 "pagination": {
                     "currentPage": 1, "totalPages": 0, "totalRecords": 0,
-                    "limit": limit, "hasNextPage": False, "hasPreviousPage": False
-                }
+                    "limit": limit, "hasNextPage": False, "hasPreviousPage": False,
+                },
             })
 
-        authorized_project_id = proj["id"]
+        authorized_project_id = proj_rows[0]["id"]
 
-        # Build advanced filter WHERE clause.
-        # Ownership is enforced by project_id + owner_user_id — never by name alone.
+        # ── Step 2: build log-level access condition ──────────────────────────
+        # admin/viewer: all logs in this project
+        # developer: only their owned or assigned logs
+        if role in ("admin", "viewer"):
+            log_access_cond   = "owner_user_id IS NOT NULL"
+            log_access_params = []
+        else:
+            log_access_cond   = "(owner_user_id = %s OR assigned_to = %s)"
+            log_access_params = [user_id, user_id]
+
+        # ── Step 3: optional filters ──────────────────────────────────────────
         filters = []
-        count_params = [authorized_project_id, user_id]
-        query_params = [authorized_project_id, user_id]
+        count_params  = [authorized_project_id] + log_access_params
+        query_params  = [authorized_project_id] + log_access_params
 
-        # Date filters
         if from_date:
             from_date_clean = from_date.split('T')[0] if 'T' in from_date else from_date
             filters.append(" AND DATE(timestamp) >= %s")
@@ -3399,104 +3473,87 @@ def project_logs(name):
             count_params.append(to_date_clean)
             query_params.append(to_date_clean)
 
-        # Full-text search
         if search:
             filters.append(
                 " AND (LOWER(error) LIKE LOWER(%s) OR LOWER(error_detail) LIKE LOWER(%s) "
                 "OR LOWER(file_name) LIKE LOWER(%s))"
             )
-            search_pattern = f"%{search}%"
-            count_params.extend([search_pattern, search_pattern, search_pattern])
-            query_params.extend([search_pattern, search_pattern, search_pattern])
+            sp = f"%{search}%"
+            count_params.extend([sp, sp, sp])
+            query_params.extend([sp, sp, sp])
 
-        # Regex pattern search
         if regex_pattern:
             try:
                 re.compile(regex_pattern)
                 filters.append(" AND (error ~* %s OR error_detail ~* %s)")
                 count_params.extend([regex_pattern, regex_pattern])
                 query_params.extend([regex_pattern, regex_pattern])
-            except re.error as regex_error:
-                return jsonify({"error": f"Invalid regex pattern: {str(regex_error)}"}), 400
+            except re.error as rx:
+                return jsonify({"error": f"Invalid regex pattern: {rx}"}), 400
 
-        # Severity filter
         if severity:
             filters.append(" AND severity = %s")
             count_params.append(severity)
             query_params.append(severity)
 
-        # File path filter
         if file_path:
             filters.append(" AND LOWER(file_name) LIKE LOWER(%s)")
-            file_pattern = f"%{file_path}%"
-            count_params.append(file_pattern)
-            query_params.append(file_pattern)
+            count_params.append(f"%{file_path}%")
+            query_params.append(f"%{file_path}%")
 
-        # Status filter
-        status_filter_clause = ""
+        status_clause = ""
         if status_filter == "errors":
-            status_filter_clause = " AND error IS NOT NULL AND error != ''"
+            status_clause = " AND error IS NOT NULL AND error != ''"
         elif status_filter == "resolved":
-            status_filter_clause = " AND error IS NOT NULL AND error != '' AND error_status = 'resolved'"
+            status_clause = " AND error IS NOT NULL AND error != '' AND error_status = 'resolved'"
         elif status_filter == "active":
-            status_filter_clause = " AND error IS NOT NULL AND error != '' AND (error_status IS NULL OR error_status != 'resolved')"
+            status_clause = " AND error IS NOT NULL AND error != '' AND (error_status IS NULL OR error_status != 'resolved')"
         elif status_filter == "success":
-            status_filter_clause = " AND (error IS NULL OR error = '')"
+            status_clause = " AND (error IS NULL OR error = '')"
 
-        combined_filters = "".join(filters) + status_filter_clause
-
-        # Base condition: project_id + owner_user_id — dual ownership check on log rows
-        base_cond = (
-            f"row_type = 'log' AND project_id = %s AND owner_user_id = %s"
-        )
+        combined = "".join(filters) + status_clause
+        base_cond = f"row_type = 'log' AND project_id = %s AND {log_access_cond}"
 
         # Total count
-        count_query = (
-            f"SELECT COUNT(*) as total FROM {TABLE} "
-            f"WHERE {base_cond}{combined_filters}"
+        count_result = query(
+            f"SELECT COUNT(*) as total FROM {TABLE} WHERE {base_cond}{combined}",
+            tuple(count_params),
         )
-        count_result = query(count_query, tuple(count_params))
         total_records = int(count_result[0].get("total", 0)) if count_result else 0
-        total_pages = (total_records + limit - 1) // limit if limit > 0 else 0
+        total_pages   = (total_records + limit - 1) // limit if limit > 0 else 0
 
         query_params.extend([limit, offset])
-
-        logs_query = (
+        logs = query(
             f"SELECT file_name, timestamp, success_count, failure_count, error, "
             f"llm_usage, input_tokens, output_tokens, calculated_cost, word_count, file_type, "
             f"error_status, resolved_at, reopened_at, error_detail "
-            f"FROM {TABLE} WHERE {base_cond}{combined_filters} "
-            f"ORDER BY timestamp DESC LIMIT %s OFFSET %s"
+            f"FROM {TABLE} WHERE {base_cond}{combined} "
+            f"ORDER BY timestamp DESC LIMIT %s OFFSET %s",
+            tuple(query_params),
         )
-        logs = query(logs_query, tuple(query_params))
 
-        # Status totals (without pagination)
-        totals_query = (
+        # Status totals
+        totals_result = query(
             f"SELECT "
             f"  COUNT(*) FILTER (WHERE error IS NULL OR error = '') AS success, "
             f"  COUNT(*) FILTER (WHERE error IS NOT NULL AND error != '' AND "
             f"    (error_status IS NULL OR error_status != 'resolved')) AS failure, "
             f"  COUNT(*) FILTER (WHERE error IS NOT NULL AND error != '' AND error_status = 'resolved') AS resolved "
-            f"FROM {TABLE} WHERE {base_cond}{''.join(filters)}"
+            f"FROM {TABLE} WHERE {base_cond}{''.join(filters)}",
+            tuple(count_params),
         )
-        totals_result = query(totals_query, tuple(count_params))
         totals_row = totals_result[0] if totals_result else {}
-        success = int(totals_row.get("success", 0))
-        failure = int(totals_row.get("failure", 0))
+        success  = int(totals_row.get("success", 0))
+        failure  = int(totals_row.get("failure", 0))
         resolved = int(totals_row.get("resolved", 0))
 
         active_logs = [
             r for r in logs
             if r.get("error") and r.get("error") != "" and r.get("error_status") != "resolved"
         ]
-        raw_cost = sum(float(r.get("calculated_cost") or 0) for r in logs)
+        raw_cost   = sum(float(r.get("calculated_cost") or 0) for r in logs)
         total_cost = f"${raw_cost:.4f}" if raw_cost > 0 else None
-
-        errors = [
-            {"timestamp": str(r["timestamp"]), "message": r["error"]}
-            for r in active_logs
-        ]
-
+        errors     = [{"timestamp": str(r["timestamp"]), "message": r["error"]} for r in active_logs]
         visible_logs = [
             {**r, "isResolved": bool(
                 r.get("error") and r.get("error") != "" and r.get("error_status") == "resolved"
@@ -3508,8 +3565,8 @@ def project_logs(name):
             "exists": True, "tableName": project_name.replace(" ", "_"),
             "total": total_records, "filesProcessed": total_records,
             "success": success, "failure": failure, "resolved": resolved,
-            "totalCost": total_cost, "errors": serialize_rows(errors),
-            "logs": serialize_rows(visible_logs),
+            "totalCost": total_cost,
+            "errors": serialize_rows(errors), "logs": serialize_rows(visible_logs),
             "appliedFilters": {
                 "from": from_date, "to": to_date, "search": search,
                 "regex": regex_pattern, "severity": severity,
@@ -3518,16 +3575,14 @@ def project_logs(name):
             "pagination": {
                 "currentPage": page, "totalPages": total_pages,
                 "totalRecords": total_records, "limit": limit,
-                "hasNextPage": page < total_pages,
-                "hasPreviousPage": page > 1,
-            }
+                "hasNextPage": page < total_pages, "hasPreviousPage": page > 1,
+            },
         })
     except Exception as e:
         import traceback as _tb
         tb_str = _tb.format_exc()
         request_id = g.get("request_id", "unknown")
-        print(f"[req:{request_id}] [Projects:logs] ERROR: {type(e).__name__}: {e}")
-        print(f"[req:{request_id}] [Projects:logs] Traceback:\n{tb_str}")
+        print(f"[req:{request_id}] [Projects:logs] ERROR: {type(e).__name__}: {e}\n{tb_str}")
         return jsonify({
             "success": False, "exists": False,
             "error": "Failed to load logs", "data": [],
@@ -3538,24 +3593,50 @@ def project_logs(name):
 @app.route("/api/projects/<path:name>/errors", methods=["POST"])
 @require_permission("errors:resolve")
 def upsert_project_error(name):
-    """Upsert an error log. Ownership is verified before any write."""
+    """
+    Upsert an error log.
+    admin      → can write to any project
+    developer  → can write to projects they own or have assigned logs in
+    viewer     → blocked by permission (errors:resolve not in viewer set)
+    """
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
     user_id = user["id"]
+    role    = user.get("role", "")
 
     try:
-        # Ownership check — must own this project
-        proj, err = get_accessible_project_by_name(name)
-        if err:
+        # Verify the caller can access this project
+        if role == "admin":
+            proj_rows = query(
+                f"SELECT id, project_name, owner_user_id FROM {TABLE} "
+                f"WHERE row_type = 'project' "
+                f"  AND LOWER(project_name) = LOWER(%s) "
+                f"  AND owner_user_id IS NOT NULL",
+                (name,),
+            )
+        else:
+            proj_rows = query(
+                f"SELECT id, project_name, owner_user_id FROM {TABLE} "
+                f"WHERE row_type = 'project' "
+                f"  AND LOWER(project_name) = LOWER(%s) "
+                f"  AND (owner_user_id = %s OR id IN ("
+                f"    SELECT DISTINCT project_id FROM projects_data "
+                f"    WHERE row_type = 'log' AND assigned_to = %s AND project_id IS NOT NULL"
+                f"  ))",
+                (name, user_id, user_id),
+            )
+        if not proj_rows:
             return jsonify({"error": "Not Found"}), 404
 
+        proj = proj_rows[0]
         authorized_project_id = proj["id"]
+        proj_owner_id         = proj["owner_user_id"]
 
-        body = request.get_json() or {}
-        file_name = str(body.get("file_name", ""))
+        body         = request.get_json() or {}
+        file_name    = str(body.get("file_name", ""))
         error_detail = (body.get("error_detail") or "").strip() or None
-        short_error = str(body.get("error", "")).strip()
+        short_error  = str(body.get("error", "")).strip()
 
         if error_detail:
             lines = [l.strip() for l in error_detail.split("\n") if l.strip()]
@@ -3569,32 +3650,31 @@ def upsert_project_error(name):
 
         error_hash = derive_error_hash(short_error, error_detail)
 
-        # Update existing row — must match project_id AND owner_user_id
+        # Update existing row — scoped to this project only
         updated = execute_returning(
             f"UPDATE {TABLE} SET failure_count = failure_count + 1, file_name = %s, "
             f"timestamp = NOW(), error_detail = COALESCE(%s, error_detail), "
             f"error_status = CASE WHEN error_status = 'resolved' THEN 'reopened' ELSE error_status END, "
             f"reopened_at = CASE WHEN error_status = 'resolved' THEN NOW() ELSE reopened_at END, "
             f"resolved_at = CASE WHEN error_status = 'resolved' THEN NULL ELSE resolved_at END "
-            f"WHERE row_type = 'log' AND error_hash = %s "
-            f"  AND project_id = %s AND owner_user_id = %s "
+            f"WHERE row_type = 'log' AND error_hash = %s AND project_id = %s "
             f"RETURNING id, error_status, failure_count",
-            (file_name, error_detail, error_hash, authorized_project_id, user_id),
+            (file_name, error_detail, error_hash, authorized_project_id),
         )
         if updated:
             action = "reopened" if updated["error_status"] == "reopened" else "updated"
             return jsonify({"action": action, "error_status": updated["error_status"],
                             "failure_count": updated["failure_count"]})
 
-        # Insert new error row — set project_id + owner_user_id from the project row
+        # Insert new row — inherit owner from project row
         inserted = execute_returning(
             f"INSERT INTO {TABLE} (id, row_type, project_name, project_id, owner_user_id, "
             f"file_name, timestamp, success_count, failure_count, error, error_detail, "
             f"error_hash, error_status) "
             f"VALUES (%s, 'log', %s, %s, %s, %s, NOW(), 0, 1, %s, %s, %s, 'open') "
             f"RETURNING id, error_status, failure_count",
-            (str(uuid.uuid4()), proj["project_name"], authorized_project_id, user_id,
-             file_name, short_error, error_detail, error_hash),
+            (str(uuid.uuid4()), proj["project_name"], authorized_project_id,
+             proj_owner_id, file_name, short_error, error_detail, error_hash),
         )
         return jsonify({"action": "inserted", "error_status": inserted["error_status"],
                         "failure_count": inserted["failure_count"]})
@@ -3606,22 +3686,44 @@ def upsert_project_error(name):
 @app.route("/api/projects/<path:name>/errors/<hash>/resolve", methods=["PATCH"])
 @require_permission("errors:resolve")
 def resolve_project_error(name, hash):
-    """Resolve an error. Ownership checked on both project and log rows."""
+    """Resolve an error. admin can resolve any; developer can resolve assigned/owned."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
     user_id = user["id"]
+    role    = user.get("role", "")
+
     try:
-        proj, err = get_accessible_project_by_name(name)
-        if err:
+        # Verify project access by role
+        if role == "admin":
+            proj_rows = query(
+                f"SELECT id FROM {TABLE} "
+                f"WHERE row_type = 'project' AND LOWER(project_name) = LOWER(%s) "
+                f"  AND owner_user_id IS NOT NULL",
+                (name,),
+            )
+        else:
+            proj_rows = query(
+                f"SELECT id FROM {TABLE} "
+                f"WHERE row_type = 'project' AND LOWER(project_name) = LOWER(%s) "
+                f"  AND (owner_user_id = %s OR id IN ("
+                f"    SELECT DISTINCT project_id FROM projects_data "
+                f"    WHERE row_type = 'log' AND assigned_to = %s AND project_id IS NOT NULL"
+                f"  ))",
+                (name, user_id, user_id),
+            )
+        if not proj_rows:
             return jsonify({"error": "Not Found"}), 404
-        authorized_project_id = proj["id"]
+
+        authorized_project_id = proj_rows[0]["id"]
+        log_access_cond, log_access_params = _build_log_access_condition(user)
+
         execute(
             f"UPDATE {TABLE} SET error_status = %s, resolved_at = NOW(), "
             f"reopened_at = NULL "
             f"WHERE row_type = 'log' AND error_hash = %s "
-            f"  AND project_id = %s AND owner_user_id = %s",
-            ("resolved", hash, authorized_project_id, user_id),
+            f"  AND project_id = %s AND ({log_access_cond})",
+            tuple(["resolved", hash, authorized_project_id] + log_access_params),
         )
         return jsonify({"action": "resolved"})
     except Exception as e:
@@ -3631,23 +3733,23 @@ def resolve_project_error(name, hash):
 @app.route("/api/projects/<path:name>/live", methods=["PATCH"])
 @require_auth(roles=["admin"])
 def toggle_project_live(name):
-    """Toggle live flag. Admin must also own the project."""
+    """Toggle live flag. Admin only — can toggle any project."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
 
     body = request.get_json() or {}
     is_live = body.get("is_live")
     if not isinstance(is_live, bool):
         return jsonify({"error": "Body must contain { is_live: true | false }"}), 400
     try:
+        # Admin sees all projects — just require a valid owner
         row = execute_returning(
             f"UPDATE {TABLE} SET is_live = %s "
             f"WHERE row_type = 'project' AND LOWER(project_name) = LOWER(%s) "
-            f"  AND owner_user_id = %s "
+            f"  AND owner_user_id IS NOT NULL "
             f"RETURNING id, project_name AS name, category, is_live",
-            (is_live, name, user_id),
+            (is_live, name),
         )
         if not row:
             return jsonify({"error": f"Project not found: {name}"}), 404
@@ -4099,17 +4201,17 @@ def ingest_success():
 @app.route("/api/dashboard/top-projects")
 @require_permission("dashboard:read")
 def dashboard_top_projects():
-    """Top projects by log count — scoped to the authenticated user."""
+    """Top projects by log count — scoped by role."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
 
+    log_access_cond, log_access_params = _build_log_access_condition(user)
     from_ts = request.args.get("from", "")
-    to_ts = request.args.get("to", "")
+    to_ts   = request.args.get("to", "")
     try:
-        conditions = ["row_type = 'log'", "owner_user_id = %s"]
-        params = [user_id]
+        conditions = [f"row_type = 'log'", f"({log_access_cond})"]
+        params = list(log_access_params)
         if from_ts:
             conditions.append("timestamp >= %s")
             params.append(from_ts)
@@ -4132,20 +4234,20 @@ def dashboard_top_projects():
 @app.route("/api/dashboard/top-error-projects")
 @require_permission("dashboard:read")
 def dashboard_top_error_projects():
-    """Top error projects — scoped to the authenticated user."""
+    """Top error projects — scoped by role."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
 
+    log_access_cond, log_access_params = _build_log_access_condition(user)
     from_ts = request.args.get("from", "")
-    to_ts = request.args.get("to", "")
+    to_ts   = request.args.get("to", "")
     try:
         conditions = [
-            "row_type = 'log'", "owner_user_id = %s",
+            "row_type = 'log'", f"({log_access_cond})",
             "error IS NOT NULL", "error <> ''",
         ]
-        params = [user_id]
+        params = list(log_access_params)
         if from_ts:
             conditions.append("timestamp >= %s")
             params.append(from_ts)
@@ -4169,11 +4271,12 @@ def dashboard_top_error_projects():
 @app.route("/api/dashboard/today-errors")
 @require_permission("dashboard:read")
 def dashboard_today_errors():
-    """Today's errors — scoped to the authenticated user."""
+    """Today's errors — scoped by role."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
+
+    log_access_cond, log_access_params = _build_log_access_condition(user)
     try:
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         rows = query(
@@ -4182,12 +4285,12 @@ def dashboard_today_errors():
             f"NULLIF(error_group_name, '') AS error_group_name, "
             f"NULLIF(error_group_id, '') AS error_group_id "
             f"FROM {TABLE} "
-            f"WHERE row_type = 'log' AND owner_user_id = %s "
+            f"WHERE row_type = 'log' AND ({log_access_cond}) "
             f"  AND error IS NOT NULL AND error <> '' "
             f"  AND timestamp AT TIME ZONE 'UTC' >= CURRENT_DATE "
             f"  AND timestamp AT TIME ZONE 'UTC' < CURRENT_DATE + INTERVAL '1 day' "
             f"ORDER BY timestamp DESC",
-            (user_id,),
+            log_access_params,
         )
         return jsonify({"date": date_str, "errors": serialize_rows(rows)})
     except Exception as e:
@@ -4198,20 +4301,20 @@ def dashboard_today_errors():
 @app.route("/api/dashboard/errors")
 @require_permission("dashboard:read")
 def dashboard_errors():
-    """All errors in a date range — scoped to the authenticated user."""
+    """All errors in a date range — scoped by role."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
 
+    log_access_cond, log_access_params = _build_log_access_condition(user)
     from_ts = request.args.get("from", "")
-    to_ts = request.args.get("to", "")
+    to_ts   = request.args.get("to", "")
     try:
         conditions = [
-            "row_type = 'log'", "owner_user_id = %s",
+            "row_type = 'log'", f"({log_access_cond})",
             "error IS NOT NULL", "error <> ''",
         ]
-        params = [user_id]
+        params = list(log_access_params)
         if from_ts:
             conditions.append("timestamp >= %s")
             params.append(from_ts)
@@ -4239,20 +4342,18 @@ def dashboard_errors():
 def dashboard_project_errors():
     """
     GET /api/dashboard/project-errors?project=<name>&from=<iso>&to=<iso>
-
-    Returns errors for a specific project within a date range.
-    Ownership enforced — only returns data belonging to the authenticated user.
+    Scoped by role — admin/viewer see all, developer sees assigned only.
     """
     import traceback as _tb_mod
 
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
 
+    log_access_cond, log_access_params = _build_log_access_condition(user)
     project_name = request.args.get("project", "").strip()
-    from_ts = request.args.get("from", "").strip()
-    to_ts = request.args.get("to", "").strip()
+    from_ts      = request.args.get("from", "").strip()
+    to_ts        = request.args.get("to", "").strip()
 
     if not project_name:
         return jsonify({"error": "project query parameter is required"}), 400
@@ -4260,11 +4361,11 @@ def dashboard_project_errors():
     try:
         conditions = [
             "row_type = 'log'",
+            f"({log_access_cond})",
             "error IS NOT NULL", "error <> ''",
             "project_name = %s",
-            "owner_user_id = %s",
         ]
-        params = [project_name, user_id]
+        params = list(log_access_params) + [project_name]
 
         if from_ts:
             conditions.append("timestamp >= %s")
@@ -4274,15 +4375,15 @@ def dashboard_project_errors():
             params.append(to_ts)
 
         where = " AND ".join(conditions)
-        sql = (
+        rows = query(
             f"SELECT project_name AS project, file_name, error, "
             f"error_detail, error_hash, timestamp, "
             f"NULLIF(error_group_name, '') AS error_group_name, "
             f"NULLIF(error_group_id, '') AS error_group_id "
             f"FROM {TABLE} WHERE {where} "
-            f"ORDER BY timestamp DESC LIMIT 2000"
+            f"ORDER BY timestamp DESC LIMIT 2000",
+            params,
         )
-        rows = query(sql, params)
         return jsonify({"errors": serialize_rows(rows)})
 
     except Exception as e:
@@ -4365,13 +4466,18 @@ def jira_summary():
 @app.route("/api/breaks/grouped")
 @require_permission("breaks:read")
 def breaks_grouped():
-    """Grouped breaks — scoped to the authenticated user's logs only."""
+    """
+    Grouped breaks scoped by role:
+      admin/viewer → all logs with a valid owner
+      developer    → only logs they own or are assigned to them
+    """
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
 
-    page = max(1, int(request.args.get("page", 1) or 1))
+    log_access_cond, log_access_params = _build_log_access_condition(user)
+
+    page  = max(1, int(request.args.get("page", 1) or 1))
     limit = min(100, max(1, int(request.args.get("limit", 20) or 20)))
     offset = (page - 1) * limit
     status_f         = request.args.get("status", "")
@@ -4383,10 +4489,10 @@ def breaks_grouped():
     try:
         conditions = [
             "row_type = 'log'",
-            "owner_user_id = %s",
+            f"({log_access_cond})",
             "error IS NOT NULL", "error <> ''",
         ]
-        params = [user_id]
+        params = list(log_access_params)
 
         if from_ts:
             conditions.append("timestamp >= %s")
@@ -4405,13 +4511,11 @@ def breaks_grouped():
 
         inner_sql = (
             f"SELECT "
-            f"  id AS representative_id, "
-            f"  project_name, "
+            f"  id AS representative_id, project_name, "
             f"  error AS error_message, "
             f"  COALESCE(error_hash, MD5(LOWER(TRIM(error)))) AS error_hash, "
             f"  COALESCE(error_group_id, '') AS error_group_id, "
-            f"  error_group_name, "
-            f"  error_status, "
+            f"  error_group_name, error_status, "
             f"  MIN(timestamp) OVER ("
             f"    PARTITION BY project_name, COALESCE(error_hash, MD5(LOWER(TRIM(error)))) "
             f"  ) AS first_seen, "
@@ -4447,8 +4551,7 @@ def breaks_grouped():
             total_rows = query(count_sql, tuple(params + [status_f]))
             total = total_rows[0].get("cnt", 0) if total_rows else 0
             data_sql = (
-                f"SELECT * FROM ({row_sql}) AS g "
-                f"WHERE status = %s "
+                f"SELECT * FROM ({row_sql}) AS g WHERE status = %s "
                 f"ORDER BY last_seen DESC NULLS LAST LIMIT %s OFFSET %s"
             )
             all_params = params + [status_f, limit, offset]
@@ -4476,17 +4579,20 @@ def breaks_grouped():
 @require_permission("breaks:read")
 def get_break(break_id):
     """
-    GET /api/breaks/:id — ownership enforced via owner_user_id on the log row.
+    GET /api/breaks/:id
+    admin/viewer → any log with valid owner
+    developer    → only owned or assigned logs
     """
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
+
+    log_access_cond, log_access_params = _build_log_access_condition(user)
     try:
         rows = query(
             f"SELECT * FROM {TABLE} "
-            f"WHERE row_type = 'log' AND id = %s AND owner_user_id = %s",
-            (break_id, user_id),
+            f"WHERE row_type = 'log' AND id = %s AND ({log_access_cond})",
+            tuple([break_id] + log_access_params),
         )
         if not rows:
             return jsonify({"error": "Not Found", "message": "Break not found."}), 404
@@ -4507,14 +4613,14 @@ def get_break(break_id):
 def get_break_detail(error_hash):
     """
     GET /api/breaks/detail/:error_hash
-
-    Ownership enforced: all log queries include owner_user_id = authenticated user.
-    Another user cannot access this error by guessing the hash or project name.
+    admin/viewer → any log with valid owner
+    developer    → only owned or assigned logs
     """
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
+
+    log_access_cond, log_access_params = _build_log_access_condition(user)
 
     request_id = g.get("request_id", "unknown")
     request_start = time.perf_counter()
@@ -4549,9 +4655,9 @@ def get_break_detail(error_hash):
             "row_type = 'log'",
             "error IS NOT NULL",
             "error <> ''",
-            "owner_user_id = %s",   # ← ownership enforcement
+            f"({log_access_cond})",   # ← role-based access
         ]
-        params = [user_id]
+        params = list(log_access_params)
         try:
             hash_candidates = build_error_hash_candidates(error_hash, None)
             debug_info["hash_candidates"] = hash_candidates
@@ -4578,9 +4684,8 @@ def get_break_detail(error_hash):
                 print(f"[req:{request_id}] [Breaks:detail] Import error was: {type(_error_matching_import_err).__name__}: {_error_matching_import_err}")
             hash_candidates = []
         
-        primary_params = []
-        primary_conditions = ["row_type = 'log'", "error IS NOT NULL", "error <> ''", "owner_user_id = %s"]
-        primary_params.append(user_id)
+        primary_params = list(log_access_params)
+        primary_conditions = ["row_type = 'log'", "error IS NOT NULL", "error <> ''", f"({log_access_cond})"]
         if error_hash:
             hash_clauses = []
             for idx, candidate in enumerate(hash_candidates):
@@ -4626,9 +4731,8 @@ def get_break_detail(error_hash):
             print(f"[req:{request_id}] [Breaks:detail] Primary query returned {len(error_rows) if error_rows else 0} rows in {debug_info['primary_query_elapsed_ms']}ms")
 
         if not error_rows:
-            fallback_params = []
-            fallback_conditions = ["row_type = 'log'", "error IS NOT NULL", "error <> ''", "owner_user_id = %s"]
-            fallback_params.append(user_id)
+            fallback_params = list(log_access_params)
+            fallback_conditions = ["row_type = 'log'", "error IS NOT NULL", "error <> ''", f"({log_access_cond})"]
             if project_name:
                 fallback_conditions.insert(0, "LOWER(project_name) = LOWER(%s)")
                 fallback_params.append(project_name)
@@ -4796,12 +4900,11 @@ def get_break_detail(error_hash):
                         f"SELECT id, error_status, reopened_at, failure_count, "
                         f"file_name, timestamp, error_group_name "
                         f"FROM {TABLE} "
-                        f"WHERE row_type = 'log' AND id = %s AND owner_user_id = %s",
-                        (log_id_param, user_id),
+                        f"WHERE row_type = 'log' AND id = %s AND ({log_access_cond})",
+                        tuple([log_id_param] + log_access_params),
                     )
                     if direct_rows:
                         specific_row = direct_rows[0]
-                        # Also add it to error_rows so occurrence numbering includes it
                         error_rows = list(error_rows) + [specific_row]
                 except Exception as _sr_exc:
                     logger.warning("[Breaks:detail] Direct log_id fetch failed: %s", _sr_exc)
@@ -5235,12 +5338,13 @@ def get_break_detail(error_hash):
 @require_permission("dashboard:read")
 def dashboard_legacy():
     """
-    GET /api/dashboard — aggregated break counts, scoped to the authenticated user.
+    GET /api/dashboard — aggregated break counts, scoped by role.
     """
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
+
+    log_access_cond, log_access_params = _build_log_access_condition(user)
     try:
         def safe_count(sql, params):
             try:
@@ -5251,37 +5355,31 @@ def dashboard_legacy():
 
         last24h = safe_count(
             f"SELECT COUNT(*) AS count FROM {TABLE} "
-            f"WHERE row_type = 'log' AND owner_user_id = %s "
+            f"WHERE row_type = 'log' AND ({log_access_cond}) "
             f"  AND error IS NOT NULL AND error <> '' "
             f"  AND timestamp >= NOW() - INTERVAL '24 hours'",
-            (user_id,),
+            log_access_params,
         )
         last7d = safe_count(
             f"SELECT COUNT(*) AS count FROM {TABLE} "
-            f"WHERE row_type = 'log' AND owner_user_id = %s "
+            f"WHERE row_type = 'log' AND ({log_access_cond}) "
             f"  AND error IS NOT NULL AND error <> '' "
             f"  AND timestamp >= NOW() - INTERVAL '7 days'",
-            (user_id,),
+            log_access_params,
         )
 
         return jsonify({
             "breakCounts": {"last24h": last24h, "last7d": last7d},
-            "errorRateTrend": [],
-            "topServices": [],
-            "timeSeries": [],
-            "severityBreakdown": [],
-            "deploymentEvents": [],
-            "airbrakeUnreachable": False,
+            "errorRateTrend": [], "topServices": [],
+            "timeSeries": [], "severityBreakdown": [],
+            "deploymentEvents": [], "airbrakeUnreachable": False,
         })
     except Exception:
         return jsonify({
             "breakCounts": {"last24h": 0, "last7d": 0},
-            "errorRateTrend": [],
-            "topServices": [],
-            "timeSeries": [],
-            "severityBreakdown": [],
-            "deploymentEvents": [],
-            "airbrakeUnreachable": True,
+            "errorRateTrend": [], "topServices": [],
+            "timeSeries": [], "severityBreakdown": [],
+            "deploymentEvents": [], "airbrakeUnreachable": True,
         })
 
 
@@ -5292,11 +5390,11 @@ def dashboard_legacy():
 @app.route("/api/knowledge_base/reopen", methods=["POST"])
 @require_permission("errors:resolve")
 def reopen_error_solution():
-    """Reopen an error. Ownership of the log row is verified before the write."""
+    """Reopen an error. Access enforced by role before write."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
+    log_access_cond, log_access_params = _build_log_access_condition(user)
 
     body         = request.get_json() or {}
     error_hash   = body.get("error_hash")
@@ -5306,10 +5404,7 @@ def reopen_error_solution():
     if not error_hash or not project_name:
         return jsonify({"error": "error_hash and project_name are required"}), 400
     if not log_id:
-        return jsonify({
-            "error": "log_id is required",
-            "detail": "Reopen must target a specific log row by id.",
-        }), 400
+        return jsonify({"error": "log_id is required"}), 400
 
     try:
         count = execute(
@@ -5317,25 +5412,21 @@ def reopen_error_solution():
             f"SET error_status = 'reopened', reopened_at = NOW(), resolved_at = NULL "
             f"WHERE row_type = 'log' "
             f"  AND id = %s "
-            f"  AND owner_user_id = %s "
+            f"  AND ({log_access_cond}) "
             f"  AND error_status IN ('resolved', 'reopened')",
-            (log_id, user_id),
+            tuple([log_id] + log_access_params),
         )
         if count == 0:
             return jsonify({"error": "Not Found"}), 404
         logger.info("[Reopen] log_id=%r error_hash=%r project=%r rows_updated=%d",
                     log_id, error_hash, project_name, count)
 
-        # ── Reopen the linked Jira ticket back to To Do ───────────────────────
-        # If this log row has a Jira ticket linked, move it back to To Do
-        # so the Jira ticket stays in sync with the Airbrake error status.
+        # ── Sync linked Jira ticket back to To Do (non-fatal) ─────────────────
         if count and log_id:
             try:
                 from jira.jira_sync import find_airbrake_token_for_webhook
                 from jira.client import JiraClient
                 from db import query as _q
-
-                # Get the jira_issue_key from this row's metadata
                 meta_rows = _q(
                     f"SELECT metadata FROM {TABLE} "
                     f"WHERE row_type = 'log' AND id = %s "
@@ -5354,16 +5445,9 @@ def reopen_error_solution():
                             client = JiraClient(access_token=access_token, cloud_id=cloud_id)
                             try:
                                 client.transition_issue_to_todo(issue_key)
-                                logger.info(
-                                    "[Reopen] Moved Jira ticket %s back to To Do for log_id=%r",
-                                    issue_key, log_id,
-                                )
+                                logger.info("[Reopen] Moved Jira ticket %s back to To Do", issue_key)
                             except Exception as jira_exc:
-                                # Non-fatal — Airbrake reopen succeeded regardless
-                                logger.warning(
-                                    "[Reopen] Could not move Jira ticket %s to To Do: %s",
-                                    issue_key, jira_exc,
-                                )
+                                logger.warning("[Reopen] Could not move Jira ticket %s: %s", issue_key, jira_exc)
             except Exception as jira_outer_exc:
                 logger.warning("[Reopen] Jira sync step failed (non-fatal): %s", jira_outer_exc)
 
@@ -5376,11 +5460,11 @@ def reopen_error_solution():
 @app.route("/api/knowledge_base/resolve", methods=["POST"])
 @require_permission("errors:resolve")
 def resolve_error_solution():
-    """Resolve an error. Ownership of the log row is verified before the write."""
+    """Resolve an error. Access enforced by role before write."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
+    log_access_cond, log_access_params = _build_log_access_condition(user)
 
     body         = request.get_json() or {}
     error_hash   = body.get("error_hash")
@@ -5390,10 +5474,7 @@ def resolve_error_solution():
     if not error_hash or not project_name:
         return jsonify({"error": "error_hash and project_name are required"}), 400
     if not log_id:
-        return jsonify({
-            "error": "log_id is required",
-            "detail": "resolve must target a specific log row by id.",
-        }), 400
+        return jsonify({"error": "log_id is required"}), 400
 
     try:
         count = execute(
@@ -5401,9 +5482,9 @@ def resolve_error_solution():
             f"SET error_status = 'resolved', resolved_at = NOW() "
             f"WHERE row_type = 'log' "
             f"  AND id = %s "
-            f"  AND owner_user_id = %s "
+            f"  AND ({log_access_cond}) "
             f"  AND error_status IN ('open', 'reopened')",
-            (log_id, user_id),
+            tuple([log_id] + log_access_params),
         )
         if count == 0:
             return jsonify({"error": "Not Found"}), 404
@@ -5418,11 +5499,11 @@ def resolve_error_solution():
 @app.route("/api/knowledge_base/use", methods=["POST"])
 @require_permission("errors:resolve")
 def use_solution():
-    """Apply a solution and resolve the log row. Ownership verified before write."""
+    """Apply a solution and resolve the log row. Access enforced by role."""
     user = get_current_user()
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
-    user_id = user["id"]
+    log_access_cond, log_access_params = _build_log_access_condition(user)
 
     body         = request.get_json() or {}
     solution_id  = body.get("solution_id")
@@ -5433,23 +5514,19 @@ def use_solution():
     if not solution_id or not error_hash or not project_name:
         return jsonify({"error": "solution_id, error_hash and project_name are required"}), 400
     if not log_id:
-        return jsonify({
-            "error": "log_id is required",
-            "detail": "use_solution must target a specific log row by id.",
-        }), 400
+        return jsonify({"error": "log_id is required"}), 400
 
     try:
         updated_solution = increment_usage(solution_id)
 
-        # Resolve exactly the one log row the user owns
         count = execute(
             f"UPDATE {TABLE} "
             f"SET error_status = 'resolved', resolved_at = NOW() "
             f"WHERE row_type = 'log' "
             f"  AND id = %s "
-            f"  AND owner_user_id = %s "
+            f"  AND ({log_access_cond}) "
             f"  AND error_status IN ('open', 'reopened')",
-            (log_id, user_id),
+            tuple([log_id] + log_access_params),
         )
         if count == 0:
             return jsonify({"error": "Not Found"}), 404
