@@ -9,7 +9,7 @@
  */
 
 import React, { useEffect, useRef, useState } from 'react';
-import type { RetentionPolicy, Role } from '@portal/shared';
+import type { Role } from '@portal/shared';
 import { apiFetch } from '../lib/api';
 import { useAuth } from '../auth/AuthContext';
 import { JiraSettings } from './JiraSettings';
@@ -17,17 +17,6 @@ import { JiraSettings } from './JiraSettings';
 interface Props {
   readonly role: Role;
 }
-
-const selectStyle: React.CSSProperties = {
-  background: 'var(--input-bg)',
-  border: '1px solid var(--input-border)',
-  borderRadius: 'var(--radius-sm)' as unknown as number,
-  color: 'var(--text)',
-  padding: '8px 12px',
-  fontSize: 13,
-  outline: 'none',
-  cursor: 'pointer',
-};
 
 // ── Ticket types ──────────────────────────────────────────────────────────────
 
@@ -38,7 +27,7 @@ interface MyTicket {
   error: string;
   jira_status: string;
   jira_url: string;
-  updated_at: string;
+  created_at: string;
 }
 
 interface MyTicketsResponse {
@@ -362,22 +351,7 @@ function UsersSection() {
 // ── Main Settings component ───────────────────────────────────────────────────
 
 export function Settings({ role }: Props) {
-  const [retention, setRetention] = useState<RetentionPolicy | null>(null);
-  const [retentionLoading, setRetentionLoading] = useState(true);
-
   const isAdmin = role === 'admin';
-
-  useEffect(() => {
-    if (!isAdmin) return;
-    let cancelled = false;
-    apiFetch('/api/retention')
-      .then(r => r.json())
-      .then((data: RetentionPolicy) => {
-        if (!cancelled) { setRetention(data); setRetentionLoading(false); }
-      })
-      .catch(() => { if (!cancelled) setRetentionLoading(false); });
-    return () => { cancelled = true; };
-  }, [isAdmin]);
 
   // Non-admin: only show Jira integration
   if (!isAdmin) {
@@ -394,51 +368,11 @@ export function Settings({ role }: Props) {
   return (
     <div data-testid="settings">
       {/* Header */}
-      <div style={{ marginBottom: 28 }}>
-        <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>Settings</h2>
-        <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-          Manage users and data retention policies
-        </p>
-      </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
 
         {/* Users — current user only, conditional ticket columns */}
         <UsersSection />
-
-        {/* Data Retention */}
-        <section
-          data-testid="retention-settings"
-          style={{
-            background: 'var(--surface)',
-            border: '1px solid var(--card-border)',
-            borderRadius: 'var(--radius-md)' as unknown as number,
-            padding: '18px',
-          }}
-        >
-          <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Data Retention</h3>
-          {retentionLoading ? (
-            <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Loading…</div>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <label htmlFor="retention-select" style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                Retention period
-              </label>
-              <select
-                id="retention-select"
-                data-testid="retention-selector"
-                value={retention?.retentionDays ?? 30}
-                onChange={() => {/* handled by parent */}}
-                aria-label="Retention period"
-                style={selectStyle}
-              >
-                <option value={30}>30 days</option>
-                <option value={60}>60 days</option>
-                <option value={90}>90 days</option>
-              </select>
-            </div>
-          )}
-        </section>
 
         {/* Jira integration */}
         <JiraSettings />

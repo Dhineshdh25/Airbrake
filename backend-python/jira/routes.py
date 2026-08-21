@@ -713,7 +713,7 @@ def jira_tickets():
 
     try:
         rows = query(
-            "SELECT id, project_name, error, metadata, created_at, COALESCE(updated_at, created_at) AS updated_at "
+            "SELECT id, project_name, error, metadata, created_at "
             "FROM projects_data WHERE " + " AND ".join(filters) + " ORDER BY created_at DESC",
             tuple(params),
         )
@@ -731,7 +731,7 @@ def jira_tickets():
         issue_key = (metadata.get('jira_issue_key') or '').strip()
         created_by = _normalize_reporter(metadata)
         error = (row.get('error') or '').strip() or (metadata.get('error_message') or '').strip()
-        updated_at = row.get('updated_at')
+        created_at = row.get('created_at')
 
         if jira_sync_status.lower() == 'sync_failed':
             sync_failed += 1
@@ -750,7 +750,7 @@ def jira_tickets():
             'jira_sync_detail': (metadata.get('jira_sync_detail') or '').strip(),
             'jira_url': (metadata.get('jira_url') or metadata.get('url') or '').strip(),
             'created_by': created_by,
-            'updated_at': updated_at.isoformat() if hasattr(updated_at, 'isoformat') else (updated_at or ''),
+            'created_at': created_at.isoformat() if hasattr(created_at, 'isoformat') else (created_at or ''),
         })
 
     return jsonify({
@@ -802,7 +802,7 @@ def jira_my_tickets():
             "error":       str,   — truncated to 200 chars
             "jira_status": str,
             "jira_url":    str,
-            "updated_at":  str,
+            "created_at":  str,
           },
           ...
         ]
@@ -825,21 +825,71 @@ def jira_my_tickets():
 
     terminal_values = tuple(s.lower() for s in TERMINAL_STATUSES)
 
-    # ── Base filter: ONLY this user's tickets (strict ownership) ─────────────
-    # A ticket is visible ONLY when jira_created_by == authenticated user_id.
-    # There is NO fallback for un-stamped (legacy) tickets.
-    # If a historical ticket has no jira_created_by stamp, it cannot be
-    # reliably attributed to any user — it is excluded from all users' views.
-    # This is the correct secure default.
+    # ── Step 1: resolve which Jira issue keys belong to this user ─────────────
+    # Ownership is stored in jira_ticket rows (row_type='jira_ticket'), written
+    # by ticket_service.py at ticket-creation time with created_by = user_id.
+    # This is the authoritative, pre-existing ownership chain that predates the
+    # jira_created_by stamp on log rows. It covers all historical tickets.
+    #
+    # Additionally, log rows stamped after the latest deploy also carry
+    # jira_created_by = user_id directly. We include both sources so that both
+    # old and new tickets are visible, without any NULL/catch-all fallback.
+    #
+    # Security guarantee: user_id comes exclusively from _require_auth() (the
+    # server-side session). The frontend cannot override it.
+    try:
+        ticket_rows = query(
+            "SELECT metadata FROM projects_data "
+            "WHERE row_type = 'jira_ticket' "
+            "  AND metadata::jsonb->>'created_by' = %s",
+            (user_id,),
+        )
+    except Exception as exc:
+        logger.exception("[Jira Routes] my-tickets jira_ticket lookup failed: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+    # Collect all jira_keys owned by this user from jira_ticket rows
+    import json as _json
+    owned_keys: set[str] = set()
+    for tr in ticket_rows:
+        raw = tr.get("metadata")
+        meta = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+        key = (meta.get("jira_key") or meta.get("key") or "").strip()
+        if key:
+            owned_keys.add(key)
+
+    # ── Step 2: query log rows ────────────────────────────────────────────────
+    # Find log rows that:
+    #   (a) have jira_issue_key IN owned_keys  (historical + old tickets), OR
+    #   (b) have jira_created_by = user_id      (new tickets stamped at link time)
+    #
+    # Both conditions are scoped to this user. No NULL/catch-all fallback.
+
+    # Build the ownership condition
+    ownership_parts: list[str] = []
+    ownership_params: list = []
+
+    if owned_keys:
+        placeholders = ", ".join(["%s"] * len(owned_keys))
+        ownership_parts.append(
+            f"metadata::jsonb->>'jira_issue_key' IN ({placeholders})"
+        )
+        ownership_params.extend(sorted(owned_keys))  # sorted for stable query plans
+
+    # Also include directly-stamped log rows (created after latest deploy)
+    ownership_parts.append("metadata::jsonb->>'jira_created_by' = %s")
+    ownership_params.append(user_id)
+
+    ownership_clause = "(" + " OR ".join(ownership_parts) + ")"
+
     base_conditions = [
         "row_type = 'log'",
         "metadata::jsonb ? 'jira_issue_key'",
         "metadata::jsonb->>'jira_issue_key' IS NOT NULL",
         "metadata::jsonb->>'jira_issue_key' != ''",
-        # Strict ownership — must have an explicit stamp matching this session's user.
-        "metadata::jsonb->>'jira_created_by' = %s",
+        ownership_clause,
     ]
-    base_params: list = [user_id]
+    base_params: list = list(ownership_params)
 
     # ── Optional status filter ────────────────────────────────────────────────
     if status_filter == "resolved":
@@ -858,17 +908,16 @@ def jira_my_tickets():
     where_clause = " AND ".join(base_conditions)
 
     try:
-        # Count query (no LIMIT/OFFSET) for the total
+        # Total count (no LIMIT/OFFSET)
         count_rows = query(
             f"SELECT COUNT(*) AS n FROM projects_data WHERE {where_clause}",
             tuple(base_params),
         )
         total = int((count_rows[0].get("n") or 0) if count_rows else 0)
 
-        # Data query with pagination
+        # Data page — projects_data has created_at, not updated_at
         data_rows = query(
-            "SELECT id, project_name, error, metadata, "
-            "       COALESCE(updated_at, created_at) AS updated_at "
+            "SELECT id, project_name, error, metadata, created_at "
             f"FROM projects_data WHERE {where_clause} "
             "ORDER BY created_at DESC "
             "LIMIT %s OFFSET %s",
@@ -883,9 +932,11 @@ def jira_my_tickets():
         meta = _decode_metadata(row.get("metadata"))
         issue_key = (meta.get("jira_issue_key") or "").strip()
         jira_status = (meta.get("jira_status") or "").strip()
-        jira_url = (meta.get("jira_issue_url") or meta.get("jira_url") or meta.get("url") or "").strip()
+        jira_url = (
+            meta.get("jira_issue_url") or meta.get("jira_url") or meta.get("url") or ""
+        ).strip()
         error = (row.get("error") or "").strip() or (meta.get("error_message") or "").strip()
-        updated_at = row.get("updated_at")
+        created_at = row.get("created_at")
 
         tickets.append({
             "log_id":       row.get("id"),
@@ -894,12 +945,12 @@ def jira_my_tickets():
             "error":        error[:200],
             "jira_status":  jira_status,
             "jira_url":     jira_url,
-            "updated_at":   updated_at.isoformat() if hasattr(updated_at, "isoformat") else (updated_at or ""),
+            "created_at":   created_at.isoformat() if hasattr(created_at, "isoformat") else (created_at or ""),
         })
 
     logger.info(
-        "[Jira Routes] my-tickets user_id=%s status=%s total=%d limit=%d offset=%d",
-        user_id, status_filter or "all", total, limit, offset,
+        "[Jira Routes] my-tickets user_id=%s status=%s owned_keys=%d total=%d limit=%d offset=%d",
+        user_id, status_filter or "all", len(owned_keys), total, limit, offset,
     )
     return jsonify({
         "total":   total,

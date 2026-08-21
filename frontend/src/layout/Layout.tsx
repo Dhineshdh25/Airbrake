@@ -4,11 +4,15 @@ import { useTheme } from '../theme/ThemeContext';
 import { useAuth } from '../auth/AuthContext';
 import { apiFetch } from '../lib/api';
 
-// Non-Jira links — plain React Router <Link>
-const PLAIN_NAV_LINKS = [
+// Plain nav links rendered before the Jira connection-aware button.
+// Order: Dashboard → Log Stream → Breaks → [Jira button] → Settings
+const PLAIN_NAV_LINKS_BEFORE_JIRA = [
   { to: '/dashboard', label: 'Dashboard', icon: '▦' },
   { to: '/logs',      label: 'Log Stream', icon: '≡' },
   { to: '/breaks',    label: 'Breaks',     icon: '⚡' },
+];
+
+const PLAIN_NAV_LINKS_AFTER_JIRA = [
   { to: '/settings',  label: 'Settings',   icon: '⚙' },
 ];
 
@@ -143,7 +147,7 @@ export function Layout({ children }: Props) {
 
         {/* Nav links */}
         <div style={{ flex: 1, padding: '12px 10px', display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {PLAIN_NAV_LINKS.map(({ to, label, icon }) => {
+          {PLAIN_NAV_LINKS_BEFORE_JIRA.map(({ to, label, icon }) => {
             const active = location.pathname === to || location.pathname.startsWith(to + '/');
             return (
               <Link
@@ -186,6 +190,30 @@ export function Layout({ children }: Props) {
               }} />
             )}
           </button>
+
+          {PLAIN_NAV_LINKS_AFTER_JIRA.map(({ to, label, icon }) => {
+            const active = location.pathname === to || location.pathname.startsWith(to + '/');
+            return (
+              <Link
+                key={to}
+                to={to}
+                style={navItemStyle(active) as React.CSSProperties}
+              >
+                <span style={{ fontSize: 14, opacity: active ? 1 : 0.6, width: 18, textAlign: 'center' }}>{icon}</span>
+                {label}
+                {active && (
+                  <span style={{
+                    marginLeft: 'auto',
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    background: 'var(--accent)',
+                    boxShadow: '0 0 6px var(--accent)',
+                  }} />
+                )}
+              </Link>
+            );
+          })}
         </div>
 
         {/* Theme toggle */}
