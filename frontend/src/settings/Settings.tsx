@@ -22,6 +22,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { Role } from '@portal/shared';
 import { apiFetch } from '../lib/api';
 import { useAuth } from '../auth/AuthContext';
+import { PaginationControls } from '../components/PaginationControls';
 import { JiraSettings } from './JiraSettings';
 
 // ── Existing VALID_ROLES from the backend (must stay in sync with middleware.py) ─
@@ -515,6 +516,7 @@ function AdminUsersSection({ currentUserId }: { currentUserId: string }) {
   const [removing, setRemoving]     = useState(false);
   const [removeError, setRemoveError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+  const [page, setPage] = useState(1);
 
   const loadUsers = useCallback(() => {
     setLoading(true);
@@ -582,6 +584,13 @@ function AdminUsersSection({ currentUserId }: { currentUserId: string }) {
     setTimeout(() => setSuccessMsg(''), 3500);
   }
 
+  const totalPages = Math.max(1, Math.ceil(users.length / PAGE_SIZE));
+  const pagedUsers = users.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  useEffect(() => {
+    setPage(1);
+  }, [users.length]);
+
   return (
     <section style={S.card}>
       <div style={S.cardHeader}>
@@ -645,8 +654,8 @@ function AdminUsersSection({ currentUserId }: { currentUserId: string }) {
               </tr>
             </thead>
             <tbody>
-              {users.map((u, idx) => {
-                const isLast = idx === users.length - 1;
+              {pagedUsers.map((u, idx) => {
+                const isLast = idx === pagedUsers.length - 1;
                 const tdStyle: React.CSSProperties = { ...S.td, borderBottom: isLast ? 'none' : '1px solid var(--card-border)' };
                 const isSelf = u.id === currentUserId;
                 return (
@@ -704,6 +713,7 @@ function ProjectsSection({ users }: { users: UserRow[] }) {
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState('');
+  const [page, setPage] = useState(1);
 
   useEffect(() => {
     setLoading(true);
@@ -713,6 +723,13 @@ function ProjectsSection({ users }: { users: UserRow[] }) {
       .catch(() => setError('Failed to load projects.'))
       .finally(() => setLoading(false));
   }, []);
+
+  const totalPages = Math.max(1, Math.ceil(projects.length / PAGE_SIZE));
+  const pagedProjects = projects.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  useEffect(() => {
+    setPage(1);
+  }, [projects.length]);
 
   return (
     <section style={S.card}>
@@ -737,8 +754,8 @@ function ProjectsSection({ users }: { users: UserRow[] }) {
               </tr>
             </thead>
             <tbody>
-              {projects.map((p, idx) => {
-                const isLast = idx === projects.length - 1;
+              {pagedProjects.map((p, idx) => {
+                const isLast = idx === pagedProjects.length - 1;
                 const tdStyle: React.CSSProperties = { ...S.td, borderBottom: isLast ? 'none' : '1px solid var(--card-border)' };
                 return (
                   <tr key={p.id}>

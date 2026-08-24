@@ -10,6 +10,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from '../lib/api';
+import { PaginationControls } from '../components/PaginationControls';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -197,6 +198,7 @@ export function JiraOverview() {
   const [statusFilter, setStatusFilter] = useState('');
   const [priorityFilter, setPriorityFilter] = useState('');
   const [assigneeFilter, setAssigneeFilter] = useState('');
+  const [page, setPage] = useState(1);
   const [sortKey, setSortKey] = useState<SortKey>('updated');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
 
@@ -218,6 +220,8 @@ export function JiraOverview() {
     [issues]);
 
   // ── Filtered + sorted rows ────────────────────────────────────────────────
+  const pageSize = 5;
+
   const visible = useMemo(() => {
     console.log('[Jira useMemo] Computing visible rows from', issues.length, 'issues');
 
@@ -249,9 +253,32 @@ export function JiraOverview() {
       return sortDir === 'asc' ? cmp : -cmp;
     });
 
-    console.log('[Jira useMemo] Visible rows computed:', rows.length);
-    return rows;
-  }, [issues, search, projectFilter, statusFilter, priorityFilter, assigneeFilter, sortKey, sortDir]);
+    const start = (page - 1) * pageSize;
+    const paged = rows.slice(start, start + pageSize);
+    console.log('[Jira useMemo] Visible rows computed:', rows.length, 'page', page, 'pageSize', pageSize);
+    return paged;
+  }, [issues, search, projectFilter, statusFilter, priorityFilter, assigneeFilter, sortKey, sortDir, page]);
+
+  const totalPages = useMemo(() => {
+    const total = issues.filter((issue) => {
+      const q = search.toLowerCase().trim();
+      if (q && !(issue.key.toLowerCase().includes(q) || (issue.fields?.summary ?? '').toLowerCase().includes(q))) return false;
+      if (projectFilter && (issue.fields?.project?.name ?? '') !== projectFilter) return false;
+      if (statusFilter && (issue.fields?.status?.name ?? '') !== statusFilter) return false;
+      if (priorityFilter && (issue.fields?.priority?.name ?? '') !== priorityFilter) return false;
+      if (assigneeFilter && (issue.fields?.assignee?.displayName ?? '') !== assigneeFilter) return false;
+      return true;
+    }).length;
+    return Math.max(1, Math.ceil(total / pageSize));
+  }, [issues, search, projectFilter, statusFilter, priorityFilter, assigneeFilter]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [search, projectFilter, statusFilter, priorityFilter, assigneeFilter]);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
 
   // ── Fetch ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -612,6 +639,10 @@ export function JiraOverview() {
             </tbody>
           </table>
         </div>
+      )}
+
+      {!notConnected && !loading && !loadError && totalPages > 1 && (
+        <PaginationControls currentPage={page} totalPages={totalPages} onPageChange={setPage} />
       )}
     </div>
   );

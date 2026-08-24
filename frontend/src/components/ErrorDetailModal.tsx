@@ -1,6 +1,6 @@
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { apiFetch, ApiError, buildAirbrakeErrorUrl, API_BASE_URL } from '../lib/api';
-import { getCsrfToken, setCsrfTokenMemory } from '../auth/AuthContext';
+import { getCsrfToken, setCsrfTokenMemory, useAuth } from '../auth/AuthContext';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -317,6 +317,83 @@ export function ErrorDetailModal({
   const [jiraTicket, setJiraTicket]     = useState<{ key: string; url: string } | null>(null);
   const [jiraError,  setJiraError]      = useState('');
   const [jiraConnected, setJiraConnected] = useState<boolean | null>(null); // null = unknown
+
+  // ── Semantic group override ─────────────────────────────────────────────
+  const { user } = useAuth();
+  const [taxonomy, setTaxonomy] = useState<Array<{ group_id: string; group_name: string }>>([]);
+  const [taxonomyLoading, setTaxonomyLoading] = useState(false);
+  const [groupOverrideValue, setGroupOverrideValue] = useState('Unknown');
+  const [groupOverrideBusy, setGroupOverrideBusy] = useState(false);
+  const [groupOverrideError, setGroupOverrideError] = useState('');
+  const canEditSemanticGroups = !!user && (user.role === 'developer' || user.role === 'admin');
+
+  const taxonomyOptions = useMemo(() => {
+    const names = taxonomy.map(item => item.group_name);
+    const current = (data?.error_group_name ?? 'Unknown').trim() || 'Unknown';
+    if (current && !names.includes(current)) names.unshift(current);
+    return names;
+  }, [taxonomy, data?.error_group_name]);
+
+  useEffect(() => {
+    if (!canEditSemanticGroups) {
+      setTaxonomy([]);
+      setTaxonomyLoading(false);
+      return;
+    }
+
+    setTaxonomyLoading(true);
+    apiFetch('/api/error-groups/taxonomy')
+      .then(r => r.json())
+      .then((d: { taxonomy?: Array<{ group_id: string; group_name: string }> }) => {
+        const next = Array.isArray(d?.taxonomy) ? d.taxonomy : [];
+        setTaxonomy(next);
+      })
+      .catch(() => setTaxonomy([]))
+      .finally(() => setTaxonomyLoading(false));
+  }, [canEditSemanticGroups]);
+
+  useEffect(() => {
+    const nextValue = (data?.error_group_name ?? 'Unknown').trim() || 'Unknown';
+    if (taxonomyOptions.length === 0) {
+      setGroupOverrideValue(nextValue);
+      return;
+    }
+    setGroupOverrideValue(taxonomyOptions.includes(nextValue) ? nextValue : 'Unknown');
+  }, [data?.error_group_name, taxonomyOptions]);
+
+  async function handleGroupOverride() {
+    if (!effectiveErrorHash || !resolvedLogId || !canEditSemanticGroups) return;
+    const selected = taxonomy.find(item => item.group_name === groupOverrideValue) ?? null;
+    if (!selected) {
+      setGroupOverrideError('Select a valid semantic group first.');
+      return;
+    }
+
+    setGroupOverrideBusy(true);
+    setGroupOverrideError('');
+    try {
+      const r = await apiFetch('/api/error-groups/override', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          log_id: resolvedLogId,
+          group_id: selected.group_id,
+          group_name: selected.group_name,
+        }),
+      });
+      const payload = await r.json();
+      if (!r.ok) {
+        throw new Error(payload?.message || payload?.error || 'Failed to update semantic group.');
+      }
+      setData(prev => prev ? { ...prev, error_group_name: selected.group_name } : prev);
+      setGroupOverrideValue(selected.group_name);
+      onRefresh?.();
+    } catch (e) {
+      setGroupOverrideError(e instanceof Error ? e.message : 'Failed to update semantic group.');
+    } finally {
+      setGroupOverrideBusy(false);
+    }
+  }
 
   // ── The specific log row id to target for resolve/reopen ─────────────────
   // When opened from BreaksList, row.representative_id is the most-recent
@@ -1435,6 +1512,47 @@ export function ErrorDetailModal({
               <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2 }}>Project</div>
               <div style={{ fontSize: 13, fontWeight: 600, color: '#818cf8' }}>{projectName || '—'}</div>
             </div>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2 }}>Semantic Group</div>
+              {canEditSemanticGroups ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <select
+                    value={groupOverrideValue}
+                    disabled={taxonomyLoading || groupOverrideBusy || !resolvedLogId}
+                    onChange={e => setGroupOverrideValue(e.target.value)}
+                    style={{
+                      minWidth: 180,
+                      background: 'var(--input-bg)',
+                      border: '1px solid var(--input-border)',
+                      borderRadius: 6,
+                      color: 'var(--text)',
+                      padding: '7px 10px',
+                      fontSize: 12,
+                    }}
+                  >
+                    {taxonomyOptions.map(option => (
+                      <option key={option} value={option}>{option}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={handleGroupOverride}
+                    disabled={groupOverrideBusy || !resolvedLogId || taxonomyLoading}
+                    style={{
+                      ...btnSecondary,
+                      opacity: groupOverrideBusy || !resolvedLogId || taxonomyLoading ? 0.5 : 1,
+                      cursor: groupOverrideBusy || !resolvedLogId || taxonomyLoading ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    {groupOverrideBusy ? 'Saving…' : 'Save Group'}
+                  </button>
+                </div>
+              ) : (
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>
+                  {data?.error_group_name || 'Unknown'}
+                </div>
+              )}
+            </div>
             {data?.file_name && (
               <div>
                 <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2 }}>File</div>
@@ -1455,6 +1573,9 @@ export function ErrorDetailModal({
               </div>
             )}
           </div>
+          {groupOverrideError && (
+            <div style={{ fontSize: 12, color: '#f87171', marginTop: 8 }}>{groupOverrideError}</div>
+          )}
         </div>
         <button
           onClick={onClose}

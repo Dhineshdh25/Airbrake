@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { apiFetch } from '../lib/api';
+import { PaginationControls } from '../components/PaginationControls';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -471,25 +472,8 @@ export function BreaksList() {
             </table>
           </div>
 
-          {/* Pagination */}
-          <div data-testid="pagination" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, marginTop: 20 }}>
-            <button data-testid="prev-page" disabled={page <= 1} onClick={() => setPage(p => p - 1)}
-              style={{
-                padding: '7px 16px', background: 'var(--surface)',
-                border: '1px solid var(--card-border)', borderRadius: 6,
-                color: page <= 1 ? 'var(--text-muted)' : 'var(--text)',
-                cursor: page <= 1 ? 'not-allowed' : 'pointer', fontSize: 13, opacity: page <= 1 ? 0.5 : 1,
-              }}>← Previous</button>
-            <span data-testid="page-info" style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-              Page {page} of {totalPages}
-            </span>
-            <button data-testid="next-page" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}
-              style={{
-                padding: '7px 16px', background: 'var(--surface)',
-                border: '1px solid var(--card-border)', borderRadius: 6,
-                color: page >= totalPages ? 'var(--text-muted)' : 'var(--text)',
-                cursor: page >= totalPages ? 'not-allowed' : 'pointer', fontSize: 13, opacity: page >= totalPages ? 0.5 : 1,
-              }}>Next →</button>
+          <div data-testid="pagination">
+            <PaginationControls currentPage={page} totalPages={totalPages} onPageChange={setPage} />
           </div>
         </>
       )}
