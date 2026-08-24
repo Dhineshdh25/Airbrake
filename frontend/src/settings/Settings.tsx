@@ -591,6 +591,10 @@ function AdminUsersSection({ currentUserId }: { currentUserId: string }) {
     setPage(1);
   }, [users.length]);
 
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
   return (
     <section style={S.card}>
       <div style={S.cardHeader}>
@@ -703,6 +707,12 @@ function AdminUsersSection({ currentUserId }: { currentUserId: string }) {
           </table>
         </div>
       )}
+
+      {totalPages > 1 && (
+        <div style={{ padding: '12px 18px 18px' }}>
+          <PaginationControls currentPage={page} totalPages={totalPages} onPageChange={setPage} />
+        </div>
+      )}
     </section>
   );
 }
@@ -730,6 +740,10 @@ function ProjectsSection({ users }: { users: UserRow[] }) {
   useEffect(() => {
     setPage(1);
   }, [projects.length]);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
 
   return (
     <section style={S.card}>
@@ -777,6 +791,12 @@ function ProjectsSection({ users }: { users: UserRow[] }) {
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {totalPages > 1 && (
+        <div style={{ padding: '12px 18px 18px' }}>
+          <PaginationControls currentPage={page} totalPages={totalPages} onPageChange={setPage} />
         </div>
       )}
     </section>

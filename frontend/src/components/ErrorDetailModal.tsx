@@ -361,9 +361,10 @@ export function ErrorDetailModal({
     setGroupOverrideValue(taxonomyOptions.includes(nextValue) ? nextValue : 'Unknown');
   }, [data?.error_group_name, taxonomyOptions]);
 
-  async function handleGroupOverride() {
+  async function handleGroupOverride(nextGroupName: string) {
     if (!effectiveErrorHash || !resolvedLogId || !canEditSemanticGroups) return;
-    const selected = taxonomy.find(item => item.group_name === groupOverrideValue) ?? null;
+    const previousValue = groupOverrideValue;
+    const selected = taxonomy.find(item => item.group_name === nextGroupName) ?? null;
     if (!selected) {
       setGroupOverrideError('Select a valid semantic group first.');
       return;
@@ -371,6 +372,7 @@ export function ErrorDetailModal({
 
     setGroupOverrideBusy(true);
     setGroupOverrideError('');
+    setGroupOverrideValue(nextGroupName);
     try {
       const r = await apiFetch('/api/error-groups/override', {
         method: 'PATCH',
@@ -386,9 +388,9 @@ export function ErrorDetailModal({
         throw new Error(payload?.message || payload?.error || 'Failed to update semantic group.');
       }
       setData(prev => prev ? { ...prev, error_group_name: selected.group_name } : prev);
-      setGroupOverrideValue(selected.group_name);
       onRefresh?.();
     } catch (e) {
+      setGroupOverrideValue(previousValue);
       setGroupOverrideError(e instanceof Error ? e.message : 'Failed to update semantic group.');
     } finally {
       setGroupOverrideBusy(false);
@@ -1519,7 +1521,7 @@ export function ErrorDetailModal({
                   <select
                     value={groupOverrideValue}
                     disabled={taxonomyLoading || groupOverrideBusy || !resolvedLogId}
-                    onChange={e => setGroupOverrideValue(e.target.value)}
+                    onChange={e => handleGroupOverride(e.target.value)}
                     style={{
                       minWidth: 180,
                       background: 'var(--input-bg)',
@@ -1534,18 +1536,9 @@ export function ErrorDetailModal({
                       <option key={option} value={option}>{option}</option>
                     ))}
                   </select>
-                  <button
-                    type="button"
-                    onClick={handleGroupOverride}
-                    disabled={groupOverrideBusy || !resolvedLogId || taxonomyLoading}
-                    style={{
-                      ...btnSecondary,
-                      opacity: groupOverrideBusy || !resolvedLogId || taxonomyLoading ? 0.5 : 1,
-                      cursor: groupOverrideBusy || !resolvedLogId || taxonomyLoading ? 'not-allowed' : 'pointer',
-                    }}
-                  >
-                    {groupOverrideBusy ? 'Saving…' : 'Save Group'}
-                  </button>
+                  {groupOverrideBusy && (
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Saving…</span>
+                  )}
                 </div>
               ) : (
                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>
