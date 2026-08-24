@@ -3523,8 +3523,15 @@ def project_logs(name):
 
         # ── Step 3: optional filters ──────────────────────────────────────────
         filters = []
-        count_params  = [authorized_project_id] + log_access_params
-        query_params  = [authorized_project_id] + log_access_params
+        project_scope_cond = (
+            "(project_id = %s OR "
+            "(project_id IS NULL AND LOWER(project_name) = LOWER(%s)))"
+        )
+        legacy_project_access_cond = (
+            "(project_id IS NULL AND LOWER(project_name) = LOWER(%s))"
+        )
+        count_params = [authorized_project_id, project_name] + log_access_params + [project_name]
+        query_params = [authorized_project_id, project_name] + log_access_params + [project_name]
 
         if from_date:
             from_date_clean = from_date.split('T')[0] if 'T' in from_date else from_date
@@ -3577,7 +3584,10 @@ def project_logs(name):
             status_clause = " AND (error IS NULL OR error = '')"
 
         combined = "".join(filters) + status_clause
-        base_cond = f"row_type = 'log' AND project_id = %s AND {log_access_cond}"
+        base_cond = (
+            f"row_type = 'log' AND {project_scope_cond} AND "
+            f"({log_access_cond} OR {legacy_project_access_cond})"
+        )
 
         # Total count
         count_result = query(
