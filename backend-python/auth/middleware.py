@@ -683,8 +683,14 @@ def _build_log_access_condition(user: dict) -> tuple:
             "      AND metadata IS NOT NULL"
             "      AND metadata LIKE %s"
             "  )"
+            "  OR (project_id IS NULL AND LOWER(project_name) IN ("
+            "    SELECT LOWER(project_name) FROM projects_data"
+            "    WHERE row_type = 'project'"
+            "      AND metadata IS NOT NULL"
+            "      AND metadata LIKE %s"
+            "  ))"
             ")",
-            [user_id, user_id, responsible_pattern],
+            [user_id, user_id, responsible_pattern, responsible_pattern],
         )
 
     return "FALSE", []
