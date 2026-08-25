@@ -897,9 +897,12 @@ def jira_retry_ticket_sync(log_id):
     if err:
         return err
 
+    from auth.middleware import _build_log_access_condition as _lac
+    access_cond, access_params = _lac(_get_current_user())
     rows = query(
-        "SELECT metadata FROM projects_data WHERE row_type = 'log' AND id = %s",
-        (log_id,),
+        f"SELECT metadata FROM projects_data "
+        f"WHERE row_type = 'log' AND id = %s AND ({access_cond})",
+        tuple([log_id] + access_params),
     )
     if not rows:
         return jsonify({"error": "Ticket log row not found"}), 404
@@ -961,28 +964,33 @@ def jira_create():
 
     # Verify log access before creating the Jira ticket — use shared helper
     log_id = body.get("log_id") or body.get("representative_id")
-    if log_id:
-        try:
-            from db import query as _q
-            from auth.middleware import get_current_user as _gcr, _build_log_access_condition as _lac
-            _user = _gcr()
-            if not _user:
-                return jsonify({"error": "Unauthorized"}), 401
-            _access_cond, _access_params = _lac(_user)
+    if not log_id:
+        return jsonify({"error": "Not Found"}), 404
+    try:
+        from db import query as _q
+        from auth.middleware import get_current_user as _gcr, _build_log_access_condition as _lac
+        _user = _gcr()
+        if not _user:
+            return jsonify({"error": "Unauthorized"}), 401
+        _access_cond, _access_params = _lac(_user)
 
-            log_rows = _q(
-                f"SELECT id FROM projects_data "
-                f"WHERE row_type = 'log' AND id = %s AND ({_access_cond})",
-                tuple([log_id] + _access_params),
+        log_rows = _q(
+            f"SELECT id FROM projects_data "
+            f"WHERE row_type = 'log' AND id = %s AND ({_access_cond})",
+            tuple([log_id] + _access_params),
+        )
+        if not log_rows:
+            logger.warning(
+                "[Jira Routes] create ticket — log_id=%s not accessible",
+                log_id,
             )
-            if not log_rows:
-                logger.warning(
-                    "[Jira Routes] create ticket — log_id=%s not accessible for user_id=%s",
-                    log_id, user_id,
-                )
-                return jsonify({"error": "Not Found"}), 404
-        except Exception as _chk_exc:
-            logger.warning("[Jira Routes] access check failed: %s", _chk_exc)
+            return jsonify({"error": "Not Found"}), 404
+    except Exception as access_error:
+        logger.exception(
+            "[Jira Routes] access check failed: %s",
+            access_error,
+        )
+        return jsonify({"error": "Unable to verify project access"}), 500
 
     logger.info(
         "[Jira Routes] create ticket requested by user_id=%s error=%s",
@@ -1200,6 +1208,15 @@ def jira_link():
         return jsonify({"error": "log_id and issue_key are required"}), 400
 
     try:
+        from auth.middleware import _build_log_access_condition as _lac
+        access_cond, access_params = _lac(_get_current_user())
+        if not query(
+            f"SELECT id FROM projects_data "
+            f"WHERE row_type = 'log' AND id = %s AND ({access_cond})",
+            tuple([log_id] + access_params),
+        ):
+            return jsonify({"error": "Not Found"}), 404
+
         from .jira_sync import mark_log_jira_key
         mark_log_jira_key(log_id, issue_key, issue_url=issue_url, created_by_user_id=user_id)
         logger.info(

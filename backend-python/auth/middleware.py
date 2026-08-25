@@ -597,11 +597,7 @@ def _build_project_access_condition(user: dict) -> tuple:
 
     admin   → "TRUE"  — unrestricted; includes legacy NULL-owner rows
     viewer  → "TRUE"  — unrestricted; includes legacy NULL-owner rows
-    developer → three access paths (any one sufficient):
-        1. owner_user_id = user_id
-        2. metadata TEXT column contains the user_id as responsible_user_id
-           (uses plain-text LIKE to avoid JSONB casting issues in Aurora DSQL)
-        3. id IN (SELECT DISTINCT project_id FROM logs WHERE assigned_to = user_id)
+    developer → owner_user_id or responsible_user_id in metadata
     unknown → "FALSE" — fail closed; no access
 
     Aurora DSQL notes:
@@ -610,7 +606,6 @@ def _build_project_access_condition(user: dict) -> tuple:
       - We use LIKE '%"responsible_user_id": "<id>"%' instead of JSONB operators.
         This is safe because responsible_user_id is a UUID (no special regex chars)
         and the LIKE pattern will only match when the key is present with that value.
-      - The self-referential subquery for logs is kept but uses only indexed columns.
     """
     role    = str(user.get("role") or "").strip().lower()
     user_id = user["id"]
@@ -619,25 +614,20 @@ def _build_project_access_condition(user: dict) -> tuple:
         return "TRUE", []
 
     if role == "developer":
+        responsible_pattern = f'%"responsible_user_id": "{user_id}"%'
         return (
             "("
             "  owner_user_id = %s"
-            "  OR metadata::jsonb->>'responsible_user_id' = %s"
-            "  OR id IN ("
-            "    SELECT DISTINCT project_id FROM projects_data"
-            "    WHERE row_type = 'log'"
-            "      AND assigned_to = %s"
-            "      AND project_id IS NOT NULL"
-            "  )"
+            "  OR (metadata IS NOT NULL AND metadata LIKE %s)"
             ")",
-            [user_id, user_id, user_id],
+            [user_id, responsible_pattern],
         )
 
     # Unknown / missing role — fail closed
     return "FALSE", []
 
 
-def _build_log_access_condition(user: dict) -> tuple:
+def _build_log_access_condition(user: dict, table_alias: str = "") -> tuple:
     """
     Return (WHERE-fragment, params) for scoping log queries by role.
 
@@ -645,8 +635,8 @@ def _build_log_access_condition(user: dict) -> tuple:
     viewer  → "TRUE"  — unrestricted; includes legacy NULL-owner rows
     developer → three access paths (any one sufficient):
         1. owner_user_id = user_id
-        2. assigned_to = user_id
-        3. project_id IN (SELECT id FROM projects WHERE metadata LIKE responsible pattern)
+        2. project_id IN (SELECT id FROM projects WHERE metadata LIKE responsible pattern)
+        3. legacy NULL project_id with matching assigned project name
            Grants access to ALL logs in a project where developer is responsible_user.
            Uses plain-text LIKE to avoid JSONB casting issues in Aurora DSQL.
     unknown → "FALSE" — fail closed; no access
@@ -658,27 +648,30 @@ def _build_log_access_condition(user: dict) -> tuple:
     """
     role    = str(user.get("role") or "").strip().lower()
     user_id = user["id"]
+    column_prefix = f"{table_alias}." if table_alias else ""
 
     if role in ("admin", "viewer"):
         return "TRUE", []
 
     if role == "developer":
+        responsible_pattern = f'%"responsible_user_id": "{user_id}"%'
         return (
             "("
-            "  owner_user_id = %s"
-            "  OR assigned_to = %s"
-            "  OR project_id IN ("
+            f"  {column_prefix}owner_user_id = %s"
+            f"  OR {column_prefix}project_id IN ("
             "    SELECT id FROM projects_data"
             "    WHERE row_type = 'project'"
-            "      AND metadata::jsonb->>'responsible_user_id' = %s"
+            "      AND metadata IS NOT NULL"
+            "      AND metadata LIKE %s"
             "  )"
-            "  OR (project_id IS NULL AND LOWER(project_name) IN ("
+            f"  OR ({column_prefix}project_id IS NULL AND LOWER({column_prefix}project_name) IN ("
             "    SELECT LOWER(project_name) FROM projects_data"
             "    WHERE row_type = 'project'"
-            "      AND metadata::jsonb->>'responsible_user_id' = %s"
+            "      AND metadata IS NOT NULL"
+            "      AND metadata LIKE %s"
             "  ))"
             ")",
-            [user_id, user_id, user_id, user_id],
+            [user_id, responsible_pattern, responsible_pattern],
         )
 
     return "FALSE", []
