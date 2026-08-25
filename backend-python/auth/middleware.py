@@ -77,21 +77,15 @@ ROLE_PERMISSIONS: dict[str, Set[str]] = {
         "logs:read",
         "breaks:read",
         "filters:read",
-        "filters:write",
         "alerts:read",
-        "alerts:write",
         "projects:read",
         "jira:read",
         "jira:write",
         "visualization:read",
         "metrics:read",
-        "errors:resolve",
         "error-groups:read",
-        "error-groups:write",
         "stacktrace:read",
-        "logs:annotate",
         "notifications:read",
-        "notifications:write",
     },
     "admin": {"*"},  # Wildcard — admin can do everything
 }
@@ -625,13 +619,10 @@ def _build_project_access_condition(user: dict) -> tuple:
         return "TRUE", []
 
     if role == "developer":
-        # Plain-text responsible_user pattern — avoids JSONB cast entirely.
-        # The stored JSON always has the form: {"responsible_user_id": "<uuid>", ...}
-        responsible_pattern = f'%"responsible_user_id": "{user_id}"%'
         return (
             "("
             "  owner_user_id = %s"
-            "  OR (metadata IS NOT NULL AND metadata LIKE %s)"
+            "  OR metadata::jsonb->>'responsible_user_id' = %s"
             "  OR id IN ("
             "    SELECT DISTINCT project_id FROM projects_data"
             "    WHERE row_type = 'log'"
@@ -639,7 +630,7 @@ def _build_project_access_condition(user: dict) -> tuple:
             "      AND project_id IS NOT NULL"
             "  )"
             ")",
-            [user_id, responsible_pattern, user_id],
+            [user_id, user_id, user_id],
         )
 
     # Unknown / missing role — fail closed
@@ -672,7 +663,6 @@ def _build_log_access_condition(user: dict) -> tuple:
         return "TRUE", []
 
     if role == "developer":
-        responsible_pattern = f'%"responsible_user_id": "{user_id}"%'
         return (
             "("
             "  owner_user_id = %s"
@@ -680,17 +670,15 @@ def _build_log_access_condition(user: dict) -> tuple:
             "  OR project_id IN ("
             "    SELECT id FROM projects_data"
             "    WHERE row_type = 'project'"
-            "      AND metadata IS NOT NULL"
-            "      AND metadata LIKE %s"
+            "      AND metadata::jsonb->>'responsible_user_id' = %s"
             "  )"
             "  OR (project_id IS NULL AND LOWER(project_name) IN ("
             "    SELECT LOWER(project_name) FROM projects_data"
             "    WHERE row_type = 'project'"
-            "      AND metadata IS NOT NULL"
-            "      AND metadata LIKE %s"
+            "      AND metadata::jsonb->>'responsible_user_id' = %s"
             "  ))"
             ")",
-            [user_id, user_id, responsible_pattern, responsible_pattern],
+            [user_id, user_id, user_id, user_id],
         )
 
     return "FALSE", []
