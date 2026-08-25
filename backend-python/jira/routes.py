@@ -761,18 +761,11 @@ def jira_my_tickets():
     """
     GET /api/jira/my-tickets?status=resolved|open&limit=5&offset=0
 
-    Returns Jira tickets created by the currently authenticated Airbrake user,
+    Returns Jira tickets from projects accessible to the authenticated user,
     with server-side pagination.
 
-    Filtering is done on the backend using the authenticated session user_id —
-    never trust a user-supplied id from the frontend.
-
-    Ticket ownership is determined by the jira_created_by field stamped on the
-    log row metadata at /api/jira/link time.
-
-    Historical tickets without a jira_created_by stamp cannot be attributed to
-    any user and are excluded from all users' views. No legacy fallback exists.
-    Only tickets explicitly stamped with jira_created_by = <user_id> are shown.
+    Admins and viewers can see all tickets. Developers see tickets from
+    projects they own, are assigned to, or are responsible for.
 
     Query params:
       status  — 'resolved' | 'open' (default: both)
@@ -815,71 +808,20 @@ def jira_my_tickets():
 
     terminal_values = tuple(s.lower() for s in TERMINAL_STATUSES)
 
-    # ── Step 1: resolve which Jira issue keys belong to this user ─────────────
-    # Ownership is stored in jira_ticket rows (row_type='jira_ticket'), written
-    # by ticket_service.py at ticket-creation time with created_by = user_id.
-    # This is the authoritative, pre-existing ownership chain that predates the
-    # jira_created_by stamp on log rows. It covers all historical tickets.
-    #
-    # Additionally, log rows stamped after the latest deploy also carry
-    # jira_created_by = user_id directly. We include both sources so that both
-    # old and new tickets are visible, without any NULL/catch-all fallback.
-    #
-    # Security guarantee: user_id comes exclusively from _require_auth() (the
-    # server-side session). The frontend cannot override it.
-    try:
-        ticket_rows = query(
-            "SELECT metadata FROM projects_data "
-            "WHERE row_type = 'jira_ticket' "
-            "  AND metadata::jsonb->>'created_by' = %s",
-            (user_id,),
-        )
-    except Exception as exc:
-        logger.exception("[Jira Routes] my-tickets jira_ticket lookup failed: %s", exc)
-        return jsonify({"error": str(exc)}), 500
-
-    # Collect all jira_keys owned by this user from jira_ticket rows
-    import json as _json
-    owned_keys: set[str] = set()
-    for tr in ticket_rows:
-        raw = tr.get("metadata")
-        meta = _json.loads(raw) if isinstance(raw, str) else (raw or {})
-        key = (meta.get("jira_key") or meta.get("key") or "").strip()
-        if key:
-            owned_keys.add(key)
-
-    # ── Step 2: query log rows ────────────────────────────────────────────────
-    # Find log rows that:
-    #   (a) have jira_issue_key IN owned_keys  (historical + old tickets), OR
-    #   (b) have jira_created_by = user_id      (new tickets stamped at link time)
-    #
-    # Both conditions are scoped to this user. No NULL/catch-all fallback.
-
-    # Build the ownership condition
-    ownership_parts: list[str] = []
-    ownership_params: list = []
-
-    if owned_keys:
-        placeholders = ", ".join(["%s"] * len(owned_keys))
-        ownership_parts.append(
-            f"metadata::jsonb->>'jira_issue_key' IN ({placeholders})"
-        )
-        ownership_params.extend(sorted(owned_keys))  # sorted for stable query plans
-
-    # Also include directly-stamped log rows (created after latest deploy)
-    ownership_parts.append("metadata::jsonb->>'jira_created_by' = %s")
-    ownership_params.append(user_id)
-
-    ownership_clause = "(" + " OR ".join(ownership_parts) + ")"
+    from auth.middleware import get_current_user as _gcr, _build_log_access_condition as _lac
+    user = _gcr()
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+    access_cond, access_params = _lac(user)
 
     base_conditions = [
         "row_type = 'log'",
         "metadata::jsonb ? 'jira_issue_key'",
         "metadata::jsonb->>'jira_issue_key' IS NOT NULL",
         "metadata::jsonb->>'jira_issue_key' != ''",
-        ownership_clause,
+        f"({access_cond})",
     ]
-    base_params: list = list(ownership_params)
+    base_params: list = list(access_params)
 
     # ── Optional status filter ────────────────────────────────────────────────
     if status_filter == "resolved":
@@ -939,8 +881,8 @@ def jira_my_tickets():
         })
 
     logger.info(
-        "[Jira Routes] my-tickets user_id=%s status=%s owned_keys=%d total=%d limit=%d offset=%d",
-        user_id, status_filter or "all", len(owned_keys), total, limit, offset,
+        "[Jira Routes] my-tickets user_id=%s status=%s total=%d limit=%d offset=%d",
+        user_id, status_filter or "all", total, limit, offset,
     )
     return jsonify({
         "total":   total,
