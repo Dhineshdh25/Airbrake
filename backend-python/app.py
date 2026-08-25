@@ -478,6 +478,10 @@ class SSEConnectionManager:
         project_name = filters.get('project_name')
         if project_name and log_data.get('project_name') != project_name:
             return False
+
+        allowed_project_names = filters.get('allowed_project_names')
+        if allowed_project_names is not None and log_data.get('project_name', '').lower() not in allowed_project_names:
+            return False
         
         # Error status filter (errors only, resolved, etc.)
         status_filter = filters.get('status')
@@ -731,6 +735,27 @@ def stream_logs():
         console.log('New log:', log);
       };
     """
+    user = get_current_user()
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    access_cond, access_params = _build_project_access_condition(user)
+    allowed_project_names = None
+    if access_cond != "TRUE":
+        try:
+            project_rows = query(
+                f"SELECT project_name FROM {TABLE} "
+                f"WHERE row_type = 'project' AND ({access_cond})",
+                access_params,
+            )
+            allowed_project_names = {
+                str(row.get('project_name') or '').strip().lower()
+                for row in project_rows
+            }
+        except Exception as access_error:
+            logger.exception("[SSE] Project access lookup failed: %s", access_error)
+            return jsonify({"error": "Unable to verify project access"}), 500
+
     connection_id = str(uuid.uuid4())
     
     # Parse filters from query parameters
@@ -738,6 +763,7 @@ def stream_logs():
         'project_name': request.args.get('project_name'),
         'status': request.args.get('status', 'all'),
         'severity': request.args.get('severity'),
+        'allowed_project_names': allowed_project_names,
     }
     
     # Register connection
@@ -1192,6 +1218,14 @@ def set_project_responsible_user(project_id):
             (project_id,),
         )
         if not proj_rows:
+            # Allow admins to assign an auto-created project by its normalized name.
+            proj_rows = query(
+                f"SELECT id, project_name AS name, category, is_live, owner_user_id, metadata "
+                f"FROM {TABLE} WHERE row_type = 'project' "
+                f"AND LOWER(TRIM(project_name)) = LOWER(TRIM(%s)) LIMIT 1",
+                (project_id,),
+            )
+        if not proj_rows:
             return jsonify({"error": "Project not found"}), 404
 
         # Resolve the new responsible user (if any)
@@ -1205,28 +1239,37 @@ def set_project_responsible_user(project_id):
                 return jsonify({"error": "User not found"}), 404
             new_email = user_rows[0].get("email") or ""
 
+        raw_metadata = proj_rows[0].get("metadata")
+        if isinstance(raw_metadata, str):
+            try:
+                project_metadata = json.loads(raw_metadata)
+            except (TypeError, ValueError):
+                project_metadata = {}
+        elif isinstance(raw_metadata, dict):
+            project_metadata = dict(raw_metadata)
+        else:
+            project_metadata = {}
+
         # Merge into existing metadata (preserves other metadata fields)
         if new_user_id:
-            execute(
-                f"UPDATE {TABLE} "
-                f"SET metadata = COALESCE(metadata::jsonb, '{{}}'::jsonb) "
-                f"           || jsonb_build_object("
-                f"               'responsible_user_id',    %s::text, "
-                f"               'responsible_user_email', %s::text"
-                f"             ) "
-                f"WHERE row_type = 'project' AND id = %s",
-                (new_user_id, new_email, project_id),
-            )
+            project_metadata["responsible_user_id"] = new_user_id
+            project_metadata["responsible_user_email"] = new_email
         else:
             # Unassign — remove the keys from metadata
-            execute(
-                f"UPDATE {TABLE} "
-                f"SET metadata = COALESCE(metadata::jsonb, '{{}}'::jsonb) "
-                f"           - 'responsible_user_id' "
-                f"           - 'responsible_user_email' "
-                f"WHERE row_type = 'project' AND id = %s",
-                (project_id,),
-            )
+            project_metadata.pop("responsible_user_id", None)
+            project_metadata.pop("responsible_user_email", None)
+
+        execute(
+            f"UPDATE {TABLE} SET metadata = %s::jsonb "
+            f"- CASE WHEN %s IS NULL THEN 'responsible_user_id' ELSE '__keep__' END "
+            f"- CASE WHEN %s IS NULL THEN 'responsible_user_email' ELSE '__keep__' END, "
+            f"/* - 'responsible_user_id' - 'responsible_user_email' */ "
+            f"owner_user_id = %s, "
+            f"project_id = CASE WHEN %s IS NULL THEN project_id ELSE COALESCE(project_id, id) END "
+            f"WHERE row_type = 'project' AND id = %s",
+            (json.dumps(project_metadata), new_user_id, new_user_id,
+             new_user_id, new_user_id, proj_rows[0]["id"]),
+        )
 
         # Re-fetch and return the updated row
         updated = query(
@@ -2863,26 +2906,8 @@ def get_log_comments(log_id):
 @app.route("/api/logs/<log_id>/assign", methods=["POST"])
 @require_permission("logs:annotate")
 def assign_log(log_id):
-    """Assign a log to a team member. Access enforced by role."""
-    user = get_current_user()
-    if not user:
-        return jsonify({"error": "Unauthorized"}), 401
-    log_access_cond, log_access_params = _build_log_access_condition(user)
-    body = request.get_json() or {}
-    assignee = body.get("assignee", "").strip()
-    if not assignee:
-        return jsonify({"error": "assignee required"}), 400
-    try:
-        count = execute(
-            f"UPDATE {TABLE} SET assigned_to = %s, assigned_at = NOW() "
-            f"WHERE row_type = 'log' AND id = %s AND ({log_access_cond})",
-            tuple([assignee, log_id] + log_access_params),
-        )
-        if count == 0:
-            return jsonify({"error": "Not Found"}), 404
-        return jsonify({"log_id": log_id, "assigned_to": assignee})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    """Log-level assignment is unsupported; assignments are project-level."""
+    return jsonify({"error": "Log-level assignment is not supported"}), 410
 
 
 @app.route("/api/logs/<log_id>/priority", methods=["POST"])
@@ -2913,31 +2938,8 @@ def set_log_priority(log_id):
 @app.route("/api/logs/by-assignee/<assignee>")
 @require_permission("logs:read")
 def get_logs_by_assignee(assignee):
-    """Get all logs assigned to a specific team member."""
-    status = request.args.get("status", "active")
-    limit = min(100, max(1, int(request.args.get("limit", 50))))
-    
-    try:
-        filters = ["row_type = 'log'", "assigned_to = %s"]
-        params = [assignee]
-        
-        if status == "active":
-            filters.append("(error_status IS NULL OR error_status != 'resolved')")
-        elif status == "resolved":
-            filters.append("error_status = 'resolved'")
-        
-        params.append(limit)
-        where_clause = " AND ".join(filters)
-        
-        rows = query(
-            f"SELECT id, project_name, file_name, error, timestamp, priority, error_status "
-            f"FROM {TABLE} WHERE {where_clause} ORDER BY priority DESC, timestamp DESC LIMIT %s",
-            tuple(params)
-        )
-        
-        return jsonify({"assignee": assignee, "logs": serialize_rows(rows), "count": len(rows)})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    """Log-level assignment queries are unsupported; assignments are project-level."""
+    return jsonify({"error": "Log-level assignment is not supported"}), 410
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3960,47 +3962,48 @@ def _parse_optional(body):
     }
 
 
-def _validate_project(project_name):
-    """
-    Return (project_row_dict) if the project exists, else None.
+def _resolve_ingest_project(project_name):
+    """Find or register a project and return IDs trusted from the database.
 
-    For machine-to-machine ingest the project must already exist — we do NOT
-    auto-register projects without an owner.  owner_user_id and project_id are
-    read from the project row and stamped onto every log; they are never
-    accepted from the incoming payload.
-
-    Legacy NULL-owner projects are excluded — they must not receive new logs.
+    Unassigned projects are valid ingest targets. Their project row gets a
+    stable id, while logs remain unassigned until an administrator assigns an
+    owner. Ingest payloads never participate in either ID decision.
     """
+    normalized_name = str(project_name or "").strip()
     rows = query(
-        f"SELECT id, project_name, owner_user_id "
-        f"FROM {TABLE} "
-        f"WHERE row_type = 'project' "
-        f"  AND LOWER(project_name) = LOWER(%s) "
-        f"  AND owner_user_id IS NOT NULL",
-        (project_name,),
+        f"SELECT id, project_name, owner_user_id, project_id "
+        f"FROM {TABLE} WHERE row_type = 'project' "
+        f"AND LOWER(TRIM(project_name)) = LOWER(TRIM(%s)) "
+        f"ORDER BY created_at NULLS LAST, id LIMIT 1",
+        (normalized_name,),
     )
     if rows:
-        return dict(rows[0])
-
-    # Check if a legacy NULL-owner project exists and warn
-    legacy = query(
-        f"SELECT id FROM {TABLE} "
-        f"WHERE row_type = 'project' AND LOWER(project_name) = LOWER(%s) LIMIT 1",
-        (project_name,),
-    )
-    if legacy:
-        print(
-            f"[Ingest] WARNING: project '{project_name}' exists but has NULL owner_user_id — "
-            f"refusing ingest to prevent unowned log creation."
+        project = dict(rows[0])
+        project["ingest_project_id"] = (
+            project.get("project_id") or project.get("id")
+            if project.get("owner_user_id") else None
         )
-        return None
+        return project
 
-    # Project does not exist at all — cannot ingest without an owner
-    print(
-        f"[Ingest] WARNING: project '{project_name}' not found. "
-        f"Ingest rejected — create the project via POST /api/projects first."
+    project_row_id = str(uuid.uuid4())
+    created = execute_returning(
+        f"INSERT INTO {TABLE} "
+        f"(id, row_type, project_name, category, is_live, owner_user_id, project_id, created_at) "
+        f"VALUES (%s, 'project', %s, 'Production', true, NULL, NULL, NOW()) "
+        f"RETURNING id, project_name, owner_user_id, project_id",
+        (project_row_id, normalized_name),
     )
-    return None
+    if created:
+        project = dict(created)
+    else:
+        project = {
+            "id": project_row_id,
+            "project_name": normalized_name,
+            "owner_user_id": None,
+            "project_id": None,
+        }
+    project["ingest_project_id"] = None
+    return project
 
 
 def _smart_extract_error_detail(error_text):
@@ -4076,14 +4079,11 @@ def ingest_error():
     if error.startswith("{") and ("workflowId" in error or "workflowStatus" in error):
         return jsonify({"error": "Invalid error value — workflow/system response passed"}), 400
 
-    proj = _validate_project(project_name)
-    if not proj:
-        return jsonify({"error": f"Project '{project_name}' not found or has no owner. "
-                                  f"Create it via POST /api/projects first."}), 400
+    proj = _resolve_ingest_project(project_name)
 
     actual_name   = proj["project_name"]
-    project_id    = proj["id"]
-    owner_user_id = proj["owner_user_id"]
+    project_id    = proj.get("ingest_project_id")
+    owner_user_id = proj.get("owner_user_id") if project_id else None
 
     opt = _parse_optional(body)
 
@@ -4145,14 +4145,11 @@ def ingest_log():
     if not project_name:
         return jsonify({"error": "project_name is required"}), 400
 
-    proj = _validate_project(project_name)
-    if not proj:
-        return jsonify({"error": f"Project '{project_name}' not found or has no owner. "
-                                  f"Create it via POST /api/projects first."}), 400
+    proj = _resolve_ingest_project(project_name)
 
     actual_name   = proj["project_name"]
-    project_id    = proj["id"]
-    owner_user_id = proj["owner_user_id"]
+    project_id    = proj.get("ingest_project_id")
+    owner_user_id = proj.get("owner_user_id") if project_id else None
 
     opt = _parse_optional(body)
     error = str(body.get("error", "")).strip()
@@ -4216,14 +4213,11 @@ def ingest_success():
     if not project_name:
         return jsonify({"error": "project_name is required"}), 400
 
-    proj = _validate_project(project_name)
-    if not proj:
-        return jsonify({"error": f"Project '{project_name}' not found or has no owner. "
-                                  f"Create it via POST /api/projects first."}), 400
+    proj = _resolve_ingest_project(project_name)
 
     actual_name   = proj["project_name"]
-    project_id    = proj["id"]
-    owner_user_id = proj["owner_user_id"]
+    project_id    = proj.get("ingest_project_id")
+    owner_user_id = proj.get("owner_user_id") if project_id else None
 
     opt = _parse_optional(body)
     success_count = body.get("success_count", 1)
@@ -4469,7 +4463,7 @@ def jira_summary():
     if not user:
         return jsonify({"error": "Unauthorized"}), 401
 
-    log_access_cond, log_access_params = _build_log_access_condition(user)
+    log_access_cond, log_access_params = _build_log_access_condition(user, "lg")
 
     try:
         # Fetch jira_ticket rows whose linked log is accessible to this user.
@@ -4483,12 +4477,15 @@ def jira_summary():
             f"    SELECT 1 FROM {TABLE} lg "
             f"    WHERE lg.row_type = 'log' "
             f"      AND lg.error_hash = jt.metadata::jsonb->>'error_hash' "
+                    f"      AND LOWER(lg.project_name) = "
+                    f"          LOWER(jt.metadata::jsonb->>'project_name') "
             f"      AND ({log_access_cond})"
             f"  ) "
             f"ORDER BY jt.created_at DESC",
             log_access_params,
         )
 
+        log_row_access_cond, log_row_access_params = _build_log_access_condition(user)
         tickets = []
         for row in rows:
             raw = row.get("metadata")
@@ -4511,8 +4508,8 @@ def jira_summary():
                     f"WHERE row_type = 'log' "
                     f"  AND error_hash = %s "
                     f"  AND LOWER(project_name) = LOWER(%s) "
-                    f"  AND ({log_access_cond})",
-                    [error_hash, project_name] + log_access_params,
+                    f"  AND ({log_row_access_cond})",
+                    [error_hash, project_name] + log_row_access_params,
                 )
                 if log_rows:
                     error_status = (log_rows[0].get("error_status") or "").strip().lower()
@@ -6475,7 +6472,8 @@ KeyError: 'user_id'""",
     error = payload["error"]
     error_detail_input = payload.get("error_detail")
     
-    actual_name = _validate_project(project_name)
+    resolved_project = _resolve_ingest_project(project_name)
+    actual_name = resolved_project["project_name"]
     
     # Smart extraction
     error_detail = error_detail_input
