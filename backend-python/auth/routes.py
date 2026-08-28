@@ -178,6 +178,13 @@ def _clear_session_cookies(response):
     response.delete_cookie(CSRF_COOKIE_NAME, path="/")
 
 
+def _auth_error_redirect(frontend_url: str, error: str, *, clear_session: bool = False):
+    response = make_response(redirect(f"{frontend_url}?auth_error={error}"))
+    if clear_session:
+        _clear_session_cookies(response)
+    return response
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # GET /api/auth/google — Start OAuth flow
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -297,7 +304,7 @@ def google_callback():
     normalized_email = normalize_organization_email(email)
     if normalized_email is None:
         logger.warning("[Auth Callback] Non-organization email rejected for sub=%s", subject)
-        return redirect(f"{frontend_url}?auth_error=organization_only")
+        return _auth_error_redirect(frontend_url, "organization_only", clear_session=True)
     email = normalized_email
 
     # 5. Look up user in Aurora DSQL — auto-create if not found

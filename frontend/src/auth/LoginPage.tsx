@@ -1,10 +1,21 @@
 import React from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { API_BASE_URL } from '../lib/api';
+import { useAuth } from './AuthContext';
+
+const AUTH_ERROR_MESSAGES: Record<string, string> = {
+  access_denied: 'Access denied. Your account is not provisioned for this application.',
+  organization_only: 'Access restricted. Please sign in with your organization Google account.',
+  email_not_verified: 'Authentication failed. Your Google email must be verified.',
+};
 
 export function LoginPage() {
   const [params] = useSearchParams();
+  const { initializationError, refresh } = useAuth();
   const authError = params.get('auth_error');
+  const errorMessage = authError
+    ? AUTH_ERROR_MESSAGES[authError] ?? 'Authentication failed. Please try again.'
+    : initializationError;
 
   const handleGoogleLogin = () => {
     // Redirect to the backend Google OAuth endpoint.
@@ -42,7 +53,7 @@ export function LoginPage() {
         </div>
 
         {/* Error message */}
-        {authError && (
+        {errorMessage && (
           <div style={{
             marginBottom: 16,
             padding: '10px 14px',
@@ -52,12 +63,14 @@ export function LoginPage() {
             fontSize: 13,
             color: '#ef4444',
           }}>
-            {authError === 'access_denied'
-              ? 'Access denied. Your account is not provisioned for this application.'
-              : authError === 'organization_only'
-                ? 'Access denied. Please sign in using your @mpslimited.com account.'
-              : `Authentication failed: ${authError.replace(/_/g, ' ')}`}
+            {errorMessage}
           </div>
+        )}
+
+        {initializationError && (
+          <button onClick={refresh} style={{ width: '100%', marginBottom: 16 }}>
+            Try again
+          </button>
         )}
 
         {/* Google sign in button */}
