@@ -6,6 +6,7 @@ exports.ErrorDetailModal = ErrorDetailModal;
 const jsx_runtime_1 = require("react/jsx-runtime");
 const react_1 = require("react");
 const api_1 = require("../lib/api");
+const AuthContext_1 = require("../auth/AuthContext");
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function fmt(ts) {
     if (!ts)
@@ -130,6 +131,82 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
     const [jiraTicket, setJiraTicket] = (0, react_1.useState)(null);
     const [jiraError, setJiraError] = (0, react_1.useState)('');
     const [jiraConnected, setJiraConnected] = (0, react_1.useState)(null); // null = unknown
+    // ── Semantic group override ─────────────────────────────────────────────
+    const { user } = (0, AuthContext_1.useAuth)();
+    const [taxonomy, setTaxonomy] = (0, react_1.useState)([]);
+    const [taxonomyLoading, setTaxonomyLoading] = (0, react_1.useState)(false);
+    const [groupOverrideValue, setGroupOverrideValue] = (0, react_1.useState)('Unknown');
+    const [groupOverrideBusy, setGroupOverrideBusy] = (0, react_1.useState)(false);
+    const [groupOverrideError, setGroupOverrideError] = (0, react_1.useState)('');
+    const canEditSemanticGroups = !!user && (user.role === 'developer' || user.role === 'admin');
+    const taxonomyOptions = (0, react_1.useMemo)(() => {
+        const names = taxonomy.map(item => item.group_name);
+        const current = (data?.error_group_name ?? 'Unknown').trim() || 'Unknown';
+        if (current && !names.includes(current))
+            names.unshift(current);
+        return names;
+    }, [taxonomy, data?.error_group_name]);
+    (0, react_1.useEffect)(() => {
+        if (!canEditSemanticGroups) {
+            setTaxonomy([]);
+            setTaxonomyLoading(false);
+            return;
+        }
+        setTaxonomyLoading(true);
+        (0, api_1.apiFetch)('/api/error-groups/taxonomy')
+            .then(r => r.json())
+            .then((d) => {
+            const next = Array.isArray(d?.taxonomy) ? d.taxonomy : [];
+            setTaxonomy(next);
+        })
+            .catch(() => setTaxonomy([]))
+            .finally(() => setTaxonomyLoading(false));
+    }, [canEditSemanticGroups]);
+    (0, react_1.useEffect)(() => {
+        const nextValue = (data?.error_group_name ?? 'Unknown').trim() || 'Unknown';
+        if (taxonomyOptions.length === 0) {
+            setGroupOverrideValue(nextValue);
+            return;
+        }
+        setGroupOverrideValue(taxonomyOptions.includes(nextValue) ? nextValue : 'Unknown');
+    }, [data?.error_group_name, taxonomyOptions]);
+    async function handleGroupOverride(nextGroupName) {
+        if (!effectiveErrorHash || !resolvedLogId || !canEditSemanticGroups)
+            return;
+        const previousValue = groupOverrideValue;
+        const selected = taxonomy.find(item => item.group_name === nextGroupName) ?? null;
+        if (!selected) {
+            setGroupOverrideError('Select a valid semantic group first.');
+            return;
+        }
+        setGroupOverrideBusy(true);
+        setGroupOverrideError('');
+        setGroupOverrideValue(nextGroupName);
+        try {
+            const r = await (0, api_1.apiFetch)('/api/error-groups/override', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    log_id: resolvedLogId,
+                    group_id: selected.group_id,
+                    group_name: selected.group_name,
+                }),
+            });
+            const payload = await r.json();
+            if (!r.ok) {
+                throw new Error(payload?.message || payload?.error || 'Failed to update semantic group.');
+            }
+            setData(prev => prev ? { ...prev, error_group_name: selected.group_name } : prev);
+            onRefresh?.();
+        }
+        catch (e) {
+            setGroupOverrideValue(previousValue);
+            setGroupOverrideError(e instanceof Error ? e.message : 'Failed to update semantic group.');
+        }
+        finally {
+            setGroupOverrideBusy(false);
+        }
+    }
     // ── The specific log row id to target for resolve/reopen ─────────────────
     // When opened from BreaksList, row.representative_id is the most-recent
     // open log row id from the grouped query.
@@ -138,12 +215,11 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
     const projectName = data?.project_name ?? row?.project ?? projectNameProp ?? '';
     const errorMessage = data?.error_message ?? row?.error ?? '';
     const errorStatus = data?.error_status ?? null;
-    // The resolved log ID for Jira operations — always a specific row UUID,
-    // never an error_hash. This ensures tickets link to exactly the occurrence
-    // the user is looking at, not all occurrences sharing the error text.
-    const resolvedLogId = targetLogId
-        ?? data?.occurrences?.[0]?.id
-        ?? null;
+    // The resolved log ID for Jira operations — only set when a specific
+    // occurrence was selected (navigated from BreaksList).
+    // If null, "Create Jira Ticket" is disabled — you must open a specific
+    // occurrence from the Breaks list to create a ticket for it.
+    const resolvedLogId = targetLogId;
     const isResolved = errorStatus === 'resolved';
     const isReopened = errorStatus === 'reopened';
     // The solution stored on the error row (used/previously used)
@@ -314,9 +390,35 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
     // ── Jira: initiate OAuth — authenticated fetch returns the redirect URL ──
     async function startJiraOAuth() {
         try {
+            // Ensure we have a CSRF token before the POST — after a page refresh the
+            // in-memory token is gone but the session cookie is still valid.
+            // Without this the backend returns 403 "Missing X-CSRF-Token header."
+            let csrf = (0, AuthContext_1.getCsrfToken)();
+            if (!csrf) {
+                try {
+                    const res = await fetch(`${api_1.API_BASE_URL}/api/auth/csrf`, { credentials: 'include' });
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (data.csrf_token) {
+                            (0, AuthContext_1.setCsrfTokenMemory)(data.csrf_token);
+                            csrf = data.csrf_token;
+                        }
+                    }
+                }
+                catch {
+                    // Fall through — apiFetch will send without the header and the backend
+                    // will return 403 which we surface to the user below.
+                }
+            }
+            if (!csrf) {
+                setJiraError('Could not obtain a security token. Please refresh the page and try again.');
+                setJiraStatus('error');
+                return;
+            }
             // Store pending ticket context so we can auto-retry after OAuth callback
             const pendingContext = {
                 error_hash: effectiveErrorHash,
+                log_id: resolvedLogId || undefined,
                 project_name: projectName,
                 error_message: errorMessage,
                 error_group: data?.error_group_name,
@@ -328,7 +430,7 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
                 timestamp: data?.last_seen,
                 file_name: data?.file_name,
                 airbrake_url: effectiveErrorHash
-                    ? (0, api_1.buildAirbrakeErrorUrl)(effectiveErrorHash, projectName)
+                    ? (0, api_1.buildAirbrakeErrorUrl)(effectiveErrorHash, projectName, resolvedLogId)
                     : undefined,
             };
             sessionStorage.setItem('jira_pending_ticket', JSON.stringify(pendingContext));
@@ -343,8 +445,11 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
                 sessionStorage.removeItem('jira_pending_ticket');
             }
         }
-        catch {
-            setJiraError('Could not start Jira connection. Please try again.');
+        catch (e) {
+            const msg = e instanceof api_1.ApiError && e.status === 403
+                ? 'Security token expired. Please refresh the page and try again.'
+                : 'Could not start Jira connection. Please try again.';
+            setJiraError(msg);
             setJiraStatus('error');
             sessionStorage.removeItem('jira_pending_ticket');
         }
@@ -388,6 +493,7 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
             error_message: errorMessage || undefined,
             error_detail: data?.error_detail || undefined,
             error_hash: effectiveErrorHash || undefined,
+            log_id: resolvedLogId || undefined,
             occurrence_count: data?.occurrence_count ?? undefined,
             status: data?.error_status || undefined,
             solution: data?.solution?.solution || undefined,
@@ -395,7 +501,7 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
             timestamp: data?.last_seen || undefined,
             file_name: data?.file_name || undefined,
             airbrake_url: effectiveErrorHash
-                ? (0, api_1.buildAirbrakeErrorUrl)(effectiveErrorHash, projectName)
+                ? (0, api_1.buildAirbrakeErrorUrl)(effectiveErrorHash, projectName, resolvedLogId)
                 : undefined,
         };
         setJiraStatus('creating');
@@ -410,7 +516,6 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
             const j = await r.json();
             setJiraTicket({ key: j.key, url: j.url });
             setJiraStatus('created');
-<<<<<<< Updated upstream
             // Link this specific occurrence to the Jira ticket.
             // resolvedLogId is always a specific row UUID — never an error_hash.
             // This ensures the ticket badge shows only on THIS occurrence.
@@ -423,31 +528,6 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
                         issue_key: j.key,
                         issue_url: j.url ?? '',
                     }),
-=======
-            // Link the Jira ticket to the log row so the global ticket-status
-            // endpoint can find it when any other user opens this error,
-            // and so the webhook pipeline can resolve it when the ticket is Done.
-            if (j.key) {
-                // Use targetLogId if available (set when opened from BreaksList).
-                // If not available, use the error hash as a stable identifier — the
-                // backend will find the most recent log row for that hash.
-                const linkBody = {
-                    issue_key: j.key,
-                    issue_url: j.url ?? '',
-                };
-                if (targetLogId) {
-                    linkBody.log_id = targetLogId;
-                }
-                else if (effectiveErrorHash) {
-                    linkBody.error_hash = effectiveErrorHash;
-                    if (projectName)
-                        linkBody.project_name = projectName;
-                }
-                (0, api_1.apiFetch)('/api/jira/link', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(linkBody),
->>>>>>> Stashed changes
                 }).catch(() => { });
             }
         }
@@ -775,18 +855,24 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
                                         ...btnPrimary,
                                         opacity: editorSaving || !editorText.trim() ? 0.45 : 1,
                                         cursor: editorSaving || !editorText.trim() ? 'not-allowed' : 'pointer',
-                                    }, children: editorSaving ? 'Saving…' : improveTargetId ? 'Save Improved Version' : 'Save Solution' }), (!jiraTicket && jiraStatus !== 'created') ? ((0, jsx_runtime_1.jsxs)("button", { onClick: handleCreateJiraTicket, disabled: jiraStatus === 'creating', title: jiraConnected === false ? 'Connect your Jira account to create tickets' : 'Create a Jira ticket from this error', style: {
+                                    }, children: editorSaving ? 'Saving…' : improveTargetId ? 'Save Improved Version' : 'Save Solution' }), (!jiraTicket && jiraStatus !== 'created') ? ((0, jsx_runtime_1.jsxs)("button", { onClick: handleCreateJiraTicket, disabled: jiraStatus === 'creating' || !resolvedLogId, title: !resolvedLogId
+                                        ? 'Open a specific occurrence from the Breaks list to create a ticket'
+                                        : jiraConnected === false
+                                            ? 'Connect your Jira account to create tickets'
+                                            : 'Create a Jira ticket from this error', style: {
                                         ...btnPrimary,
                                         display: 'inline-flex',
                                         alignItems: 'center',
                                         gap: 8,
-                                        opacity: jiraStatus === 'creating' ? 0.6 : 1,
-                                        cursor: jiraStatus === 'creating' ? 'not-allowed' : 'pointer',
+                                        opacity: (jiraStatus === 'creating' || !resolvedLogId) ? 0.45 : 1,
+                                        cursor: (jiraStatus === 'creating' || !resolvedLogId) ? 'not-allowed' : 'pointer',
                                     }, children: [(0, jsx_runtime_1.jsx)("span", { style: { fontSize: 14 }, children: "\uD83C\uDFAB" }), jiraStatus === 'creating'
                                             ? 'Creating…'
-                                            : jiraConnected === false
-                                                ? 'Connect Jira'
-                                                : 'Create Jira Ticket'] })) : (
+                                            : !resolvedLogId
+                                                ? 'Select an occurrence'
+                                                : jiraConnected === false
+                                                    ? 'Connect Jira'
+                                                    : 'Create Jira Ticket'] })) : (
                                 /* ── Ticket created confirmation ───────────────────────────── */
                                 (0, jsx_runtime_1.jsxs)("a", { href: jiraTicket?.url ?? '#', target: "_blank", rel: "noopener noreferrer", style: {
                                         ...btnSecondary,
@@ -826,7 +912,15 @@ function ErrorDetailModal({ row, errorHash, projectName: projectNameProp, onClos
                                             background: data.status === 'regression' ? 'rgba(239,68,68,0.12)' : 'rgba(245,158,11,0.12)',
                                             color: data.status === 'regression' ? '#f87171' : '#fbbf24',
                                             border: `1px solid ${data.status === 'regression' ? 'rgba(239,68,68,0.3)' : 'rgba(245,158,11,0.3)'}`,
-                                        }, children: data.status === 'regression' ? '⚠ Regression' : '◎ Recurring' }))] }), (0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', flexWrap: 'wrap', gap: 16 }, children: [(0, jsx_runtime_1.jsxs)("div", { children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2 }, children: "Project" }), (0, jsx_runtime_1.jsx)("div", { style: { fontSize: 13, fontWeight: 600, color: '#818cf8' }, children: projectName || '—' })] }), data?.file_name && ((0, jsx_runtime_1.jsxs)("div", { children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2 }, children: "File" }), (0, jsx_runtime_1.jsx)("div", { style: { fontSize: 12, fontFamily: 'ui-monospace,monospace', color: 'var(--text)' }, children: data.file_name })] })), data?.occurrence_count != null && ((0, jsx_runtime_1.jsxs)("div", { children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2 }, children: "Occurrences" }), (0, jsx_runtime_1.jsx)("div", { style: { fontSize: 13, color: 'var(--text)' }, children: data.occurrence_count })] }))] })] }), (0, jsx_runtime_1.jsx)("button", { onClick: onClose, style: {
+                                        }, children: data.status === 'regression' ? '⚠ Regression' : '◎ Recurring' }))] }), (0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', flexWrap: 'wrap', gap: 16 }, children: [(0, jsx_runtime_1.jsxs)("div", { children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2 }, children: "Project" }), (0, jsx_runtime_1.jsx)("div", { style: { fontSize: 13, fontWeight: 600, color: '#818cf8' }, children: projectName || '—' })] }), (0, jsx_runtime_1.jsxs)("div", { children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2 }, children: "Semantic Group" }), canEditSemanticGroups ? ((0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }, children: [(0, jsx_runtime_1.jsx)("select", { value: groupOverrideValue, disabled: taxonomyLoading || groupOverrideBusy || !resolvedLogId, onChange: e => handleGroupOverride(e.target.value), style: {
+                                                            minWidth: 180,
+                                                            background: 'var(--input-bg)',
+                                                            border: '1px solid var(--input-border)',
+                                                            borderRadius: 6,
+                                                            color: 'var(--text)',
+                                                            padding: '7px 10px',
+                                                            fontSize: 12,
+                                                        }, children: taxonomyOptions.map(option => ((0, jsx_runtime_1.jsx)("option", { value: option, children: option }, option))) }), groupOverrideBusy && ((0, jsx_runtime_1.jsx)("span", { style: { fontSize: 11, color: 'var(--text-muted)' }, children: "Saving\u2026" }))] })) : ((0, jsx_runtime_1.jsx)("div", { style: { fontSize: 13, fontWeight: 600, color: 'var(--text)' }, children: data?.error_group_name || 'Unknown' }))] }), data?.file_name && ((0, jsx_runtime_1.jsxs)("div", { children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2 }, children: "File" }), (0, jsx_runtime_1.jsx)("div", { style: { fontSize: 12, fontFamily: 'ui-monospace,monospace', color: 'var(--text)' }, children: data.file_name })] })), data?.occurrence_count != null && ((0, jsx_runtime_1.jsxs)("div", { children: [(0, jsx_runtime_1.jsx)("div", { style: { fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2 }, children: "Occurrence" }), (0, jsx_runtime_1.jsxs)("div", { style: { fontSize: 13, color: 'var(--text)' }, children: ["#", data.occurrence_count, data.total_occurrences != null && data.total_occurrences !== data.occurrence_count && ((0, jsx_runtime_1.jsxs)("span", { style: { color: 'var(--text-muted)', fontSize: 12 }, children: [' ', "of ", data.total_occurrences] }))] })] }))] }), groupOverrideError && ((0, jsx_runtime_1.jsx)("div", { style: { fontSize: 12, color: '#f87171', marginTop: 8 }, children: groupOverrideError }))] }), (0, jsx_runtime_1.jsx)("button", { onClick: onClose, style: {
                             background: 'rgba(255,255,255,0.06)', border: '1px solid var(--card-border)',
                             color: 'var(--text-muted)', fontSize: 16, cursor: 'pointer',
                             width: 32, height: 32, borderRadius: 8, flexShrink: 0, marginLeft: 16,

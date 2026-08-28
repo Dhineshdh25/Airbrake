@@ -5,6 +5,7 @@ const jsx_runtime_1 = require("react/jsx-runtime");
 const react_1 = require("react");
 const react_router_dom_1 = require("react-router-dom");
 const api_1 = require("../lib/api");
+const PaginationControls_1 = require("../components/PaginationControls");
 // ── Constants ─────────────────────────────────────────────────────────────────
 const LIMIT = 20;
 // ── Shared styles ─────────────────────────────────────────────────────────────
@@ -241,16 +242,6 @@ function BreaksList() {
                                                         color: b.status === 'new' ? '#818cf8'
                                                             : b.status === 'regression' ? '#f87171'
                                                                 : '#fbbf24',
-                                                    }, children: b.occurrence_count }) }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px', color: 'var(--text-muted)', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, monospace', fontSize: 11 }, children: fmt(b.first_seen) }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px', color: 'var(--text-muted)', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, monospace', fontSize: 11 }, children: b.status === 'new' ? (0, jsx_runtime_1.jsx)("span", { style: { color: '#475569' }, children: "\u2014" }) : fmt(b.last_seen) }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px' }, children: (0, jsx_runtime_1.jsx)(StatusBadge, { status: b.status }) })] }, i))) })] }) }), (0, jsx_runtime_1.jsxs)("div", { "data-testid": "pagination", style: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, marginTop: 20 }, children: [(0, jsx_runtime_1.jsx)("button", { "data-testid": "prev-page", disabled: page <= 1, onClick: () => setPage(p => p - 1), style: {
-                                    padding: '7px 16px', background: 'var(--surface)',
-                                    border: '1px solid var(--card-border)', borderRadius: 6,
-                                    color: page <= 1 ? 'var(--text-muted)' : 'var(--text)',
-                                    cursor: page <= 1 ? 'not-allowed' : 'pointer', fontSize: 13, opacity: page <= 1 ? 0.5 : 1,
-                                }, children: "\u2190 Previous" }), (0, jsx_runtime_1.jsxs)("span", { "data-testid": "page-info", style: { fontSize: 13, color: 'var(--text-muted)' }, children: ["Page ", page, " of ", totalPages] }), (0, jsx_runtime_1.jsx)("button", { "data-testid": "next-page", disabled: page >= totalPages, onClick: () => setPage(p => p + 1), style: {
-                                    padding: '7px 16px', background: 'var(--surface)',
-                                    border: '1px solid var(--card-border)', borderRadius: 6,
-                                    color: page >= totalPages ? 'var(--text-muted)' : 'var(--text)',
-                                    cursor: page >= totalPages ? 'not-allowed' : 'pointer', fontSize: 13, opacity: page >= totalPages ? 0.5 : 1,
-                                }, children: "Next \u2192" })] })] }))] }));
+                                                    }, children: b.occurrence_count }) }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px', color: 'var(--text-muted)', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, monospace', fontSize: 11 }, children: fmt(b.first_seen) }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px', color: 'var(--text-muted)', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, monospace', fontSize: 11 }, children: b.status === 'new' ? (0, jsx_runtime_1.jsx)("span", { style: { color: '#475569' }, children: "\u2014" }) : fmt(b.last_seen) }), (0, jsx_runtime_1.jsx)("td", { style: { padding: '11px 16px' }, children: (0, jsx_runtime_1.jsx)(StatusBadge, { status: b.status }) })] }, i))) })] }) }), (0, jsx_runtime_1.jsx)("div", { "data-testid": "pagination", children: (0, jsx_runtime_1.jsx)(PaginationControls_1.PaginationControls, { currentPage: page, totalPages: totalPages, onPageChange: setPage }) })] }))] }));
 }
 //# sourceMappingURL=BreaksList.js.map

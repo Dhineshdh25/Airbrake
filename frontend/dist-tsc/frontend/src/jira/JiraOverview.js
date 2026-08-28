@@ -13,6 +13,7 @@ const jsx_runtime_1 = require("react/jsx-runtime");
  */
 const react_1 = require("react");
 const api_1 = require("../lib/api");
+const PaginationControls_1 = require("../components/PaginationControls");
 const PRIORITY_ORDER = {
     Highest: 0, Critical: 0,
     High: 1,
@@ -108,12 +109,49 @@ function JiraOverview() {
     const [jiraSiteUrl, setJiraSiteUrl] = (0, react_1.useState)('');
     const [reloadTick, setReloadTick] = (0, react_1.useState)(0);
     const bypassCache = (0, react_1.useRef)(false);
+    // ── Poll-sync state ───────────────────────────────────────────────────────
+    const [syncing, setSyncing] = (0, react_1.useState)(false);
+    const [syncResult, setSyncResult] = (0, react_1.useState)(null);
+    // Run poll-sync automatically when the Jira page loads and after every manual refresh
+    (0, react_1.useEffect)(() => {
+        (0, api_1.apiFetch)('/api/jira/poll-sync', { method: 'POST' })
+            .then(r => r.json())
+            .then((d) => {
+            if (d.synced > 0) {
+                // Some tickets were synced — refresh the issue list to reflect new statuses
+                bypassCache.current = true;
+                setReloadTick(t => t + 1);
+            }
+            setSyncResult(d);
+        })
+            .catch(() => { });
+    }, []);
+    async function handleSyncNow() {
+        setSyncing(true);
+        setSyncResult(null);
+        try {
+            const r = await (0, api_1.apiFetch)('/api/jira/poll-sync', { method: 'POST' });
+            const d = await r.json();
+            setSyncResult(d);
+            if (d.synced > 0) {
+                bypassCache.current = true;
+                setReloadTick(t => t + 1);
+            }
+        }
+        catch {
+            /* non-fatal */
+        }
+        finally {
+            setSyncing(false);
+        }
+    }
     // ── Filter / sort / search state ─────────────────────────────────────────
     const [search, setSearch] = (0, react_1.useState)('');
     const [projectFilter, setProjectFilter] = (0, react_1.useState)('');
     const [statusFilter, setStatusFilter] = (0, react_1.useState)('');
     const [priorityFilter, setPriorityFilter] = (0, react_1.useState)('');
     const [assigneeFilter, setAssigneeFilter] = (0, react_1.useState)('');
+    const [page, setPage] = (0, react_1.useState)(1);
     const [sortKey, setSortKey] = (0, react_1.useState)('updated');
     const [sortDir, setSortDir] = (0, react_1.useState)('desc');
     // ── Derived filter options ────────────────────────────────────────────────
@@ -122,6 +160,7 @@ function JiraOverview() {
     const priorityOptions = (0, react_1.useMemo)(() => [...new Set(issues.map(i => i.fields?.priority?.name ?? '').filter(Boolean))].sort(), [issues]);
     const assigneeOptions = (0, react_1.useMemo)(() => [...new Set(issues.map(i => i.fields?.assignee?.displayName ?? '').filter(Boolean))].sort(), [issues]);
     // ── Filtered + sorted rows ────────────────────────────────────────────────
+    const pageSize = 5;
     const visible = (0, react_1.useMemo)(() => {
         console.log('[Jira useMemo] Computing visible rows from', issues.length, 'issues');
         let rows = [...issues]; // Create a copy to avoid mutating original
@@ -155,9 +194,35 @@ function JiraOverview() {
             }
             return sortDir === 'asc' ? cmp : -cmp;
         });
-        console.log('[Jira useMemo] Visible rows computed:', rows.length);
-        return rows;
-    }, [issues, search, projectFilter, statusFilter, priorityFilter, assigneeFilter, sortKey, sortDir]);
+        const start = (page - 1) * pageSize;
+        const paged = rows.slice(start, start + pageSize);
+        console.log('[Jira useMemo] Visible rows computed:', rows.length, 'page', page, 'pageSize', pageSize);
+        return paged;
+    }, [issues, search, projectFilter, statusFilter, priorityFilter, assigneeFilter, sortKey, sortDir, page]);
+    const totalPages = (0, react_1.useMemo)(() => {
+        const total = issues.filter((issue) => {
+            const q = search.toLowerCase().trim();
+            if (q && !(issue.key.toLowerCase().includes(q) || (issue.fields?.summary ?? '').toLowerCase().includes(q)))
+                return false;
+            if (projectFilter && (issue.fields?.project?.name ?? '') !== projectFilter)
+                return false;
+            if (statusFilter && (issue.fields?.status?.name ?? '') !== statusFilter)
+                return false;
+            if (priorityFilter && (issue.fields?.priority?.name ?? '') !== priorityFilter)
+                return false;
+            if (assigneeFilter && (issue.fields?.assignee?.displayName ?? '') !== assigneeFilter)
+                return false;
+            return true;
+        }).length;
+        return Math.max(1, Math.ceil(total / pageSize));
+    }, [issues, search, projectFilter, statusFilter, priorityFilter, assigneeFilter]);
+    (0, react_1.useEffect)(() => {
+        setPage(1);
+    }, [search, projectFilter, statusFilter, priorityFilter, assigneeFilter]);
+    (0, react_1.useEffect)(() => {
+        if (page > totalPages)
+            setPage(totalPages);
+    }, [page, totalPages]);
     // ── Fetch ─────────────────────────────────────────────────────────────────
     (0, react_1.useEffect)(() => {
         let cancelled = false;
@@ -255,7 +320,15 @@ function JiraOverview() {
         todo,
     });
     // ── Render ────────────────────────────────────────────────────────────────
-    return ((0, jsx_runtime_1.jsxs)("div", { "data-testid": "jira-overview", style: { minHeight: '100%' }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 20 }, children: [(0, jsx_runtime_1.jsx)("h2", { style: { fontSize: 22, fontWeight: 700, marginBottom: 4 }, children: "Jira" }), (0, jsx_runtime_1.jsx)("p", { style: { fontSize: 13, color: 'var(--text-muted)' }, children: "All tickets from your connected Jira instance." })] }), !notConnected && !loadError && ((0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 18 }, children: [(0, jsx_runtime_1.jsxs)("span", { style: { padding: '7px 12px', borderRadius: 999, background: 'rgba(99,102,241,0.16)', color: '#818cf8', fontSize: 12, fontWeight: 700 }, children: ["Total: ", issues.length] }), (0, jsx_runtime_1.jsxs)("span", { style: { padding: '7px 12px', borderRadius: 999, background: 'rgba(52,211,153,0.16)', color: '#34d399', fontSize: 12, fontWeight: 700 }, children: ["Resolved: ", resolved] }), (0, jsx_runtime_1.jsxs)("span", { style: { padding: '7px 12px', borderRadius: 999, background: 'rgba(248,113,113,0.16)', color: '#f87171', fontSize: 12, fontWeight: 700 }, children: ["Open: ", todo] })] })), !notConnected && ((0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16, alignItems: 'center' }, children: [(0, jsx_runtime_1.jsx)("input", { type: "search", placeholder: "Search key or summary\u2026", value: search, onChange: e => setSearch(e.target.value), style: INPUT_STYLE }), (0, jsx_runtime_1.jsxs)("select", { value: projectFilter, onChange: e => setProjectFilter(e.target.value), style: SELECT_STYLE, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All projects" }), projectOptions.map(p => (0, jsx_runtime_1.jsx)("option", { value: p, children: p }, p))] }), (0, jsx_runtime_1.jsxs)("select", { value: statusFilter, onChange: e => setStatusFilter(e.target.value), style: SELECT_STYLE, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All statuses" }), statusOptions.map(s => (0, jsx_runtime_1.jsx)("option", { value: s, children: s }, s))] }), (0, jsx_runtime_1.jsxs)("select", { value: priorityFilter, onChange: e => setPriorityFilter(e.target.value), style: SELECT_STYLE, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All priorities" }), priorityOptions.map(p => (0, jsx_runtime_1.jsx)("option", { value: p, children: p }, p))] }), (0, jsx_runtime_1.jsxs)("select", { value: assigneeFilter, onChange: e => setAssigneeFilter(e.target.value), style: SELECT_STYLE, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All assignees" }), assigneeOptions.map(a => (0, jsx_runtime_1.jsx)("option", { value: a, children: a }, a))] }), (0, jsx_runtime_1.jsx)("button", { type: "button", onClick: () => { bypassCache.current = true; setReloadTick(t => t + 1); }, style: { padding: '7px 14px', borderRadius: 6, border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', cursor: 'pointer', fontSize: 12 }, children: "\u21BA Refresh" }), !loading && ((0, jsx_runtime_1.jsxs)("span", { style: { fontSize: 12, color: 'var(--text-muted)', marginLeft: 4 }, children: [visible.length, " result", visible.length !== 1 ? 's' : ''] }))] })), notConnected ? ((0, jsx_runtime_1.jsxs)("div", { style: { padding: '24px 20px', borderRadius: 10, background: 'rgba(99,102,241,0.07)', border: '1px solid rgba(99,102,241,0.2)', fontSize: 14, color: 'var(--text-muted)' }, children: ["\uD83D\uDD17 Connect your Jira account from", ' ', (0, jsx_runtime_1.jsx)("a", { href: "/settings", style: { color: '#818cf8', textDecoration: 'none', fontWeight: 600 }, children: "Settings" }), ' ', "to view your tickets here."] })) : loading ? ((0, jsx_runtime_1.jsx)("div", { style: { padding: '40px 0', color: 'var(--text-muted)', fontSize: 14 }, children: "Loading Jira tickets\u2026" })) : loadError ? ((0, jsx_runtime_1.jsx)("div", { style: { padding: '14px 18px', borderRadius: 8, background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.2)', color: '#f87171', fontSize: 13 }, children: loadError })) : visible.length === 0 ? ((0, jsx_runtime_1.jsx)("div", { style: { padding: '40px 0', color: 'var(--text-muted)', fontSize: 14 }, children: "No tickets match the current filters." })) : (
+    return ((0, jsx_runtime_1.jsxs)("div", { "data-testid": "jira-overview", style: { minHeight: '100%' }, children: [(0, jsx_runtime_1.jsxs)("div", { style: { marginBottom: 20 }, children: [(0, jsx_runtime_1.jsx)("h2", { style: { fontSize: 22, fontWeight: 700, marginBottom: 4 }, children: "Jira" }), (0, jsx_runtime_1.jsx)("p", { style: { fontSize: 13, color: 'var(--text-muted)' }, children: "All tickets from your connected Jira instance." })] }), !notConnected && !loadError && ((0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 18 }, children: [(0, jsx_runtime_1.jsxs)("span", { style: { padding: '7px 12px', borderRadius: 999, background: 'rgba(99,102,241,0.16)', color: '#818cf8', fontSize: 12, fontWeight: 700 }, children: ["Total: ", issues.length] }), (0, jsx_runtime_1.jsxs)("span", { style: { padding: '7px 12px', borderRadius: 999, background: 'rgba(52,211,153,0.16)', color: '#34d399', fontSize: 12, fontWeight: 700 }, children: ["Resolved: ", resolved] }), (0, jsx_runtime_1.jsxs)("span", { style: { padding: '7px 12px', borderRadius: 999, background: 'rgba(248,113,113,0.16)', color: '#f87171', fontSize: 12, fontWeight: 700 }, children: ["Open: ", todo] })] })), !notConnected && ((0, jsx_runtime_1.jsxs)("div", { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16, alignItems: 'center' }, children: [(0, jsx_runtime_1.jsx)("input", { type: "search", placeholder: "Search key or summary\u2026", value: search, onChange: e => setSearch(e.target.value), style: INPUT_STYLE }), (0, jsx_runtime_1.jsxs)("select", { value: projectFilter, onChange: e => setProjectFilter(e.target.value), style: SELECT_STYLE, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All projects" }), projectOptions.map(p => (0, jsx_runtime_1.jsx)("option", { value: p, children: p }, p))] }), (0, jsx_runtime_1.jsxs)("select", { value: statusFilter, onChange: e => setStatusFilter(e.target.value), style: SELECT_STYLE, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All statuses" }), statusOptions.map(s => (0, jsx_runtime_1.jsx)("option", { value: s, children: s }, s))] }), (0, jsx_runtime_1.jsxs)("select", { value: priorityFilter, onChange: e => setPriorityFilter(e.target.value), style: SELECT_STYLE, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All priorities" }), priorityOptions.map(p => (0, jsx_runtime_1.jsx)("option", { value: p, children: p }, p))] }), (0, jsx_runtime_1.jsxs)("select", { value: assigneeFilter, onChange: e => setAssigneeFilter(e.target.value), style: SELECT_STYLE, children: [(0, jsx_runtime_1.jsx)("option", { value: "", children: "All assignees" }), assigneeOptions.map(a => (0, jsx_runtime_1.jsx)("option", { value: a, children: a }, a))] }), (0, jsx_runtime_1.jsx)("button", { type: "button", onClick: () => { bypassCache.current = true; setReloadTick(t => t + 1); }, style: { padding: '7px 14px', borderRadius: 6, border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', cursor: 'pointer', fontSize: 12 }, children: "\u21BA Refresh" }), (0, jsx_runtime_1.jsx)("button", { type: "button", onClick: handleSyncNow, disabled: syncing, title: "Check all linked Jira tickets and resolve any that are Done in Jira", style: {
+                            padding: '7px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+                            border: '1px solid rgba(99,102,241,0.4)',
+                            background: syncing ? 'rgba(99,102,241,0.05)' : 'rgba(99,102,241,0.12)',
+                            color: '#818cf8', cursor: syncing ? 'not-allowed' : 'pointer',
+                            opacity: syncing ? 0.7 : 1,
+                        }, children: syncing ? '⏳ Syncing…' : '⚡ Sync from Jira' }), syncResult && ((0, jsx_runtime_1.jsxs)("span", { style: { fontSize: 12, color: 'var(--text-muted)' }, children: [syncResult.synced > 0
+                                ? (0, jsx_runtime_1.jsxs)("span", { style: { color: '#34d399', fontWeight: 600 }, children: ["\u2713 ", syncResult.synced, " resolved"] })
+                                : (0, jsx_runtime_1.jsx)("span", { children: "No new resolutions" }), syncResult.failed > 0 && (0, jsx_runtime_1.jsxs)("span", { style: { color: '#f87171', marginLeft: 6 }, children: [syncResult.failed, " failed"] })] })), !loading && ((0, jsx_runtime_1.jsxs)("span", { style: { fontSize: 12, color: 'var(--text-muted)', marginLeft: 4 }, children: [visible.length, " result", visible.length !== 1 ? 's' : ''] }))] })), notConnected ? ((0, jsx_runtime_1.jsxs)("div", { style: { padding: '24px 20px', borderRadius: 10, background: 'rgba(99,102,241,0.07)', border: '1px solid rgba(99,102,241,0.2)', fontSize: 14, color: 'var(--text-muted)' }, children: ["\uD83D\uDD17 Connect your Jira account from", ' ', (0, jsx_runtime_1.jsx)("a", { href: "/settings", style: { color: '#818cf8', textDecoration: 'none', fontWeight: 600 }, children: "Settings" }), ' ', "to view your tickets here."] })) : loading ? ((0, jsx_runtime_1.jsx)("div", { style: { padding: '40px 0', color: 'var(--text-muted)', fontSize: 14 }, children: "Loading Jira tickets\u2026" })) : loadError ? ((0, jsx_runtime_1.jsx)("div", { style: { padding: '14px 18px', borderRadius: 8, background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.2)', color: '#f87171', fontSize: 13 }, children: loadError })) : visible.length === 0 ? ((0, jsx_runtime_1.jsx)("div", { style: { padding: '40px 0', color: 'var(--text-muted)', fontSize: 14 }, children: "No tickets match the current filters." })) : (
             /* ── Table ─────────────────────────────────────────────────────── */
             (0, jsx_runtime_1.jsx)("div", { style: { overflowX: 'auto', borderRadius: 10, border: '1px solid var(--card-border)' }, children: (0, jsx_runtime_1.jsxs)("table", { style: { width: '100%', borderCollapse: 'collapse', background: 'var(--surface)' }, children: [(0, jsx_runtime_1.jsx)("thead", { children: (0, jsx_runtime_1.jsxs)("tr", { children: [(0, jsx_runtime_1.jsx)("th", { style: TH_STYLE, children: "Issue Key" }), (0, jsx_runtime_1.jsx)("th", { style: { ...TH_STYLE, minWidth: 260 }, children: "Summary" }), (0, jsx_runtime_1.jsx)("th", { style: TH_STYLE, children: "Project" }), (0, jsx_runtime_1.jsxs)("th", { style: { ...TH_STYLE, cursor: 'pointer', userSelect: 'none' }, onClick: () => handleSort('status'), children: ["Status ", (0, jsx_runtime_1.jsx)(SortArrow, { k: "status" })] }), (0, jsx_runtime_1.jsxs)("th", { style: { ...TH_STYLE, cursor: 'pointer', userSelect: 'none' }, onClick: () => handleSort('priority'), children: ["Priority ", (0, jsx_runtime_1.jsx)(SortArrow, { k: "priority" })] }), (0, jsx_runtime_1.jsx)("th", { style: TH_STYLE, children: "Assignee" }), (0, jsx_runtime_1.jsxs)("th", { style: { ...TH_STYLE, cursor: 'pointer', userSelect: 'none' }, onClick: () => handleSort('created'), children: ["Created ", (0, jsx_runtime_1.jsx)(SortArrow, { k: "created" })] }), (0, jsx_runtime_1.jsxs)("th", { style: { ...TH_STYLE, cursor: 'pointer', userSelect: 'none' }, onClick: () => handleSort('updated'), children: ["Updated ", (0, jsx_runtime_1.jsx)(SortArrow, { k: "updated" })] }), (0, jsx_runtime_1.jsx)("th", { style: { ...TH_STYLE, textAlign: 'right' }, children: "Actions" })] }) }), (0, jsx_runtime_1.jsx)("tbody", { children: visible.map((issue, idx) => {
                                 const isLast = idx === visible.length - 1;
@@ -277,6 +350,6 @@ function JiraOverview() {
                                                     color: '#38bdf8', background: 'rgba(56,189,248,0.07)',
                                                     textDecoration: 'none', fontSize: 12, whiteSpace: 'nowrap',
                                                 }, children: "Open in Jira \u2197" }) })] }, issue.id));
-                            }) })] }) }))] }));
+                            }) })] }) })), !notConnected && !loading && !loadError && totalPages > 1 && ((0, jsx_runtime_1.jsx)(PaginationControls_1.PaginationControls, { currentPage: page, totalPages: totalPages, onPageChange: setPage }))] }));
 }
 //# sourceMappingURL=JiraOverview.js.map

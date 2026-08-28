@@ -16,10 +16,11 @@ export declare const API_BASE_URL: string;
  *  e.g. http://airbrake.s3-website-us-east-1.amazonaws.com
  */
 export declare const FRONTEND_BASE_URL: string;
-/** Build a deep-link URL to a specific error in Airbrake.
- *  Uses HashRouter format: <origin>/#/breaks/<hash>?project_name=<project>
+/** Build a deep-link URL to a specific error occurrence in Airbrake.
+ *  Uses HashRouter format: <origin>/#/breaks/<hash>?project_name=<project>&log_id=<id>
+ *  log_id targets the exact occurrence so the modal opens that specific row.
  */
-export declare function buildAirbrakeErrorUrl(errorHash: string, projectName?: string): string;
+export declare function buildAirbrakeErrorUrl(errorHash: string, projectName?: string, logId?: string | null): string;
 export declare function getDeviceId(): string;
 /** Register the 401 handler. Called once by AuthProvider on mount. */
 export declare function setOnUnauthorized(handler: () => void): void;

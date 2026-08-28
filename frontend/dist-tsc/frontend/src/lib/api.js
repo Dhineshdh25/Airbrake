@@ -30,13 +30,19 @@ exports.API_BASE_URL = typeof __API_BASE_URL__ !== 'undefined' ? __API_BASE_URL_
 exports.FRONTEND_BASE_URL = typeof __FRONTEND_BASE_URL__ !== 'undefined'
     ? __FRONTEND_BASE_URL__
     : window.location.origin;
-/** Build a deep-link URL to a specific error in Airbrake.
- *  Uses HashRouter format: <origin>/#/breaks/<hash>?project_name=<project>
+/** Build a deep-link URL to a specific error occurrence in Airbrake.
+ *  Uses HashRouter format: <origin>/#/breaks/<hash>?project_name=<project>&log_id=<id>
+ *  log_id targets the exact occurrence so the modal opens that specific row.
  */
-function buildAirbrakeErrorUrl(errorHash, projectName) {
+function buildAirbrakeErrorUrl(errorHash, projectName, logId) {
     const base = exports.FRONTEND_BASE_URL.replace(/\/$/, '');
-    const qs = projectName ? `?project_name=${encodeURIComponent(projectName)}` : '';
-    return `${base}/#/breaks/${errorHash}${qs}`;
+    const qs = new URLSearchParams();
+    if (projectName)
+        qs.set('project_name', projectName);
+    if (logId)
+        qs.set('log_id', logId);
+    const qsStr = qs.toString();
+    return `${base}/#/breaks/${errorHash}${qsStr ? `?${qsStr}` : ''}`;
 }
 // ─── Stable device identity ───────────────────────────────────────────────────
 // Generated once per browser profile, never rotated.
@@ -58,8 +64,25 @@ function getDeviceId() {
     return _deviceId || _ensureDeviceId();
 }
 // ─── CSRF helper ──────────────────────────────────────────────────────────────
-/** Read the csrf_token cookie (not HttpOnly, so JS can access it). */
+/**
+ * Return the current CSRF token for attaching to state-changing requests.
+ *
+ * Cross-domain deployments (frontend on S3, backend on Lambda):
+ *   JavaScript cannot read cookies set by a different domain.
+ *   The CSRF token is therefore stored in memory by AuthContext after it
+ *   is received from the /api/auth/me response body.
+ *   We import getCsrfTokenMemory() from AuthContext for this purpose.
+ *
+ * Same-origin deployments (Vite proxy, localhost):
+ *   Falls back to reading document.cookie directly.
+ */
+const AuthContext_1 = require("../auth/AuthContext");
 function getCsrfToken() {
+    // Primary: in-memory store populated from /api/auth/me response body.
+    const mem = (0, AuthContext_1.getCsrfTokenMemory)();
+    if (mem)
+        return mem;
+    // Fallback: document.cookie works in same-origin setups only.
     const match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]*)/);
     return match ? decodeURIComponent(match[1]) : '';
 }
@@ -117,7 +140,9 @@ async function apiFetch(path, init) {
         // Stable device identity — always present, seeded at module load time.
         'X-Device-ID': getDeviceId(),
     };
-    // Attach CSRF token for state-changing methods
+    // Attach CSRF token for state-changing methods.
+    // Always attach when the token is available — the backend accepts it
+    // from the header regardless of whether the cookie is also present.
     if (CSRF_METHODS.has(method)) {
         const csrf = getCsrfToken();
         if (csrf) {

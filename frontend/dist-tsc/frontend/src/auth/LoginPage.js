@@ -39,7 +39,9 @@ function LoginPage() {
                         color: '#ef4444',
                     }, children: authError === 'access_denied'
                         ? 'Access denied. Your account is not provisioned for this application.'
-                        : `Authentication failed: ${authError.replace(/_/g, ' ')}` })), (0, jsx_runtime_1.jsxs)("button", { onClick: handleGoogleLogin, style: {
+                        : authError === 'organization_only'
+                            ? 'Access denied. Please sign in using your @mpslimited.com account.'
+                            : `Authentication failed: ${authError.replace(/_/g, ' ')}` })), (0, jsx_runtime_1.jsxs)("button", { onClick: handleGoogleLogin, style: {
                         width: '100%',
                         padding: '11px',
                         background: 'var(--accent)',

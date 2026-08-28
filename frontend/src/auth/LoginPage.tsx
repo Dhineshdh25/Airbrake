@@ -54,6 +54,8 @@ export function LoginPage() {
           }}>
             {authError === 'access_denied'
               ? 'Access denied. Your account is not provisioned for this application.'
+              : authError === 'organization_only'
+                ? 'Access denied. Please sign in using your @mpslimited.com account.'
               : `Authentication failed: ${authError.replace(/_/g, ' ')}`}
           </div>
         )}
