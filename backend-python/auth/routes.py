@@ -32,6 +32,7 @@ from .middleware import (
     SESSION_COOKIE_NAME,
     generate_csrf_token,
     get_current_user,
+    normalize_organization_email,
 )
 from .session_store import (
     cleanup_expired_sessions,
@@ -292,6 +293,12 @@ def google_callback():
     if not email_verified:
         logger.warning("[Auth Callback] Email not verified for sub=%s", subject)
         return redirect(f"{frontend_url}?auth_error=email_not_verified")
+
+    normalized_email = normalize_organization_email(email)
+    if normalized_email is None:
+        logger.warning("[Auth Callback] Non-organization email rejected for sub=%s", subject)
+        return redirect(f"{frontend_url}?auth_error=organization_only")
+    email = normalized_email
 
     # 5. Look up user in Aurora DSQL — auto-create if not found
     user = find_by_oauth_subject(provider, subject)

@@ -15,6 +15,7 @@ Provides:
 import functools
 import logging
 import os
+import re
 import secrets
 from typing import Optional, Set, Tuple, Any
 
@@ -45,6 +46,12 @@ _CSRF_EXEMPT_PREFIXES = (
     "/api/jira/webhook",              # Server-to-server Jira webhook
     "/api/jira/callback",             # OAuth redirect from Atlassian
     "/api/jira/poll-sync",            # Can be called by scheduler with no session
+)
+
+_ORGANIZATION_DOMAIN = "mpslimited.com"
+_EMAIL_PATTERN = re.compile(
+    r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+"
+    r"(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@([^\s@]+)$"
 )
 
 # Paths that do NOT require authentication
@@ -130,6 +137,18 @@ def _is_production() -> bool:
     return env_name in {"production", "prod", "staging"}
 
 
+def normalize_organization_email(email: object) -> Optional[str]:
+    """Return a normalized organization email, or None if it is invalid."""
+    if not isinstance(email, str):
+        return None
+
+    normalized = email.strip().lower()
+    match = _EMAIL_PATTERN.fullmatch(normalized)
+    if not match or match.group(1) != _ORGANIZATION_DOMAIN:
+        return None
+    return normalized
+
+
 # ── Dev session tokens (only active when DEV_AUTH=1 in non-production) ────────
 _DEV_SESSIONS = {
     "dev-token-admin": {"userId": "dev-admin", "role": "admin"},
@@ -213,6 +232,10 @@ def get_current_user() -> Optional[dict]:
 
     user = find_by_id(user_id)
     if not user:
+        return None
+
+    if normalize_organization_email(user.get("email")) is None:
+        logger.warning("[Auth] User %s is not an organization account", user_id)
         return None
 
     # Validate that role stored in DB is still valid
