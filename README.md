@@ -138,6 +138,22 @@ npm install
 npm run dev            # starts on http://localhost:3000 (proxies /api to Lambda)
 ```
 
+For local Google login, run the Python backend on port 5000 and the Vite
+frontend on port 3000. Copy the environment examples to `.env` files and use:
+
+```text
+Frontend: VITE_API_BASE_URL=http://localhost:5000
+          VITE_FRONTEND_URL=http://localhost:3000
+Backend:  APP_ENV=development
+          FRONTEND_URL=http://localhost:3000
+          ALLOWED_ORIGINS=http://localhost:3000
+          GOOGLE_CALLBACK_URL=http://localhost:5000/api/auth/google/callback
+          DEV_AUTH=0
+```
+
+Register `http://localhost:5000/api/auth/google/callback` as an authorized
+redirect URI for the Google OAuth client. Do not commit secrets in `.env`.
+
 ---
 
 ## Key API Endpoints

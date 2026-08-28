@@ -62,5 +62,10 @@ Since `psycopg2-binary` is large, add it as a Lambda Layer and only zip your `.p
 
 ```bash
 pip install -r requirements.txt
-python -c "from app import app; app.run(port=3001, debug=True)"
+python -c "from app import app; app.run(host='127.0.0.1', port=5000, debug=True)"
 ```
+
+Set `APP_ENV=development`, `FRONTEND_URL=http://localhost:3000`,
+`ALLOWED_ORIGINS=http://localhost:3000`,
+`GOOGLE_CALLBACK_URL=http://localhost:5000/api/auth/google/callback`, and
+`DEV_AUTH=0` in the local `.env`. Register the callback URL in Google Cloud.

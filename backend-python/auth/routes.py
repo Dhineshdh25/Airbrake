@@ -185,6 +185,13 @@ def _auth_error_redirect(frontend_url: str, error: str, *, clear_session: bool =
     return response
 
 
+def _trusted_redirect_uri(redirect_uri: str) -> str:
+    """Allow only application-relative return paths after OAuth."""
+    if not redirect_uri.startswith("/") or redirect_uri.startswith("//"):
+        return "/dashboard"
+    return redirect_uri
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # GET /api/auth/google — Start OAuth flow
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -200,7 +207,7 @@ def google_login():
     Query params:
       redirect_uri (optional) — frontend path to return to after login
     """
-    redirect_uri = request.args.get("redirect_uri", "/dashboard")
+    redirect_uri = _trusted_redirect_uri(request.args.get("redirect_uri", "/dashboard"))
 
     try:
         state = generate_state()

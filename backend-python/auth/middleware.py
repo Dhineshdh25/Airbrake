@@ -234,7 +234,7 @@ def get_current_user() -> Optional[dict]:
     if not user:
         return None
 
-    if normalize_organization_email(user.get("email")) is None:
+    if user.get("oauth_provider") != "dev" and normalize_organization_email(user.get("email")) is None:
         logger.warning("[Auth] User %s is not an organization account", user_id)
         return None
 

@@ -9,8 +9,8 @@ const FRONTEND_URL = 'http://airbrake.s3-website-us-east-1.amazonaws.com';
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
-  const apiTarget      = env.VITE_API_BASE_URL  || LAMBDA_URL;
-  const frontendTarget = env.VITE_FRONTEND_URL  || FRONTEND_URL;
+  const apiTarget      = env.VITE_API_BASE_URL  || (mode === 'production' ? LAMBDA_URL : 'http://localhost:5000');
+  const frontendTarget = env.VITE_FRONTEND_URL || (mode === 'production' ? FRONTEND_URL : 'http://localhost:3000');
 
   return {
     base: '/',
@@ -36,7 +36,7 @@ export default defineConfig(({ mode }) => {
       port: 3000,
       host: '0.0.0.0',
       proxy: {
-        // REST API — proxied to Lambda (avoids CORS issues in local dev)
+        // REST API — proxied to the configured backend in local dev.
         '/api': {
           target: apiTarget,
           changeOrigin: true,

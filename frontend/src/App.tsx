@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { HashRouter, Navigate, Route, Routes, useNavigate, useSearchParams } from 'react-router-dom';
+import { HashRouter, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import { ProtectedRoute } from './auth/ProtectedRoute';
 import { LoginPage } from './auth/LoginPage';
