@@ -54,7 +54,10 @@ function OAuthRedirectHandler() {
 
     // Handle auth error — redirect to login with error
     if (authError) {
-      navigate(`/auth/login?auth_error=${authError}`, { replace: true });
+      const knownError = ['access_denied', 'organization_only', 'email_not_verified'].includes(authError)
+        ? authError
+        : 'authentication_failed';
+      navigate(`/auth/login?auth_error=${knownError}`, { replace: true });
       return;
     }
 
@@ -67,6 +70,12 @@ function OAuthRedirectHandler() {
   }, [navigate, refresh]);
 
   return null;
+}
+
+function RootRoute() {
+  const { user, loading } = useAuth();
+  if (loading) return null;
+  return <Navigate to={user ? '/dashboard' : '/auth/login'} replace />;
 }
 
 /**
@@ -86,7 +95,6 @@ function AppShell() {
 
   return (
     <Layout>
-      <OAuthRedirectHandler />
       <Routes>
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/logs" element={<LogStream />} />
@@ -94,15 +102,13 @@ function AppShell() {
         <Route path="/breaks/:errorHash" element={<ErrorDetail />} />
         <Route path="/jira" element={<JiraOverview />} />
         <Route path="/settings" element={<Settings role={role} />} />
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/" element={<RootRoute />} />
       </Routes>
     </Layout>
   );
 }
 
 function LoginWithError() {
-  const [params] = useSearchParams();
-  // Forward auth_error from the real URL into the login page
   return <LoginPage />;
 }
 
@@ -112,6 +118,7 @@ export default function App() {
       <AuthProvider>
         <HashRouter>
           <AuthApiWiring />
+          <OAuthRedirectHandler />
           <Routes>
             <Route path="/auth/login" element={<LoginWithError />} />
             <Route

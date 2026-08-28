@@ -15,6 +15,8 @@ interface AuthState {
   user: AuthUser | null;
   /** True while the initial /api/auth/me check is in flight. */
   loading: boolean;
+  /** A network/server failure while checking the session, if any. */
+  initializationError: string | null;
   /** Force a re-check of the session (e.g. after OAuth redirect). */
   refresh: () => void;
   /** Log out — calls POST /api/auth/logout, clears state. */
@@ -38,6 +40,7 @@ interface AuthState {
 const AuthContext = createContext<AuthState>({
   user: null,
   loading: true,
+  initializationError: null,
   refresh: () => {},
   logout: async () => {},
   onUnauthorized: () => {},
@@ -68,11 +71,13 @@ export function getCsrfTokenMemory(): string {
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [initializationError, setInitializationError] = useState<string | null>(null);
   // Ref so getCsrfToken() closure always reads the latest value without
   // forcing a re-render on every token update.
   const csrfRef = useRef('');
 
   const checkSession = useCallback(async () => {
+    setInitializationError(null);
     try {
       const url = `${API_BASE_URL}/api/auth/me`;
       const res = await fetch(url, { credentials: 'include' });
@@ -95,9 +100,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser(null);
         csrfRef.current = '';
         setCsrfTokenMemory('');
+        if (res.status >= 500) {
+          setInitializationError('The authentication service is unavailable. Please try again.');
+        }
       }
     } catch {
       setUser(null);
+      setInitializationError('Unable to check your sign-in session. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -141,7 +150,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, loading, refresh, logout, onUnauthorized, getCsrfToken }}>
+    <AuthContext.Provider value={{ user, loading, initializationError, refresh, logout, onUnauthorized, getCsrfToken }}>
       {children}
     </AuthContext.Provider>
   );

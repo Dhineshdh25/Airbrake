@@ -8,7 +8,7 @@ interface ProtectedRouteProps {
 
 export function ProtectedRoute({ children }: ProtectedRouteProps) {
   const location = useLocation();
-  const { user, loading } = useAuth();
+  const { user, loading, initializationError, refresh } = useAuth();
 
   // Show nothing while checking the session
   if (loading) {
@@ -24,6 +24,26 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
         fontSize: 14,
       }}>
         Loading…
+      </div>
+    );
+  }
+
+  if (initializationError && !user) {
+    return (
+      <div style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 16,
+        background: 'var(--bg)',
+        color: 'var(--text-muted)',
+        fontFamily: 'var(--font)',
+        fontSize: 14,
+      }}>
+        <div>{initializationError}</div>
+        <button onClick={refresh}>Try again</button>
       </div>
     );
   }
