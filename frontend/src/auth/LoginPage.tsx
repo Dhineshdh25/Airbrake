@@ -5,7 +5,6 @@ import { useAuth } from './AuthContext';
 
 const AUTH_ERROR_MESSAGES: Record<string, string> = {
   access_denied: 'Access denied. Your account is not provisioned for this application.',
-  organization_only: 'Access restricted. Please sign in with your organization Google account.',
   email_not_verified: 'Authentication failed. Your Google email must be verified.',
 };
 
