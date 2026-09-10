@@ -2,7 +2,8 @@ import React from 'react';
 import type { Role } from '@portal/shared';
 export interface AuthUser {
     id: string;
-    email: string;
+    /** username for local-auth users; falls back to email for legacy DB users */
+    username: string;
     role: Role;
 }
 interface AuthState {
@@ -10,7 +11,16 @@ interface AuthState {
     user: AuthUser | null;
     /** True while the initial /api/auth/me check is in flight. */
     loading: boolean;
-    /** Force a re-check of the session (e.g. after OAuth redirect). */
+    /** A network/server failure while checking the session, if any. */
+    initializationError: string | null;
+    /**
+     * Log in with username + password.
+     * Calls POST /api/auth/login, stores the session token/CSRF token,
+     * updates the user state, and returns true on success.
+     * The password is never stored anywhere — only the session token is kept.
+     */
+    login: (username: string, password: string) => Promise<boolean>;
+    /** Force a re-check of the session (e.g. after Jira OAuth redirect). */
     refresh: () => void;
     /** Log out — calls POST /api/auth/logout, clears state. */
     logout: () => Promise<void>;
@@ -21,11 +31,8 @@ interface AuthState {
      *
      * In cross-domain deployments (frontend on S3, backend on Lambda) the
      * browser cannot read cookies set by a different domain, so we store the
-     * CSRF token returned in the /api/auth/me JSON body in a module-level ref.
-     * This avoids localStorage (too persistent) and sessionStorage (fine for
-     * CSRF tokens but requires an explicit key).
-     *
-     * The token is never null once the user is authenticated.
+     * CSRF token returned in the /api/auth/me (or /api/auth/login) JSON body
+     * in a module-level ref.
      */
     getCsrfToken: () => string;
 }

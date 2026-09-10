@@ -40,7 +40,7 @@ _CSRF_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # The blanket "/api/" exemption has been REMOVED (security fix).
 _CSRF_EXEMPT_PREFIXES = (
     "/api/ingest/",                   # External services with API-key auth
-    "/api/auth/google/callback",      # GET redirect from Google
+    "/api/auth/login",                # Public login endpoint — no session yet
     "/api/auth/logout",               # Logout is session-destructive, exempt
     "/api/jira/webhook",              # Server-to-server Jira webhook
     "/api/jira/callback",             # OAuth redirect from Atlassian
@@ -50,7 +50,7 @@ _CSRF_EXEMPT_PREFIXES = (
 # Paths that do NOT require authentication
 _PUBLIC_PATHS = (
     "/api/health",
-    "/api/auth/",
+    "/api/auth/",   # all /api/auth/* routes handle their own auth requirements
     "/api/ingest/",
     "/api/docs",
 )
@@ -186,7 +186,14 @@ def get_current_user() -> Optional[dict]:
     Resolve the current authenticated user from the request.
 
     Checks g.current_user first (cached from earlier middleware call).
-    Returns dict with {id, email, role, oauth_provider, oauth_subject} or None.
+    Returns a dict with at least {id, role} — plus username / email
+    depending on the auth backend that created the session.
+
+    Resolution order:
+      1. g.current_user cache (already resolved this request)
+      2. Dev tokens (DEV_AUTH=1, non-production only)
+      3. Session lookup → local users.json (for local-auth user IDs)
+      4. Session lookup → Aurora DSQL user table (legacy / future use)
     """
     # Already resolved in this request?
     if hasattr(g, "current_user") and g.current_user is not None:
@@ -211,17 +218,56 @@ def get_current_user() -> Optional[dict]:
     if not user_id:
         return None
 
-    user = find_by_id(user_id)
-    if not user:
+    # ── Local-auth path: look up user from bundled users.json ────────────────
+    # Local users are stored in users.json; their IDs are never in Aurora DSQL.
+    # We resolve them by ID before falling back to the DB.
+    user = _find_local_user_by_id(user_id)
+    if user:
+        if user.get("role") not in VALID_ROLES:
+            logger.warning("[Auth] Local user %s has invalid role '%s'", user_id, user.get("role"))
+            return None
+        g.current_user = user
+        return user
+
+    # ── DB path: look up user from Aurora DSQL ───────────────────────────────
+    db_user = find_by_id(user_id)
+    if not db_user:
         return None
 
     # Validate that role stored in DB is still valid
-    if user.get("role") not in VALID_ROLES:
-        logger.warning("[Auth] User %s has invalid role '%s'", user_id, user.get("role"))
+    if db_user.get("role") not in VALID_ROLES:
+        logger.warning("[Auth] User %s has invalid role '%s'", user_id, db_user.get("role"))
         return None
 
-    g.current_user = user
-    return user
+    g.current_user = db_user
+    return db_user
+
+
+def _find_local_user_by_id(user_id: str) -> Optional[dict]:
+    """
+    Look up a user from the bundled users.json by their id field.
+
+    Returns a normalised user dict or None.
+    Never raises — silently returns None on any error so the DB fallback
+    is always attempted.
+    """
+    try:
+        from .local_auth import load_users
+        for u in load_users():
+            if str(u.get("id", "")) == str(user_id):
+                if not u.get("active", False):
+                    return None
+                return {
+                    "id": u["id"],
+                    "username": u.get("username", ""),
+                    "email": u.get("username", ""),   # alias so callers that read 'email' still work
+                    "role": u.get("role", "viewer"),
+                    "oauth_provider": "local",
+                    "oauth_subject": u.get("username", ""),
+                }
+    except Exception as exc:
+        logger.warning("[Auth] Local user lookup failed: %s", exc)
+    return None
 
 
 # ── Authorization Decorators ──────────────────────────────────────────────────

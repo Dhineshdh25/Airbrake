@@ -6,7 +6,8 @@ import type { Role } from '@portal/shared';
 
 export interface AuthUser {
   id: string;
-  email: string;
+  /** username for local-auth users; falls back to email for legacy DB users */
+  username: string;
   role: Role;
 }
 
@@ -17,7 +18,14 @@ interface AuthState {
   loading: boolean;
   /** A network/server failure while checking the session, if any. */
   initializationError: string | null;
-  /** Force a re-check of the session (e.g. after OAuth redirect). */
+  /**
+   * Log in with username + password.
+   * Calls POST /api/auth/login, stores the session token/CSRF token,
+   * updates the user state, and returns true on success.
+   * The password is never stored anywhere — only the session token is kept.
+   */
+  login: (username: string, password: string) => Promise<boolean>;
+  /** Force a re-check of the session (e.g. after Jira OAuth redirect). */
   refresh: () => void;
   /** Log out — calls POST /api/auth/logout, clears state. */
   logout: () => Promise<void>;
@@ -28,11 +36,8 @@ interface AuthState {
    *
    * In cross-domain deployments (frontend on S3, backend on Lambda) the
    * browser cannot read cookies set by a different domain, so we store the
-   * CSRF token returned in the /api/auth/me JSON body in a module-level ref.
-   * This avoids localStorage (too persistent) and sessionStorage (fine for
-   * CSRF tokens but requires an explicit key).
-   *
-   * The token is never null once the user is authenticated.
+   * CSRF token returned in the /api/auth/me (or /api/auth/login) JSON body
+   * in a module-level ref.
    */
   getCsrfToken: () => string;
 }
@@ -41,6 +46,7 @@ const AuthContext = createContext<AuthState>({
   user: null,
   loading: true,
   initializationError: null,
+  login: async () => false,
   refresh: () => {},
   logout: async () => {},
   onUnauthorized: () => {},
@@ -76,6 +82,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // forcing a re-render on every token update.
   const csrfRef = useRef('');
 
+  /** Store CSRF token from any auth response in both the ref and module-level var */
+  const _storeCsrf = useCallback((token: string) => {
+    csrfRef.current = token;
+    setCsrfTokenMemory(token);
+  }, []);
+
+  /** Clear all session state */
+  const _clearSession = useCallback(() => {
+    setUser(null);
+    csrfRef.current = '';
+    setCsrfTokenMemory('');
+  }, []);
+
   const checkSession = useCallback(async () => {
     setInitializationError(null);
     try {
@@ -84,33 +103,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (res.ok) {
         const data = await res.json();
         if (data.authenticated && data.user) {
-          setUser(data.user);
-          // Persist the CSRF token that the backend includes in the response
-          // body — the only reliable cross-domain delivery mechanism.
+          setUser({
+            id: data.user.id,
+            username: data.user.username ?? data.user.email ?? data.user.id,
+            role: data.user.role,
+          });
+          // Persist the CSRF token returned in the response body
           if (data.csrf_token) {
-            csrfRef.current = data.csrf_token;
-            setCsrfTokenMemory(data.csrf_token);
+            _storeCsrf(data.csrf_token);
           }
         } else {
-          setUser(null);
-          csrfRef.current = '';
-          setCsrfTokenMemory('');
+          _clearSession();
         }
       } else {
-        setUser(null);
-        csrfRef.current = '';
-        setCsrfTokenMemory('');
+        _clearSession();
         if (res.status >= 500) {
           setInitializationError('The authentication service is unavailable. Please try again.');
         }
       }
     } catch {
-      setUser(null);
+      _clearSession();
       setInitializationError('Unable to check your sign-in session. Please try again.');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [_storeCsrf, _clearSession]);
 
   useEffect(() => {
     checkSession();
@@ -120,6 +137,58 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setLoading(true);
     checkSession();
   }, [checkSession]);
+
+  /**
+   * Log in with username + password.
+   *
+   * Sends POST /api/auth/login. On success:
+   *   - session cookie is set by the backend response
+   *   - CSRF token is stored in memory from the response body
+   *   - user state is updated
+   *   - returns true
+   *
+   * The password is NEVER stored in localStorage, sessionStorage, cookies,
+   * or global React state. Only the session token (via cookie) persists.
+   *
+   * Returns false on invalid credentials (401). Throws on network failure.
+   */
+  const login = useCallback(async (username: string, password: string): Promise<boolean> => {
+    const url = `${API_BASE_URL}/api/auth/login`;
+    const res = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      // Only username and password are sent — role is never sent from the client
+      body: JSON.stringify({ username, password }),
+    });
+
+    if (res.status === 401) {
+      return false;
+    }
+
+    if (!res.ok) {
+      throw new Error(`Login failed with status ${res.status}`);
+    }
+
+    const data = await res.json();
+    if (!data.authenticated || !data.user) {
+      return false;
+    }
+
+    // Update auth state from the login response
+    setUser({
+      id: data.user.id,
+      username: data.user.username ?? data.user.id,
+      role: data.user.role,
+    });
+
+    // Store CSRF token from login response body (cross-domain delivery)
+    if (data.csrf_token) {
+      _storeCsrf(data.csrf_token);
+    }
+
+    return true;
+  }, [_storeCsrf]);
 
   const logout = useCallback(async () => {
     try {
@@ -134,23 +203,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // Best-effort — clear local state regardless
     }
-    setUser(null);
-    csrfRef.current = '';
-    setCsrfTokenMemory('');
-  }, []);
+    _clearSession();
+  }, [_clearSession]);
 
   const onUnauthorized = useCallback(() => {
-    setUser(null);
-    csrfRef.current = '';
-    setCsrfTokenMemory('');
-  }, []);
+    _clearSession();
+  }, [_clearSession]);
 
   const getCsrfToken = useCallback((): string => {
     return csrfRef.current || getCsrfTokenMemory();
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, loading, initializationError, refresh, logout, onUnauthorized, getCsrfToken }}>
+    <AuthContext.Provider value={{
+      user,
+      loading,
+      initializationError,
+      login,
+      refresh,
+      logout,
+      onUnauthorized,
+      getCsrfToken,
+    }}>
       {children}
     </AuthContext.Provider>
   );
@@ -164,8 +238,6 @@ export function useAuth(): AuthState {
 
 // ─── Legacy getCsrfToken export ────────────────────────────────────────────
 // Kept for backward compatibility — existing callers use this.
-// In cross-domain setups this reads from the in-memory store; in same-origin
-// it also tries document.cookie as fallback.
 export function getCsrfToken(): string {
   return getCsrfTokenMemory();
 }

@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { HashRouter, Navigate, Route, Routes, useNavigate, useSearchParams } from 'react-router-dom';
+import { HashRouter, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import { ProtectedRoute } from './auth/ProtectedRoute';
 import { LoginPage } from './auth/LoginPage';
@@ -14,52 +14,35 @@ import { Settings } from './settings/Settings';
 import { setOnUnauthorized } from './lib/api';
 
 /**
- * Handles OAuth callback redirects from the backend.
+ * Handles Jira OAuth callback redirects from the backend.
  *
  * With HashRouter all routes are under the hash (e.g. /#/settings) so S3
  * always serves index.html for the root path and the hash never reaches S3.
  *
  * The backend redirects to:
  *   https://airbrake.s3-website.../  ?jira_connected=true
- *   https://airbrake.s3-website.../  ?auth_success=true&redirect=/dashboard
+ *   https://airbrake.s3-website.../  ?jira_error=<code>
  *
- * The SPA loads at root, this handler reads the query params, then
- * navigates within React Router.
+ * The SPA loads at root, this handler reads the query params from the real
+ * URL, then navigates within React Router.
+ *
+ * Note: Google OAuth auth_success handling has been removed. Login now uses
+ * the local username+password form (POST /api/auth/login) which responds
+ * directly with a JSON session — no OAuth redirect round-trip needed.
  */
-function OAuthRedirectHandler() {
+function JiraOAuthRedirectHandler() {
   const navigate = useNavigate();
-  const { refresh } = useAuth();
 
   useEffect(() => {
     // Read params from the real URL query string (before the hash)
     const params = new URLSearchParams(window.location.search);
     const jiraConnected = params.get('jira_connected');
     const jiraError     = params.get('jira_error');
-    const authSuccess   = params.get('auth_success');
-    const authError     = params.get('auth_error');
-    const authRedirect  = params.get('redirect');
 
-    if (!jiraConnected && !jiraError && !authSuccess && !authError) return;
+    if (!jiraConnected && !jiraError) return;
 
     // Clean the real URL (remove query params — they're now handled by React)
     window.history.replaceState({}, '', window.location.pathname);
-
-    // Handle auth success — refresh the session state
-    if (authSuccess) {
-      refresh();
-      const target = authRedirect ?? '/dashboard';
-      navigate(target, { replace: true });
-      return;
-    }
-
-    // Handle auth error — redirect to login with error
-    if (authError) {
-      const knownError = ['access_denied', 'organization_only', 'email_not_verified'].includes(authError)
-        ? authError
-        : 'authentication_failed';
-      navigate(`/auth/login?auth_error=${knownError}`, { replace: true });
-      return;
-    }
 
     // Handle Jira OAuth result
     if (jiraConnected) {
@@ -67,7 +50,7 @@ function OAuthRedirectHandler() {
     } else if (jiraError) {
       navigate(`/settings?jira_error=${jiraError}`, { replace: true });
     }
-  }, [navigate, refresh]);
+  }, [navigate]);
 
   return null;
 }
@@ -108,19 +91,15 @@ function AppShell() {
   );
 }
 
-function LoginWithError() {
-  return <LoginPage />;
-}
-
 export default function App() {
   return (
     <ThemeProvider>
       <AuthProvider>
         <HashRouter>
           <AuthApiWiring />
-          <OAuthRedirectHandler />
+          <JiraOAuthRedirectHandler />
           <Routes>
-            <Route path="/auth/login" element={<LoginWithError />} />
+            <Route path="/auth/login" element={<LoginPage />} />
             <Route
               path="/*"
               element={

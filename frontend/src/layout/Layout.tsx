@@ -228,7 +228,7 @@ export function Layout({ children }: Props) {
               textOverflow: 'ellipsis',
               whiteSpace: 'nowrap',
             }}>
-              {user.email}
+              {user.username}
             </div>
           )}
           <button

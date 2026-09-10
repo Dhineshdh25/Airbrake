@@ -867,7 +867,7 @@ function ResponsibleUserSelector({
 // ── Non-admin own-row section ─────────────────────────────────────────────────
 // Shows only the current user's own email, role, and their Jira ticket counts.
 
-function OwnUserSection({ currentUser }: { currentUser: { id: string; email: string; role: string } }) {
+function OwnUserSection({ currentUser }: { currentUser: { id: string; username: string; role: string } }) {
   return (
     <section style={S.card}>
       <div style={S.cardHeader}>
@@ -885,7 +885,7 @@ function OwnUserSection({ currentUser }: { currentUser: { id: string; email: str
         <tbody>
           <tr>
             <td style={{ ...S.td, borderBottom: 'none' }}>
-              {currentUser.email}
+              {currentUser.username}
             </td>
             <td style={{ ...S.td, borderBottom: 'none', color: 'var(--text-muted)' }}>
               {currentUser.role}

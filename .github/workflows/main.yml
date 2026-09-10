@@ -107,7 +107,7 @@ jobs:
           # Jira OAuth integration package (Phase 1)
           cp -r jira/ package/jira/
 
-          # Auth package (Google OAuth 2.0 / session management)
+          # Auth package (local username+password / session management)
           cp -r auth/ package/auth/
 
           # Verify ai/ made it in with all expected modules
@@ -147,7 +147,8 @@ jobs:
             package/jira/nova_extractor.py \
             package/jira/sync_pipeline.py \
             package/auth/__init__.py \
-            package/auth/google_oauth.py \
+            package/auth/local_auth.py \
+            package/auth/users.json \
             package/auth/middleware.py \
             package/auth/routes.py \
             package/auth/session_store.py \
@@ -198,6 +199,14 @@ jobs:
 
           echo "--- auth/ verified inside lambda.zip ---"
 
+          # Fail if users.json is not present in the zip — auth cannot work without it
+          if ! unzip -l ../lambda.zip | grep -q "auth/users.json"; then
+            echo "ERROR: auth/users.json not found in lambda.zip — local auth will fail"
+            exit 1
+          fi
+
+          echo "--- auth/users.json verified inside lambda.zip ---"
+
       # ── Configure AWS credentials ─────────────────────────────────────────────
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
@@ -225,8 +234,6 @@ jobs:
       # Secret values come from GitHub Secrets — never exposed in logs.
       - name: Configure Lambda environment variables
         env:
-          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           ATLASSIAN_CLIENT_ID: ${{ secrets.ATLASSIAN_CLIENT_ID }}
           ATLASSIAN_CLIENT_SECRET: ${{ secrets.ATLASSIAN_CLIENT_SECRET }}
         run: |
@@ -237,9 +244,6 @@ jobs:
                 "DSQL_ENDPOINT": "ezt2bkam5s4kjre73r25easkcu.dsql.us-east-1.on.aws",
                 "DSQL_REGION": "us-east-1",
                 "APP_ENV": "production",
-                "GOOGLE_CLIENT_ID": "'"$GOOGLE_CLIENT_ID"'",
-                "GOOGLE_CLIENT_SECRET": "'"$GOOGLE_CLIENT_SECRET"'",
-                "GOOGLE_CALLBACK_URL": "https://l7xnpjosjvyrlx55dxrwdvx5g40okeyd.lambda-url.us-east-1.on.aws/api/auth/google/callback",
                 "FRONTEND_URL": "http://airbrake.s3-website-us-east-1.amazonaws.com",
                 "ALLOWED_ORIGINS": "http://airbrake.s3-website-us-east-1.amazonaws.com",
                 "ATLASSIAN_CLIENT_ID": "'"$ATLASSIAN_CLIENT_ID"'",

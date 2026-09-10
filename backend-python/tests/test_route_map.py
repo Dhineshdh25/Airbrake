@@ -1,6 +1,9 @@
 """
 Route map tests — verifies Flask registers the expected auth routes
 and that wrong methods return proper 405 responses (not 500).
+
+Google OAuth routes (/api/auth/google, /api/auth/google/callback) have been
+removed and replaced with POST /api/auth/login (local username+password auth).
 """
 
 import os
@@ -10,9 +13,6 @@ os.environ['DEV_AUTH'] = '1'
 os.environ['APP_ENV'] = 'development'
 os.environ['ALLOWED_ORIGINS'] = 'http://localhost:3000'
 os.environ['FRONTEND_URL'] = 'http://localhost:3000'
-os.environ['GOOGLE_CLIENT_ID'] = 'test-client-id.apps.googleusercontent.com'
-os.environ['GOOGLE_CLIENT_SECRET'] = 'test-secret'
-os.environ['GOOGLE_CALLBACK_URL'] = 'http://localhost:5000/api/auth/google/callback'
 
 import pytest
 from app import app
@@ -41,15 +41,13 @@ class TestAuthRouteMapRegistration:
             route_map[rule.rule] = methods
         return route_map
 
-    def test_google_login_route_exists(self):
+    def test_login_route_exists(self):
+        """POST /api/auth/login must be registered."""
         route_map = self._get_route_map()
-        assert '/api/auth/google' in route_map
-        assert 'GET' in route_map['/api/auth/google']
-
-    def test_google_callback_route_exists(self):
-        route_map = self._get_route_map()
-        assert '/api/auth/google/callback' in route_map
-        assert 'GET' in route_map['/api/auth/google/callback']
+        assert '/api/auth/login' in route_map, \
+            "POST /api/auth/login route is missing from the route map"
+        assert 'POST' in route_map['/api/auth/login'], \
+            "/api/auth/login must accept POST"
 
     def test_auth_me_route_exists(self):
         route_map = self._get_route_map()
@@ -61,6 +59,29 @@ class TestAuthRouteMapRegistration:
         assert '/api/auth/logout' in route_map
         assert 'POST' in route_map['/api/auth/logout']
 
+    def test_auth_csrf_route_exists(self):
+        route_map = self._get_route_map()
+        assert '/api/auth/csrf' in route_map
+        assert 'GET' in route_map['/api/auth/csrf']
+
+    def test_google_login_route_removed(self):
+        """GET /api/auth/google must NOT be registered — Google auth removed."""
+        route_map = self._get_route_map()
+        assert '/api/auth/google' not in route_map, \
+            "Google OAuth route /api/auth/google must be removed"
+
+    def test_google_callback_route_removed(self):
+        """GET /api/auth/google/callback must NOT be registered."""
+        route_map = self._get_route_map()
+        assert '/api/auth/google/callback' not in route_map, \
+            "Google OAuth callback /api/auth/google/callback must be removed"
+
+    def test_jira_oauth_routes_present(self):
+        """Jira OAuth routes must still exist."""
+        route_map = self._get_route_map()
+        assert '/api/jira/callback' in route_map, \
+            "Jira OAuth callback /api/jira/callback must still be registered"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 405 METHOD NOT ALLOWED — PROPER STATUS CODE (NOT 500)
@@ -69,13 +90,12 @@ class TestAuthRouteMapRegistration:
 class TestMethodNotAllowedReturns405:
     """Verify that wrong HTTP methods return 405, not 500."""
 
-    def test_post_to_google_login_returns_405(self, client):
-        """POST /api/auth/google should return 405 (route only accepts GET)."""
-        r = client.post('/api/auth/google')
+    def test_get_to_login_returns_405(self, client):
+        """GET /api/auth/login should return 405 (route only accepts POST)."""
+        r = client.get('/api/auth/login')
         assert r.status_code == 405
         data = r.get_json()
         assert data['error'] == 'Method Not Allowed'
-        # Must NOT contain traceback or exception details
         assert 'traceback' not in data
         assert 'exception' not in data
 
@@ -103,13 +123,21 @@ class TestMethodNotAllowedReturns405:
         assert data['error'] == 'Method Not Allowed'
         assert 'traceback' not in data
 
-    def test_delete_to_google_callback_returns_405(self, client):
-        """DELETE /api/auth/google/callback should return 405."""
-        r = client.delete('/api/auth/google/callback')
-        assert r.status_code == 405
-        data = r.get_json()
-        assert data['error'] == 'Method Not Allowed'
-        assert 'traceback' not in data
+    def test_google_route_is_not_functional(self, client):
+        """
+        GET /api/auth/google must not work — no Google OAuth handler exists.
+        Flask may return 404 (no match) or 405 (OPTIONS-only match from CORS).
+        Both mean the Google login route is absent.
+        """
+        r = client.get('/api/auth/google')
+        assert r.status_code in (404, 405), \
+            f"Expected 404 or 405 for removed Google route, got {r.status_code}"
+
+    def test_google_callback_is_not_functional(self, client):
+        """GET /api/auth/google/callback must not work."""
+        r = client.get('/api/auth/google/callback')
+        assert r.status_code in (404, 405), \
+            f"Expected 404 or 405 for removed Google callback, got {r.status_code}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -124,7 +152,6 @@ class TestErrorResponseSafety:
         r = client.patch('/api/auth/me')
         assert r.status_code == 405
         data = r.get_json()
-        # Only allowed keys
         assert set(data.keys()) == {'error'}
         assert data['error'] == 'Method Not Allowed'
 

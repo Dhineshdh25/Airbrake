@@ -155,7 +155,7 @@ function Layout({ children }) {
                                     overflow: 'hidden',
                                     textOverflow: 'ellipsis',
                                     whiteSpace: 'nowrap',
-                                }, children: user.email })), (0, jsx_runtime_1.jsxs)("button", { onClick: handleLogout, style: {
+                                }, children: user.username })), (0, jsx_runtime_1.jsxs)("button", { onClick: handleLogout, style: {
                                     width: '100%',
                                     display: 'flex',
                                     alignItems: 'center',

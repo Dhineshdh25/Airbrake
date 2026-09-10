@@ -1,5 +1,5 @@
 """
-Authentication package — Google OAuth 2.0 / OIDC login.
+Authentication package — local username + password login.
 
 Registers the auth_bp Flask blueprint at /api/auth.
 Provides middleware for session-based authentication, CSRF protection,
