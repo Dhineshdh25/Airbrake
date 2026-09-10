@@ -145,7 +145,7 @@ describe('Login page — username + password form', () => {
     const signInButton = screen.getByRole('button', { name: /sign in/i });
 
     fireEvent.change(usernameInput, { target: { value: 'admin' } });
-    fireEvent.change(passwordInput, { target: { value: 'mpsaiteam' } });
+    fireEvent.change(passwordInput, { target: { value: 'admin123' } });
     fireEvent.click(signInButton);
 
     await waitFor(() => {
@@ -159,7 +159,7 @@ describe('Login page — username + password form', () => {
 
       const body = JSON.parse(init.body as string);
       expect(body.username).toBe('admin');
-      expect(body.password).toBe('mpsaiteam');
+      expect(body.password).toBe('admin123');
       // role must NOT be sent from the frontend — backend reads it from users.json
       expect(body.role).toBeUndefined();
     });
@@ -178,12 +178,12 @@ describe('Login page — username + password form', () => {
     const passwordInput = getPasswordInput();
 
     fireEvent.change(usernameInput, { target: { value: 'admin' } });
-    fireEvent.change(passwordInput, { target: { value: 'mpsaiteam' } });
+    fireEvent.change(passwordInput, { target: { value: 'admin123' } });
     fireEvent.click(screen.getByRole('button', { name: /sign in/i }));
 
     await waitFor(() => {
-      expect(JSON.stringify(localStorage)).not.toContain('mpsaiteam');
-      expect(JSON.stringify(sessionStorage)).not.toContain('mpsaiteam');
+      expect(JSON.stringify(localStorage)).not.toContain('admin123');
+      expect(JSON.stringify(sessionStorage)).not.toContain('admin123');
     });
   });
 
@@ -203,7 +203,7 @@ describe('Login page — username + password form', () => {
     const passwordInput = getPasswordInput();
 
     fireEvent.change(usernameInput, { target: { value: 'admin' } });
-    fireEvent.change(passwordInput, { target: { value: 'mpsaiteam' } });
+    fireEvent.change(passwordInput, { target: { value: 'admin123' } });
     fireEvent.click(screen.getByRole('button', { name: /sign in/i }));
 
     expect(await screen.findByRole('button', { name: /signing in/i })).toBeDisabled();
@@ -244,7 +244,7 @@ describe('Login page — username + password form', () => {
     const passwordInput = getPasswordInput();
 
     fireEvent.change(usernameInput, { target: { value: 'admin' } });
-    fireEvent.change(passwordInput, { target: { value: 'mpsaiteam' } });
+    fireEvent.change(passwordInput, { target: { value: 'admin123' } });
     fireEvent.click(screen.getByRole('button', { name: /sign in/i }));
 
     expect(await screen.findByText(/unable to connect/i)).toBeInTheDocument();

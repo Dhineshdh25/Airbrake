@@ -3,7 +3,7 @@
     {
       "id": "USR001",
       "username": "admin",
-      "password_hash": "scrypt:32768:8:1$UjuieCVBYNAxLwv2$08715774493e2b66d2b4ccbdb890d628923383c62d231747139f14070daed34bca65c702b1e057008e737a1b06a81fd0569e9b8f9177b3ecc2441363c3ec1d43",
+      "password_hash": "scrypt:32768:8:1$lbZhDicYsvbfJBl6$b4b08db4ca3c9657ce629c1ebd7ae8c933a20d1091f049956b97a53626a57d2a770b8bd0ae14e02a3ef16fe1d5337ba6e96cd438fd9569c7afabdc558e17ed81",
       "role": "admin",
       "active": true
     }

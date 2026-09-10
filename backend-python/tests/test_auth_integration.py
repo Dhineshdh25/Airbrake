@@ -89,7 +89,7 @@ class TestLocalAuth:
     def test_correct_password_authenticates(self):
         """admin + correct password -> success."""
         from auth.local_auth import authenticate_user
-        user = authenticate_user("admin", "mpsaiteam")
+        user = authenticate_user("admin", "admin123")
         assert user is not None, "Correct credentials must authenticate"
         assert user["username"] == "admin"
         assert user["role"] == "admin"
@@ -103,20 +103,20 @@ class TestLocalAuth:
     def test_unknown_user_fails(self):
         """Unknown username -> None regardless of password."""
         from auth.local_auth import authenticate_user
-        assert authenticate_user("unknown", "mpsaiteam") is None
+        assert authenticate_user("unknown", "admin123") is None
         assert authenticate_user("hacker", "anypassword") is None
 
     def test_password_hash_not_returned_by_authenticate(self):
         """authenticate_user must never expose password_hash."""
         from auth.local_auth import authenticate_user
-        user = authenticate_user("admin", "mpsaiteam")
+        user = authenticate_user("admin", "admin123")
         assert user is not None
         assert "password_hash" not in user
 
     def test_admin_user_has_correct_role(self):
         """Authenticated admin must have role='admin'."""
         from auth.local_auth import authenticate_user
-        user = authenticate_user("admin", "mpsaiteam")
+        user = authenticate_user("admin", "admin123")
         assert user is not None
         assert user["role"] == "admin"
 
@@ -151,7 +151,7 @@ class TestLoginEndpoint:
             r = client.post(
                 '/api/auth/login',
                 content_type='application/json',
-                data=json.dumps({"username": "admin", "password": "mpsaiteam"}),
+                data=json.dumps({"username": "admin", "password": "admin123"}),
             )
         assert r.status_code == 200
         data = r.get_json()
@@ -225,7 +225,7 @@ class TestLoginEndpoint:
             r = client.post(
                 '/api/auth/login',
                 content_type='application/json',
-                data=json.dumps({"username": "admin", "password": "mpsaiteam"}),
+                data=json.dumps({"username": "admin", "password": "admin123"}),
             )
         body = r.get_data(as_text=True)
         assert "password_hash" not in body
@@ -242,7 +242,7 @@ class TestLoginEndpoint:
                 content_type='application/json',
                 data=json.dumps({
                     "username": "admin",
-                    "password": "mpsaiteam",
+                    "password": "admin123",
                     "role": "superadmin",   # attacker tries to elevate role
                 }),
             )
@@ -257,7 +257,7 @@ class TestLoginEndpoint:
             r = client.post(
                 '/api/auth/login',
                 content_type='application/json',
-                data=json.dumps({"username": "admin", "password": "mpsaiteam"}),
+                data=json.dumps({"username": "admin", "password": "admin123"}),
             )
         assert r.status_code == 200
         cookies = r.headers.getlist('Set-Cookie')
@@ -270,7 +270,7 @@ class TestLoginEndpoint:
             r = client.post(
                 '/api/auth/login',
                 content_type='application/json',
-                data=json.dumps({"username": "admin", "password": "mpsaiteam"}),
+                data=json.dumps({"username": "admin", "password": "admin123"}),
             )
         cookies = r.headers.getlist('Set-Cookie')
         csrf_cookies = [c for c in cookies if 'csrf_token=' in c]
@@ -413,7 +413,7 @@ class TestAuthMe:
             login_r = client.post(
                 '/api/auth/login',
                 content_type='application/json',
-                data=json.dumps({"username": "admin", "password": "mpsaiteam"}),
+                data=json.dumps({"username": "admin", "password": "admin123"}),
             )
             assert login_r.status_code == 200
 
@@ -466,7 +466,7 @@ class TestAuthLogout:
             client.post(
                 '/api/auth/login',
                 content_type='application/json',
-                data=json.dumps({"username": "admin", "password": "mpsaiteam"}),
+                data=json.dumps({"username": "admin", "password": "admin123"}),
             )
             # Logout
             r = client.post('/api/auth/logout')
